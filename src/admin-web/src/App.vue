@@ -1,6 +1,3 @@
-<script setup>
-</script>
-
 <template>
   <main class="placeholder">
     <h1>日程提醒管理后台</h1>
