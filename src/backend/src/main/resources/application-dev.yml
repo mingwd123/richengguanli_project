@@ -1,8 +1,12 @@
 spring:
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:dayliane}
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:dayliane}?useUnicode=true&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&createDatabaseIfNotExist=true
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:}
+    password: ${DB_PASSWORD:mysql}
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 0
 
 app:
   jwt:
@@ -13,3 +17,4 @@ app:
     model: ${AI_MODEL:}
     api-base-url: ${AI_API_BASE_URL:}
     api-key: ${AI_API_KEY:}
+
