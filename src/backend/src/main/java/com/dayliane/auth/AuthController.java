@@ -1,8 +1,6 @@
 package com.dayliane.auth;
 
 import com.dayliane.common.ApiResponse;
-import com.dayliane.common.BusinessException;
-import com.dayliane.common.DbStore;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,41 +9,44 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/auth")
 public class AuthController {
-    private final DbStore store;
+    private final AuthService authService;
 
-    public AuthController(DbStore store) {
-        this.store = store;
+    public AuthController(AuthService authService) {
+        this.authService = authService;
     }
 
     @PostMapping("/register")
     public ApiResponse<Map<String, Object>> register(@RequestBody Map<String, Object> req) {
-        long id = store.register(text(req, "phone"), text(req, "password"), textOr(req, "nickname", "User"), textOr(req, "timezone", "Asia/Shanghai"));
+        long id = authService.register(text(req, "phone"), text(req, "password"), textOr(req, "nickname", "User"), textOr(req, "timezone", "Asia/Shanghai"));
         return ApiResponse.success(tokens(id));
     }
 
     @PostMapping("/login")
-    public ApiResponse<Map<String, Object>> login(@RequestBody Map<String, Object> req) {
-        long id = store.login(text(req, "phone"), text(req, "password"));
-        return ApiResponse.success(tokens(id));
+    public ApiResponse<Map<String, Object>> login(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        String ip = clientIp(request);
+        return ApiResponse.success(authService.login(text(req, "phone"), text(req, "password"), ip));
     }
 
     @PostMapping("/refresh-token")
     public ApiResponse<Map<String, Object>> refresh(@RequestBody Map<String, Object> req) {
-        Long id = store.refreshUserId(text(req, "refreshToken"));
-        if (id == null) throw new BusinessException(401, "refresh token is invalid");
-        return ApiResponse.success(tokens(id));
+        return ApiResponse.success(authService.refreshToken(text(req, "refreshToken")));
     }
 
     @PostMapping("/logout")
     public ApiResponse<Map<String, Object>> logout(HttpServletRequest request) {
-        store.revokeAccessToken(request.getHeader("Authorization"));
+        authService.logout(request.getHeader("Authorization"));
         return ApiResponse.success(Map.of("ok", true));
     }
 
     private Map<String, Object> tokens(long userId) {
-        return Map.of("userId", userId, "accessToken", store.issueAccessToken(userId), "refreshToken", store.issueRefreshToken(userId), "expiresIn", 86400);
+        return Map.of("userId", userId, "accessToken", authService.issueAccessToken(userId), "refreshToken", authService.issueRefreshToken(userId), "expiresIn", 86400);
     }
 
     private static String text(Map<String, Object> req, String key) { return String.valueOf(req.getOrDefault(key, "")); }
     private static String textOr(Map<String, Object> req, String key, String fallback) { String v = text(req, key); return v.isBlank() ? fallback : v; }
+    private static String clientIp(HttpServletRequest request) {
+        String forwarded = request.getHeader("X-Forwarded-For");
+        if (forwarded != null && !forwarded.isBlank()) return forwarded.split(",")[0].trim();
+        return request.getRemoteAddr();
+    }
 }

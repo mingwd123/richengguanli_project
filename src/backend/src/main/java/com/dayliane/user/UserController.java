@@ -1,7 +1,7 @@
 package com.dayliane.user;
 
+import com.dayliane.auth.AuthService;
 import com.dayliane.common.ApiResponse;
-import com.dayliane.common.DbStore;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
@@ -10,36 +10,38 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/user")
 public class UserController {
-    private final DbStore store;
+    private final UserService userService;
+    private final AuthService authService;
 
-    public UserController(DbStore store) {
-        this.store = store;
+    public UserController(UserService userService, AuthService authService) {
+        this.userService = userService;
+        this.authService = authService;
     }
 
     @GetMapping("/profile")
     public ApiResponse<Map<String, Object>> profile(HttpServletRequest request) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.userView(userId));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(userService.userView(userId));
     }
 
     @PutMapping("/profile")
     public ApiResponse<Map<String, Object>> updateProfile(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        store.updateUserProfile(userId, req);
-        return ApiResponse.success(store.userView(userId));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        userService.updateUserProfile(userId, req);
+        return ApiResponse.success(userService.userView(userId));
     }
 
     @PutMapping("/password")
     public ApiResponse<Map<String, Object>> password(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        store.updatePassword(userId, String.valueOf(req.getOrDefault("oldPassword", "")), String.valueOf(req.getOrDefault("newPassword", "")));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        userService.updatePassword(userId, String.valueOf(req.getOrDefault("oldPassword", "")), String.valueOf(req.getOrDefault("newPassword", "")));
         return ApiResponse.success(Map.of("ok", true));
     }
 
     @PutMapping("/timezone")
     public ApiResponse<Map<String, Object>> timezone(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        store.updateTimezone(userId, String.valueOf(req.getOrDefault("timezone", "Asia/Shanghai")));
-        return ApiResponse.success(store.userView(userId));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        userService.updateTimezone(userId, String.valueOf(req.getOrDefault("timezone", "Asia/Shanghai")));
+        return ApiResponse.success(userService.userView(userId));
     }
 }

@@ -1,0 +1,203 @@
+DROP TABLE IF EXISTS ai_config;
+DROP TABLE IF EXISTS ai_usage_log;
+DROP TABLE IF EXISTS admin_operation_log;
+DROP TABLE IF EXISTS admin_user;
+DROP TABLE IF EXISTS notification;
+DROP TABLE IF EXISTS reminder;
+DROP TABLE IF EXISTS team_task_assignee;
+DROP TABLE IF EXISTS team_task;
+DROP TABLE IF EXISTS schedule;
+DROP TABLE IF EXISTS task_group;
+DROP TABLE IF EXISTS team_member;
+DROP TABLE IF EXISTS team;
+DROP TABLE IF EXISTS `user`;
+
+CREATE ALIAS IF NOT EXISTS UTC_TIMESTAMP FOR "com.dayliane.TestSqlFunctions.utcTimestamp";
+
+CREATE TABLE `user` (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  phone VARCHAR(20) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  nickname VARCHAR(50) NOT NULL,
+  avatar_url VARCHAR(500),
+  timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Shanghai',
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  deleted_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  invite_code VARCHAR(10) NOT NULL UNIQUE,
+  invite_code_expire_at DATETIME NOT NULL,
+  owner_id BIGINT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  deleted_at DATETIME,
+  deleted_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team_member (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  team_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'member',
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  removed_at DATETIME,
+  removed_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (team_id, user_id)
+);
+
+CREATE TABLE task_group (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT,
+  team_id BIGINT,
+  scope VARCHAR(20) NOT NULL,
+  name VARCHAR(50) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE schedule (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  description TEXT,
+  group_name VARCHAR(50) NOT NULL DEFAULT 'Default',
+  group_id BIGINT,
+  sort_order INT NOT NULL DEFAULT 0,
+  time_type VARCHAR(30) NOT NULL,
+  start_time DATETIME,
+  end_time DATETIME,
+  deadline_time DATETIME,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  deleted_at DATETIME,
+  deleted_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE reminder (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  target_type VARCHAR(30) NOT NULL,
+  target_id BIGINT NOT NULL,
+  remind_at DATETIME NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  sent_at DATETIME,
+  error_message TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team_task (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  team_id BIGINT NOT NULL,
+  creator_id BIGINT NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  description TEXT,
+  group_name VARCHAR(50),
+  group_id BIGINT,
+  sort_order INT NOT NULL DEFAULT 0,
+  start_time DATETIME,
+  deadline_time DATETIME,
+  status VARCHAR(30) NOT NULL DEFAULT 'active',
+  updated_by BIGINT,
+  time_updated_at DATETIME,
+  deleted_at DATETIME,
+  deleted_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team_task_assignee (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  assign_round INT NOT NULL DEFAULT 1,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  accepted_at DATETIME,
+  rejected_at DATETIME,
+  completed_at DATETIME,
+  reassigned_from_user_id BIGINT,
+  assigned_by BIGINT,
+  assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  status_updated_by BIGINT,
+  status_updated_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (task_id, user_id, assign_round)
+);
+
+CREATE TABLE notification (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  type VARCHAR(50) NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  content TEXT,
+  related_type VARCHAR(30),
+  related_id BIGINT,
+  reminder_id BIGINT,
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  read_at DATETIME,
+  deleted_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE admin_user (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'admin',
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  last_login_at DATETIME,
+  last_login_ip VARCHAR(45),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE admin_operation_log (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  admin_id BIGINT NOT NULL,
+  action VARCHAR(50) NOT NULL,
+  target_type VARCHAR(30),
+  target_id BIGINT,
+  before_data JSON,
+  after_data JSON,
+  ip_address VARCHAR(45),
+  user_agent TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ai_usage_log (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT,
+  feature_type VARCHAR(30) NOT NULL,
+  input_text TEXT,
+  output_text TEXT,
+  status VARCHAR(20) NOT NULL,
+  error_message TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE ai_config (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  provider VARCHAR(30) NOT NULL,
+  model_name VARCHAR(50) NOT NULL,
+  api_base_url VARCHAR(500),
+  api_key_masked VARCHAR(100),
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  remark TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

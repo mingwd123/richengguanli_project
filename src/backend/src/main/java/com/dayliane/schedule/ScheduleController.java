@@ -1,7 +1,7 @@
 package com.dayliane.schedule;
 
+import com.dayliane.auth.AuthService;
 import com.dayliane.common.ApiResponse;
-import com.dayliane.common.DbStore;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,16 +15,18 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/schedules")
 public class ScheduleController {
-    private final DbStore store;
+    private final ScheduleService scheduleService;
+    private final AuthService authService;
 
-    public ScheduleController(DbStore store) {
-        this.store = store;
+    public ScheduleController(ScheduleService scheduleService, AuthService authService) {
+        this.scheduleService = scheduleService;
+        this.authService = authService;
     }
 
     @PostMapping
     public ApiResponse<Map<String, Object>> create(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.createSchedule(userId, req));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.createSchedule(userId, req));
     }
 
     @GetMapping
@@ -33,26 +35,26 @@ public class ScheduleController {
                                                   @RequestParam(defaultValue = "20") int size,
                                                   @RequestParam(required = false) String status,
                                                   @RequestParam(name = "group_name", required = false) String groupName) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.listSchedules(userId, page, size, status, groupName));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName));
     }
 
     @GetMapping("/{id}")
     public ApiResponse<Map<String, Object>> detail(HttpServletRequest request, @PathVariable long id) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.requireSchedule(id, userId));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.requireSchedule(id, userId));
     }
 
     @PutMapping("/{id}")
     public ApiResponse<Map<String, Object>> update(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.updateSchedule(id, userId, req));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.updateSchedule(id, userId, req));
     }
 
     @DeleteMapping("/{id}")
     public ApiResponse<Map<String, Object>> delete(HttpServletRequest request, @PathVariable long id) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        store.deleteSchedule(id, userId);
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        scheduleService.deleteSchedule(id, userId);
         return ApiResponse.success(Map.of("ok", true));
     }
 
@@ -68,9 +70,9 @@ public class ScheduleController {
     @GetMapping("/calendar")
     @SuppressWarnings("unchecked")
     public ApiResponse<Map<String, Object>> calendar(HttpServletRequest request, @RequestParam int year, @RequestParam int month) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
         YearMonth ym = YearMonth.of(year, month);
-        List<Map<String, Object>> all = (List<Map<String, Object>>) store.listSchedules(userId, 1, 500, null, null).get("list");
+        List<Map<String, Object>> all = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 500, null, null).get("list");
         List<Map<String, Object>> days = new ArrayList<>();
         for (int day = 1; day <= ym.lengthOfMonth(); day++) {
             LocalDate date = ym.atDay(day);
@@ -87,13 +89,15 @@ public class ScheduleController {
     }
 
     private ApiResponse<Map<String, Object>> status(HttpServletRequest request, long id, String status) {
-        long userId = store.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(store.setScheduleStatus(id, userId, status));
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.setScheduleStatus(id, userId, status));
     }
 
     private static String primaryTime(Map<String, Object> item) {
         String deadline = String.valueOf(item.getOrDefault("deadlineTime", ""));
-        return deadline.isBlank() ? String.valueOf(item.getOrDefault("startTime", "")) : deadline;
+        if (!deadline.isBlank()) return deadline;
+        String end = String.valueOf(item.getOrDefault("endTime", ""));
+        return end.isBlank() ? String.valueOf(item.getOrDefault("startTime", "")) : end;
     }
 
     private static boolean sameDate(String iso, LocalDate date) {
