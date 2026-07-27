@@ -13,10 +13,9 @@ const task = ref<TeamTask | null>(null)
 const loading = ref(false)
 
 const isCreatorOrAdmin = computed(() => {
-  if (!task.value) return false
-  const myProfile = store.profile
-  if (!myProfile) return false
-  return task.value.creatorId === myProfile.id
+  if (!task.value || !store.profile) return false
+  const team = store.teams.find(t => t.id === task.value?.teamId)
+  return task.value.creatorId === store.profile.id || team?.myRole === 'owner' || team?.myRole === 'admin'
 })
 
 async function loadDetail() {
@@ -44,34 +43,12 @@ function handleTaskAction(action: string) {
   }
 }
 
-async function handleReassign(assignee: TeamTaskAssignee) {
-  const newUserId = prompt(`为 ${assignee.nickname} 重新分配执行人，请输入新的用户ID：`)
-  if (!newUserId) return
-  try {
-    await store.request(`/team-tasks/${props.id}/reassign`, {
-      method: 'POST',
-      body: JSON.stringify({ oldAssigneeUserId: assignee.userId, newAssigneeUserId: Number(newUserId) })
-    })
-    store.notify('已重新分配')
-    await loadDetail()
-  } catch (e: any) {
-    store.notify(e.message)
-  }
+function goReassign(assignee: TeamTaskAssignee) {
+  router.push(`/tasks/${props.id}/assignees/${assignee.userId}/reassign`)
 }
 
-async function handleCorrectStatus(assignee: TeamTaskAssignee) {
-  const newStatus = prompt(`修正 ${assignee.nickname} 的执行状态（pending / accepted / rejected / completed）：`, assignee.assignStatus)
-  if (!newStatus) return
-  try {
-    await store.request(`/team-tasks/${props.id}/assignees/${assignee.userId}/status`, {
-      method: 'PUT',
-      body: JSON.stringify({ assignStatus: newStatus })
-    })
-    store.notify('状态已修正')
-    await loadDetail()
-  } catch (e: any) {
-    store.notify(e.message)
-  }
+function goCorrectStatus(assignee: TeamTaskAssignee) {
+  router.push(`/tasks/${props.id}/assignees/${assignee.userId}/status`)
 }
 
 function handleDelete() {
@@ -154,11 +131,22 @@ onMounted(loadDetail)
           <small>第 {{ a.assignRound }} 轮</small>
           <div class="top-actions">
             <!-- rejected 执行人的重新分配入口 -->
-            <button v-if="a.assignStatus === 'rejected' && isCreatorOrAdmin" @click="handleReassign(a)">重新分配</button>
+            <button v-if="a.assignStatus === 'rejected' && isCreatorOrAdmin" @click="goReassign(a)">重新分配</button>
             <!-- 创建者/管理员修正执行人状态 -->
-            <button v-if="isCreatorOrAdmin" @click="handleCorrectStatus(a)">修正状态</button>
+            <button v-if="isCreatorOrAdmin" @click="goCorrectStatus(a)">修正状态</button>
           </div>
         </article>
+      </div>
+
+      <div style="margin-top:24px">
+        <h3>操作时间轴</h3>
+        <article v-for="event in task.events" :key="event.id" class="mini-row" style="margin-top:10px">
+          <div>
+            <strong>{{ event.actorName || '系统' }}{{ event.content }}</strong>
+            <small>{{ formatTime(event.createdAt) }}</small>
+          </div>
+        </article>
+        <p v-if="!task.events?.length" class="muted" style="padding:12px 0">暂无操作记录</p>
       </div>
 
       <!-- 创建者/管理员操作 -->

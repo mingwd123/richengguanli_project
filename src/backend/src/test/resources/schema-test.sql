@@ -139,6 +139,15 @@ CREATE TABLE team_task_assignee (
   UNIQUE (task_id, user_id, assign_round)
 );
 
+CREATE TABLE team_task_event (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  actor_id BIGINT,
+  event_type VARCHAR(50) NOT NULL,
+  content VARCHAR(500),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE notification (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
   user_id BIGINT NOT NULL,

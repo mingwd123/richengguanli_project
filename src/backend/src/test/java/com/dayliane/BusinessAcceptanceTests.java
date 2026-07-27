@@ -127,19 +127,23 @@ class BusinessAcceptanceTests {
         long allCompleted = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", "All done", "assigneeUserIds", List.of(b))));
         teamTaskService.teamTaskAssigneeTransition(allCompleted, b, "accepted", List.of("pending"));
         assertThat(teamTaskService.teamTaskAssigneeTransition(allCompleted, b, "completed", List.of("accepted"))).containsEntry("status", "completed");
+        assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_completed'", owner, allCompleted)).isEqualTo(1);
 
         long mixed = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", "Mixed result", "assigneeUserIds", List.of(b, c))));
         teamTaskService.teamTaskAssigneeTransition(mixed, b, "accepted", List.of("pending"));
         teamTaskService.teamTaskAssigneeTransition(mixed, b, "completed", List.of("accepted"));
         assertThat(teamTaskService.teamTaskAssigneeTransition(mixed, c, "rejected", List.of("pending"))).containsEntry("status", "completed");
+        assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_rejected'", owner, mixed)).isEqualTo(1);
 
-        long rejected = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", "Rejected", "assigneeUserIds", List.of(b, c))));
+        long rejected = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", "Rejected", "assigneeUserIds", List.of(b, c), "deadlineTime", future(2))));
         teamTaskService.teamTaskAssigneeTransition(rejected, b, "rejected", List.of("pending"));
         assertThat(teamTaskService.teamTaskAssigneeTransition(rejected, c, "rejected", List.of("pending"))).containsEntry("status", "all_rejected");
         assertThat(teamTaskService.reassignTeamTask(rejected, owner, b, d)).containsEntry("status", "active");
         assertThat(count("select count(*) from team_task_assignee where task_id=? and user_id=? and is_active=false", rejected, b)).isEqualTo(1);
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", rejected, d)).isEqualTo(1);
 
         assertThat(teamTaskService.cancelTeamTask(rejected, owner)).containsEntry("status", "cancelled");
+        assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_cancelled'", d, rejected)).isEqualTo(1);
         assertThat(teamTaskService.restoreTeamTask(rejected, owner)).containsEntry("status", "active");
     }
 

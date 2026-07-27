@@ -19,8 +19,8 @@ const isOwnerOrAdmin = computed(() => team.value?.myRole === 'owner' || team.val
 async function loadMembers() {
   loading.value = true
   try {
-    const data = await store.request<TeamMember[]>(`/teams/${props.id}/members`)
-    members.value = data
+    const data = await store.request<{ list: TeamMember[] }>(`/teams/${props.id}/members`)
+    members.value = data.list || []
   } catch (e: any) {
     store.notify(e.message || '加载成员列表失败')
   } finally {

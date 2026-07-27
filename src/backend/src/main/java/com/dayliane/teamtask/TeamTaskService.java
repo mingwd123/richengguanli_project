@@ -53,9 +53,11 @@ public class TeamTaskService {
             return ps;
         }, keyHolder);
         long taskId = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        recordEvent(taskId, userId, "created", "创建了任务");
         for (Object v : assigneeIds) {
             long assigneeUserId = number(v);
             jdbc.update("insert into team_task_assignee (task_id,user_id,assign_round,is_active,status,assigned_by,assigned_at) values (?,?,1,true,'pending',?,utc_timestamp())", taskId, assigneeUserId, userId);
+            recordEvent(taskId, userId, "assigned", "分配给 " + requireUserEntity(assigneeUserId).get("nickname"));
             jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)", assigneeUserId, "task_assigned", "New team task", "You have been assigned: " + title, "team_task", taskId);
             createTeamTaskReminders(assigneeUserId, taskId, req);
         }
@@ -95,6 +97,7 @@ public class TeamTaskService {
         Map<String, Object> task = requireTeamTask(taskId);
         permissionService.requireActiveMember(longValue(task.get("teamId")), userId);
         task.put("assignees", teamTaskAssignees(taskId));
+        task.put("events", teamTaskEvents(taskId));
         task.put("creator", userView(longValue(task.get("creatorId"))));
         return task;
     }
@@ -108,7 +111,9 @@ public class TeamTaskService {
         if (!allowedFrom.contains(current)) throw new BusinessException(400, "invalid status transition");
         String timeColumn = switch (next) { case "accepted" -> "accepted_at"; case "rejected" -> "rejected_at"; case "completed" -> "completed_at"; default -> "status_updated_at"; };
         jdbc.update("update team_task_assignee set status=?, " + timeColumn + "=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=?", next, userId, a.get("id"));
+        recordEvent(taskId, userId, next, actionLabel(next));
         recalculateTeamTaskStatus(taskId);
+        notifyCreator(task, userId, next);
         if ("rejected".equals(next)) {
             cancelPendingReminders("team_task", taskId, userId);
         }
@@ -140,8 +145,11 @@ public class TeamTaskService {
     @Transactional
     public Map<String, Object> cancelTeamTask(long taskId, long userId) {
         requireTeamTaskManager(taskId, userId);
+        Map<String, Object> task = requireTeamTask(taskId);
         jdbc.update("update team_task set status='cancelled', updated_by=? where id=?", userId, taskId);
+        recordEvent(taskId, userId, "cancelled", "取消了任务");
         cancelPendingReminders("team_task", taskId, null);
+        notifyAssignees(taskId, userId, "task_cancelled", "Task cancelled", "Task cancelled: " + task.get("title"));
         return teamTaskSummary(taskId, userId);
     }
 
@@ -150,6 +158,7 @@ public class TeamTaskService {
         Map<String, Object> task = requireTeamTask(taskId);
         if (!permissionService.canManageTeam(longValue(task.get("teamId")), userId)) throw new BusinessException(403, "only team manager can restore task");
         jdbc.update("update team_task set status='active', updated_by=? where id=?", userId, taskId);
+        recordEvent(taskId, userId, "restored", "恢复了任务");
         recalculateTeamTaskStatus(taskId);
         return teamTaskSummary(taskId, userId);
     }
@@ -172,6 +181,8 @@ public class TeamTaskService {
                 taskId, newUserId, ((Number) old.get("assignRound")).intValue() + 1, originalUserId, userId);
         jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
                 newUserId, "task_assigned", "Task reassigned", "You have been assigned: " + task.get("title"), "team_task", taskId);
+        recordEvent(taskId, userId, "reassigned", "将任务从 " + requireUserEntity(originalUserId).get("nickname") + " 重新分配给 " + requireUserEntity(newUserId).get("nickname"));
+        createReassignedReminder(newUserId, taskId, task);
         recalculateTeamTaskStatus(taskId);
         return teamTaskDetail(taskId, userId);
     }
@@ -257,6 +268,31 @@ public class TeamTaskService {
         };
     }
 
+    private List<Map<String, Object>> teamTaskEvents(long taskId) {
+        return jdbc.query("select e.id,e.event_type eventType,e.content,e.created_at createdAt,u.nickname actorName from team_task_event e left join `user` u on u.id=e.actor_id where e.task_id=? order by e.created_at desc,e.id desc", (rs, i) -> {
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("id", rs.getLong("id"));
+            event.put("eventType", rs.getString("eventType"));
+            event.put("content", rs.getString("content"));
+            event.put("createdAt", iso(rs.getTimestamp("createdAt")));
+            event.put("actorName", rs.getString("actorName"));
+            return event;
+        }, taskId);
+    }
+
+    private void recordEvent(long taskId, long actorId, String eventType, String content) {
+        jdbc.update("insert into team_task_event (task_id,actor_id,event_type,content) values (?,?,?,?)", taskId, actorId, eventType, content);
+    }
+
+    private String actionLabel(String action) {
+        return switch (action) {
+            case "accepted" -> "接受了任务";
+            case "rejected" -> "拒绝了任务";
+            case "completed" -> "完成了任务";
+            default -> "更新了任务";
+        };
+    }
+
     private void recalculateTeamTaskStatus(long taskId) {
         List<String> statuses = jdbc.queryForList("select status from team_task_assignee where task_id=? and is_active=true", String.class, taskId);
         if (statuses.isEmpty()) {
@@ -279,6 +315,29 @@ public class TeamTaskService {
     private void cancelPendingReminders(String type, long id, Long userId) {
         if (userId == null) jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and status='pending'", type, id);
         else jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and user_id=? and status='pending'", type, id, userId);
+    }
+
+    private void notifyCreator(Map<String, Object> task, long operatorId, String next) {
+        long creatorId = longValue(task.get("creatorId"));
+        if (creatorId == operatorId) return;
+        String actorName = String.valueOf(requireUserEntity(operatorId).get("nickname"));
+        String action = switch (next) { case "accepted" -> "accepted"; case "rejected" -> "rejected"; case "completed" -> "completed"; default -> "updated"; };
+        jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
+                creatorId, "task_" + action, "Task " + action, actorName + " " + action + ": " + task.get("title"), "team_task", task.get("id"));
+    }
+
+    private void notifyAssignees(long taskId, long operatorId, String type, String title, String content) {
+        for (Map<String, Object> assignee : teamTaskAssignees(taskId)) {
+            long assigneeUserId = longValue(assignee.get("userId"));
+            if (assigneeUserId == operatorId) continue;
+            jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
+                    assigneeUserId, type, title, content, "team_task", taskId);
+        }
+    }
+
+    private void createReassignedReminder(long userId, long taskId, Map<String, Object> task) {
+        String deadlineTime = String.valueOf(task.getOrDefault("deadlineTime", ""));
+        if (!deadlineTime.isBlank()) insertReminder(userId, taskId, parseTime(deadlineTime));
     }
 
     private void createTeamTaskReminders(long userId, long taskId, Map<String, Object> req) {

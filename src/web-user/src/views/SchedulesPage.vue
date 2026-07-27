@@ -1,10 +1,19 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, primaryTime, timeTypeLabel, statusLabel, countdown, urgency } from '../utils/helpers'
+import { formatTime, primaryTime, timeTypeLabel, statusLabel, countdown, urgency, groupByTaskState, isOverdue } from '../utils/helpers'
 
 const router = useRouter()
 const store = useAppStore()
+const collapsedGroups = ref<string[]>([])
+const scheduleGroups = computed(() => groupByTaskState(store.schedules, schedule => schedule.groupName))
+
+function toggleGroup(name: string) {
+  collapsedGroups.value = collapsedGroups.value.includes(name)
+    ? collapsedGroups.value.filter(value => value !== name)
+    : [...collapsedGroups.value, name]
+}
 
 function goDetail(id: number) {
   router.push(`/schedules/${id}`)
@@ -26,20 +35,28 @@ function handleDelete(id: number) {
     </div>
 
     <section class="table-card">
-      <article v-for="s in store.schedules" :key="s.id" class="table-row" style="cursor:pointer" @click="goDetail(s.id)">
-        <div>
-          <strong>{{ s.title }}</strong>
-          <small>{{ s.groupName }} - {{ timeTypeLabel(s.timeType) }}</small>
+      <section v-for="group in scheduleGroups" :key="group.name" class="group-block">
+        <button class="group-title" @click="toggleGroup(group.name)">
+          <span>{{ collapsedGroups.includes(group.name) ? '▸' : '▾' }} {{ group.name }}</span>
+          <em>{{ group.items.filter(item => item.status === 'pending').length }}</em>
+        </button>
+        <div v-if="!collapsedGroups.includes(group.name)">
+          <article v-for="s in group.items" :key="s.id" :class="['table-row', { overdue: isOverdue(s) }]" style="cursor:pointer" @click="goDetail(s.id)">
+            <div>
+              <strong>{{ s.title }}</strong>
+              <small>{{ s.groupName }} - {{ timeTypeLabel(s.timeType) }}</small>
+            </div>
+            <span :class="['tag', s.status === 'completed' ? 'blue' : s.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(s.status) }}</span>
+            <span :class="{ 'overdue-text': isOverdue(s) }">{{ isOverdue(s) ? countdown(primaryTime(s)) : formatTime(primaryTime(s)) }}</span>
+            <div class="top-actions" @click.stop>
+              <button v-if="s.status === 'pending'" @click="handleAction(s, 'complete')">完成</button>
+              <button v-if="s.status === 'completed'" @click="handleAction(s, 'uncomplete')">恢复</button>
+              <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button>
+              <button @click="handleDelete(s.id)">删除</button>
+            </div>
+          </article>
         </div>
-        <span :class="['tag', s.status === 'completed' ? 'blue' : s.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(s.status) }}</span>
-        <span>{{ formatTime(primaryTime(s)) }}</span>
-        <div class="top-actions" @click.stop>
-          <button v-if="s.status === 'pending'" @click="handleAction(s, 'complete')">完成</button>
-          <button v-if="s.status === 'completed'" @click="handleAction(s, 'uncomplete')">恢复</button>
-          <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button>
-          <button @click="handleDelete(s.id)">删除</button>
-        </div>
-      </article>
+      </section>
       <p v-if="!store.schedules.length" class="hint" style="text-align:center;padding:40px 0">暂无日程</p>
     </section>
 

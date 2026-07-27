@@ -34,7 +34,7 @@ export const useAppStore = defineStore('app', () => {
   const scheduleForm = reactive<ScheduleForm>({ title: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '' })
   const groupForm = reactive({ name: '' })
   const teamForm = reactive({ name: '' })
-  const taskForm = reactive({ teamId: '', title: '', deadlineTime: '', startTime: '', assigneeUserIds: '' })
+  const taskForm = reactive({ teamId: '', title: '', deadlineTime: '', startTime: '', assigneeUserIds: [] as number[] })
   /* 加入团队表单 */
   const joinForm = reactive({ inviteCode: '' })
   /* 修改资料表单 */
@@ -62,7 +62,11 @@ export const useAppStore = defineStore('app', () => {
       upcoming: timelineItems.value.filter(i => new Date(i.sortAt).getTime() >= Date.now()).length
     }
   })
-  const monthDays = computed<CalendarDay[]>(() => buildMonthDays(schedules.value))
+  const calendarItems = computed(() => [
+    ...schedules.value.map(item => ({ ...item, sourceType: 'schedule' })),
+    ...myTasks.value.map(item => ({ ...item, sourceType: 'team_task' }))
+  ])
+  const monthDays = computed<CalendarDay[]>(() => buildMonthDays(calendarItems.value))
   const loggedIn = computed(() => !!token.value)
 
   /* =========== 方法 =========== */
@@ -134,7 +138,7 @@ export const useAppStore = defineStore('app', () => {
       schedules.value = schedulePage.list || []
       taskGroups.value = groupPage.list || []
       if (!scheduleForm.groupId && taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
-      teams.value = teamPage.list || []
+      teams.value = (teamPage.list || []).map((team: any) => ({ ...team, myRole: team.myRole || team.role }))
       myTasks.value = taskPage.list || []
       notifications.value = noticePage.list || []
       today.value = todayData
@@ -203,14 +207,13 @@ export const useAppStore = defineStore('app', () => {
 
   async function createTask() {
     if (!taskForm.teamId || !taskForm.title.trim()) return notify('请选择团队并填写标题')
-    const assigneeUserIds = taskForm.assigneeUserIds.split(',').map(v => Number(v.trim())).filter(Boolean)
-    if (!assigneeUserIds.length) return notify('请输入执行人用户 ID')
+    if (!taskForm.assigneeUserIds.length) return notify('请选择执行人')
     try {
       await request('/team-tasks', {
         method: 'POST',
-        body: JSON.stringify(toApiTimePayload({ ...taskForm, teamId: Number(taskForm.teamId), assigneeUserIds }))
+        body: JSON.stringify(toApiTimePayload({ ...taskForm, teamId: Number(taskForm.teamId), assigneeUserIds: taskForm.assigneeUserIds }))
       })
-      Object.assign(taskForm, { teamId: activeTeam.value?.id ? String(activeTeam.value.id) : '', title: '', deadlineTime: '', startTime: '', assigneeUserIds: '' })
+      Object.assign(taskForm, { teamId: activeTeam.value?.id ? String(activeTeam.value.id) : '', title: '', deadlineTime: '', startTime: '', assigneeUserIds: [] })
       await loadAll(); notify('团队任务已创建')
     } catch (e: any) { notify(e.message) }
   }
@@ -277,7 +280,7 @@ export const useAppStore = defineStore('app', () => {
     joinForm, profileForm, passwordForm, timezoneForm,
     /* 计算属性 */
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming,
-    timelineStats, monthDays, loggedIn,
+    timelineStats, calendarItems, monthDays, loggedIn,
     /* 方法 */
     request, openScheduleModal, closeScheduleModal, login, register, logout, loadAll,
     createSchedule, setScheduleStatus, deleteSchedule,

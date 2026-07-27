@@ -41,6 +41,7 @@ export interface Team {
   id: number
   name: string
   inviteCode: string
+  role?: TeamRole
   myRole: TeamRole
   memberCount: number
   activeTaskCount: number
@@ -70,6 +71,14 @@ export interface TeamTaskAssignee {
   isCurrent: boolean
 }
 
+export interface TeamTaskEvent {
+  id: number
+  eventType: string
+  content: string
+  actorName: string
+  createdAt: string
+}
+
 export interface TeamTask {
   id: number
   title: string
@@ -83,6 +92,7 @@ export interface TeamTask {
   endTime: string
   status: TeamTaskStatus
   assignees: TeamTaskAssignee[]
+  events: TeamTaskEvent[]
   createdAt: string
   updatedAt: string
 }
@@ -129,7 +139,7 @@ export interface TodayOverview {
 export interface CalendarDay {
   day: number | ''
   today: boolean
-  items: Schedule[]
+  items: any[]
 }
 
 /* ========== 时间轴 ========== */

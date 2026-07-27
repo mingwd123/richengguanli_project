@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, countdown, urgency, timeTypeLabel } from '../utils/helpers'
+import { formatTime, countdown, urgency, timeTypeLabel, groupByTaskState } from '../utils/helpers'
 
 const store = useAppStore()
+const router = useRouter()
 
-const upcoming = computed(() => store.upcoming)
 const timelineItems = computed(() => store.timelineItems.slice(0, 8))
+const scheduleModules = computed(() => groupByTaskState(
+  store.schedules.filter(schedule => !['completed', 'cancelled'].includes(schedule.status)),
+  schedule => schedule.groupName || '未分组'
+))
+
+function goSchedule(id: number) {
+  router.push(`/schedules/${id}`)
+}
 </script>
 
 <template>
@@ -29,20 +38,28 @@ const timelineItems = computed(() => store.timelineItems.slice(0, 8))
     <div class="home-content">
       <section class="group-panel">
         <div class="section-head">
-          <h2>近期任务</h2>
+          <h2>日程模块</h2>
         </div>
-        <article
-          v-for="item in upcoming"
-          :key="`${item.sourceType}-${item.id}`"
-          class="task-card"
-        >
-          <div>
-            <strong>{{ item.title }}</strong>
-            <small>{{ item.sourceLabel }} - {{ formatTime(item.sortAt) }}</small>
+        <section v-for="module in scheduleModules" :key="module.name" class="home-module">
+          <div class="module-title">
+            <strong>{{ module.name }}</strong>
+            <span>{{ module.items.filter(item => item.status === 'pending').length }} 项待办</span>
           </div>
-          <span :class="['tag', urgency(item.sortAt)]">{{ countdown(item.sortAt) }}</span>
-        </article>
-        <p v-if="upcoming.length === 0" class="muted" style="padding: 20px; text-align: center;">暂无近期任务</p>
+          <article
+            v-for="schedule in module.items.slice(0, 3)"
+            :key="schedule.id"
+            :class="['task-card', { overdue: urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime) === 'danger' }]"
+            @click="goSchedule(schedule.id)"
+          >
+            <div>
+              <strong>{{ schedule.title }}</strong>
+              <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
+            </div>
+            <span :class="['tag', urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime)]">{{ countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</span>
+          </article>
+          <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项日程，请前往日程页查看</p>
+        </section>
+        <p v-if="scheduleModules.length === 0" class="muted" style="padding: 20px; text-align: center;">暂无日程</p>
       </section>
 
       <aside class="timeline-panel">

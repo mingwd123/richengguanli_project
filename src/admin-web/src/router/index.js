@@ -9,7 +9,7 @@ const routes = [
   },
   {
     path: '/',
-    component: () => import('../views/AdminLayout.vue'),
+    component: () => import('@/layouts/AdminLayout.vue'),
     meta: { requiresAuth: true },
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/DashboardPage.vue') },

@@ -1,4 +1,4 @@
-import type { Schedule, ScheduleForm, TimelineItem, CalendarDay } from '../types'
+import type { ScheduleForm, TimelineItem, CalendarDay } from '../types'
 
 export function toSchedulePayload(input: ScheduleForm) {
   const out: Record<string, any> = { title: input.title, groupId: Number(input.groupId) || null, groupName: input.groupName, timeType: input.timeType, startTime: '', endTime: '', deadlineTime: '' }
@@ -32,13 +32,13 @@ export function normalizeTimelineItem(item: any, sourceType: 'schedule' | 'team_
 
 function kindName(kind: string) { return kind === 'point_event' ? '安排事项' : kind === 'duration_task' ? '时间段任务' : '待办任务' }
 
-export function buildMonthDays(schedules: Schedule[]): CalendarDay[] {
+export function buildMonthDays(items: any[]): CalendarDay[] {
   const now = new Date(); const first = new Date(now.getFullYear(), now.getMonth(), 1); const days: CalendarDay[] = []
   for (let i = 0; i < (first.getDay() + 6) % 7; i++) days.push({ day: '', today: false, items: [] })
   const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
   for (let d = 1; d <= count; d++) {
     const key = new Date(now.getFullYear(), now.getMonth(), d).toISOString().slice(0, 10)
-    days.push({ day: d, today: d === now.getDate(), items: schedules.filter(s => primaryTime(s).startsWith(key)) })
+    days.push({ day: d, today: d === now.getDate(), items: items.filter(item => primaryTime(item).startsWith(key)) })
   }
   return days
 }
@@ -69,6 +69,28 @@ export function urgency(value: string) {
   if (diff < 0 || diff <= 10 * 60000) return 'danger'
   if (diff <= 30 * 60000) return 'warning'
   return ''
+}
+
+export function isOverdue(item: any) {
+  const at = primaryTime(item)
+  return !!at && !['completed', 'cancelled'].includes(item.status) && item.assignStatus !== 'completed' && new Date(at).getTime() < Date.now()
+}
+
+export function sortByPriority<T extends Record<string, any>>(items: T[]) {
+  return [...items].sort((a, b) => {
+    const overdueDiff = Number(isOverdue(b)) - Number(isOverdue(a))
+    if (overdueDiff) return overdueDiff
+    return new Date(primaryTime(a)).getTime() - new Date(primaryTime(b)).getTime()
+  })
+}
+
+export function groupByTaskState<T extends Record<string, any>>(items: T[], groupName: (item: T) => string) {
+  const groups = new Map<string, T[]>()
+  for (const item of sortByPriority(items)) {
+    const name = ['completed', 'cancelled'].includes(item.status) || item.assignStatus === 'completed' ? '已完成' : (groupName(item) || '未分组')
+    groups.set(name, [...(groups.get(name) || []), item])
+  }
+  return [...groups.entries()].map(([name, items]) => ({ name, items }))
 }
 
 export function timeTypeLabel(t: string) {

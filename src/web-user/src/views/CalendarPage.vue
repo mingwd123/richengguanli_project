@@ -2,8 +2,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, countdown, timeTypeLabel } from '../utils/helpers'
-import type { Schedule } from '../types'
+import { formatTime, countdown, timeTypeLabel, primaryTime } from '../utils/helpers'
 
 const router = useRouter()
 const store = useAppStore()
@@ -18,18 +17,15 @@ function selectDate(day: number | '') {
   store.selectedDate = dateStr
 }
 
-const selectedDaySchedules = computed(() => {
+const selectedDayItems = computed(() => {
   if (!store.selectedDate) return []
-  return store.schedules.filter((s: Schedule) => {
-    const t = store.primaryTime(s)
-    return t.startsWith(store.selectedDate)
-  })
+  return store.calendarItems.filter((item: any) => primaryTime(item).startsWith(store.selectedDate))
 })
 
 const weekDays = ['一', '二', '三', '四', '五', '六', '日']
 
-function goToSchedule(id: number) {
-  router.push(`/schedules/${id}`)
+function goDetail(item: any) {
+  router.push(item.sourceType === 'team_task' ? `/tasks/${item.id}` : `/schedules/${item.id}`)
 }
 </script>
 
@@ -56,17 +52,17 @@ function goToSchedule(id: number) {
     <aside class="detail-panel">
       <h2>{{ store.selectedDate ? store.selectedDate + ' 日程' : '点击日期查看' }}</h2>
       <article
-        v-for="item in selectedDaySchedules"
-        :key="item.id"
+        v-for="item in selectedDayItems"
+        :key="`${item.sourceType}-${item.id}`"
         class="mini-row"
         style="cursor: pointer;"
-        @click="goToSchedule(item.id)"
+        @click="goDetail(item)"
       >
         <strong>{{ item.title }}</strong>
-        <small>{{ timeTypeLabel(item.timeType) }} - {{ countdown(store.primaryTime(item)) }}</small>
+        <small>{{ item.sourceType === 'team_task' ? '团队任务' : timeTypeLabel(item.timeType) }} - {{ countdown(primaryTime(item)) }}</small>
       </article>
-      <p v-if="store.selectedDate && selectedDaySchedules.length === 0" class="muted" style="padding: 20px; text-align: center;">
-        该日期暂无日程
+      <p v-if="store.selectedDate && selectedDayItems.length === 0" class="muted" style="padding: 20px; text-align: center;">
+        该日期暂无安排
       </p>
       <p v-if="!store.selectedDate" class="muted" style="padding: 20px; text-align: center;">
         请点击日历中的日期查看日程

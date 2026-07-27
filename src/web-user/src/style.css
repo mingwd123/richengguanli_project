@@ -50,9 +50,17 @@ small, .muted { color: #718096; }
 .group-panel, .timeline-panel, .calendar-card, .detail-panel, .list-card, .notice-list, .form-card, .settings-card, .table-card { background: #fff; border: 1px solid #e5eaf2; border-radius: 8px; padding: 18px; }
 .timeline-panel, .detail-panel { min-height: 560px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.home-module { border-top: 1px solid #eef2f7; padding-top: 14px; margin-top: 14px; }
+.home-module:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.module-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: #475569; }
+.module-title span, .module-more { color: #718096; font-size: 12px; }
+.module-more { margin: -2px 0 8px; text-align: center; }
+.home-module .task-card { cursor: pointer; }
 .group-block { border-top: 1px solid #eef2f7; padding-top: 14px; margin-top: 14px; }
-.group-title { display: flex; justify-content: space-between; color: #475569; margin-bottom: 10px; }
+.group-title { width: 100%; display: flex; justify-content: space-between; align-items: center; color: #475569; margin-bottom: 10px; border: 0; border-radius: 0; background: transparent; padding: 0 0 8px; text-align: left; font-weight: 700; }
 .group-title em { min-width: 24px; height: 24px; display: grid; place-items: center; border-radius: 999px; background: #eef2f7; font-style: normal; color: #64748b; }
+.overdue { border-left: 4px solid #e11d48 !important; background: #fff7f8; }
+.overdue-text { color: #e11d48 !important; font-weight: 700; }
 .task-card, .team-line, .notice-row, .table-row, .mini-row, .timeline-row { border: 1px solid #edf1f6; border-radius: 7px; background: #fbfdff; padding: 12px; margin-bottom: 10px; }
 .task-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 10px; }
 .task-card strong, .team-line strong, .notice-row strong, .table-row strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
