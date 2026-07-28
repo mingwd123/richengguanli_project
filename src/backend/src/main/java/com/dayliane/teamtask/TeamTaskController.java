@@ -43,6 +43,43 @@ public class TeamTaskController {
         return ApiResponse.success(teamTaskService.listTeamTasks(teamId, userId, page, size, status));
     }
 
+    @GetMapping("/teams/{teamId}/task-groups")
+    public ApiResponse<Map<String, Object>> taskGroups(HttpServletRequest request, @PathVariable long teamId) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.listTeamTaskGroups(teamId, userId));
+    }
+
+    @PostMapping("/teams/{teamId}/task-groups")
+    public ApiResponse<Map<String, Object>> createTaskGroup(HttpServletRequest request, @PathVariable long teamId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.createTeamTaskGroup(teamId, userId, req));
+    }
+
+    @PutMapping("/teams/{teamId}/task-groups/{groupId}")
+    public ApiResponse<Map<String, Object>> updateTaskGroup(HttpServletRequest request, @PathVariable long teamId, @PathVariable long groupId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.updateTeamTaskGroup(teamId, groupId, userId, req));
+    }
+
+    @DeleteMapping("/teams/{teamId}/task-groups/{groupId}")
+    public ApiResponse<Map<String, Object>> deleteTaskGroup(HttpServletRequest request, @PathVariable long teamId, @PathVariable long groupId, @RequestBody(required = false) Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        teamTaskService.deleteTeamTaskGroup(teamId, groupId, userId, req);
+        return ApiResponse.success(Map.of("ok", true));
+    }
+
+    @PutMapping("/teams/{teamId}/task-groups/sort")
+    public ApiResponse<Map<String, Object>> sortTaskGroups(HttpServletRequest request, @PathVariable long teamId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.sortTeamTaskGroups(teamId, userId, req));
+    }
+
+    @PutMapping("/teams/{teamId}/tasks/sort")
+    public ApiResponse<Map<String, Object>> sortTeamTasks(HttpServletRequest request, @PathVariable long teamId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.sortTeamTasks(teamId, userId, req));
+    }
+
     @GetMapping("/team-tasks/{id}")
     public ApiResponse<Map<String, Object>> detail(HttpServletRequest request, @PathVariable long id) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
@@ -59,6 +96,12 @@ public class TeamTaskController {
     public ApiResponse<Map<String, Object>> time(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         return ApiResponse.success(teamTaskService.updateTeamTaskTime(id, userId, req));
+    }
+
+    @PutMapping("/team-tasks/{id}/move-group")
+    public ApiResponse<Map<String, Object>> moveGroup(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.moveTeamTaskGroup(id, userId, req));
     }
 
     @DeleteMapping("/team-tasks/{id}")

@@ -39,17 +39,21 @@ public class TeamTaskService {
         List<?> assigneeIds = raw instanceof List<?> list ? list : List.of();
         if (assigneeIds.isEmpty()) throw new BusinessException(400, "assigneeUserIds is required");
         for (Object v : assigneeIds) permissionService.requireActiveMember(teamId, number(v));
+        Map<String, Object> group = resolveTeamTaskGroup(teamId, req);
+        int sortOrder = nextTeamTaskSortOrder(teamId, longValue(group.get("id")));
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement("insert into team_task (team_id,creator_id,title,description,group_name,start_time,deadline_time,status,updated_by) values (?,?,?,?,?,?,?, 'active',?)", new String[]{"id"});
+            PreparedStatement ps = con.prepareStatement("insert into team_task (team_id,creator_id,title,description,group_id,group_name,sort_order,start_time,deadline_time,status,updated_by) values (?,?,?,?,?,?,?,?,?, 'active',?)", new String[]{"id"});
             ps.setLong(1, teamId);
             ps.setLong(2, userId);
             ps.setString(3, title);
             ps.setString(4, text(req, "description"));
-            ps.setString(5, textOr(req, "groupName", "Team Task"));
-            ps.setTimestamp(6, parseTime(text(req, "startTime")));
-            ps.setTimestamp(7, parseTime(text(req, "deadlineTime")));
-            ps.setLong(8, userId);
+            ps.setLong(5, longValue(group.get("id")));
+            ps.setString(6, String.valueOf(group.get("name")));
+            ps.setInt(7, sortOrder);
+            ps.setTimestamp(8, parseTime(text(req, "startTime")));
+            ps.setTimestamp(9, parseTime(text(req, "deadlineTime")));
+            ps.setLong(10, userId);
             return ps;
         }, keyHolder);
         long taskId = Objects.requireNonNull(keyHolder.getKey()).longValue();
@@ -88,7 +92,7 @@ public class TeamTaskService {
             sql += " and status=?";
             args = new Object[]{teamId, status};
         }
-        sql += " order by deadline_time asc";
+        sql += " order by group_id asc, sort_order asc, coalesce(deadline_time,start_time,created_at) asc, id asc";
         List<Map<String, Object>> rows = jdbc.query(sql, (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), args);
         return pageResult(rows, page, size);
     }
@@ -123,10 +127,25 @@ public class TeamTaskService {
         return teamTaskDetail(taskId, userId);
     }
 
+    @Transactional
     public Map<String, Object> updateTeamTask(long taskId, long userId, Map<String, Object> req) {
         requireTeamTaskManager(taskId, userId);
-        jdbc.update("update team_task set title=coalesce(?,title), description=coalesce(?,description), group_name=coalesce(?,group_name), updated_by=? where id=?",
-                nullableText(req.get("title")), nullableText(req.get("description")), nullableText(req.get("groupName")), userId, taskId);
+        Map<String, Object> task = requireTeamTask(taskId);
+        Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolveTeamTaskGroup(longValue(task.get("teamId")), req) : null;
+        Integer sortOrder = group == null ? null : nextTeamTaskSortOrder(longValue(task.get("teamId")), longValue(group.get("id")));
+        jdbc.update("update team_task set title=coalesce(?,title), description=coalesce(?,description), group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), updated_by=? where id=?",
+                nullableText(req.get("title")), nullableText(req.get("description")), group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, userId, taskId);
+        return teamTaskDetail(taskId, userId);
+    }
+
+    @Transactional
+    public Map<String, Object> moveTeamTaskGroup(long taskId, long userId, Map<String, Object> req) {
+        requireTeamTaskManager(taskId, userId);
+        Map<String, Object> task = requireTeamTask(taskId);
+        long teamId = longValue(task.get("teamId"));
+        long groupId = requiredId(req, "groupId");
+        Map<String, Object> group = requireTeamTaskGroup(teamId, groupId);
+        jdbc.update("update team_task set group_id=?, group_name=?, sort_order=?, updated_by=? where id=? and deleted_at is null", groupId, group.get("name"), nextTeamTaskSortOrder(teamId, groupId), userId, taskId);
         return teamTaskDetail(taskId, userId);
     }
 
@@ -196,7 +215,149 @@ public class TeamTaskService {
         return teamTaskDetail(taskId, userId);
     }
 
+    @Transactional
+    public Map<String, Object> createTeamTaskGroup(long teamId, long userId, Map<String, Object> req) {
+        permissionService.requireTeamManager(teamId, userId);
+        String name = text(req, "name").trim();
+        validateTaskGroupName(name);
+        if (count("select count(*) from task_group where team_id=? and scope='team' and name=? and deleted_at is null", teamId, name) > 0) throw new BusinessException(409, "task group already exists");
+        Integer sortOrder = jdbc.queryForObject("select coalesce(max(sort_order),0)+10 from task_group where team_id=? and scope='team' and deleted_at is null", Integer.class, teamId);
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement("insert into task_group (team_id,scope,name,sort_order,is_default) values (?,'team',?,?,false)", new String[]{"id"});
+            ps.setLong(1, teamId); ps.setString(2, name); ps.setInt(3, sortOrder == null ? 10 : sortOrder); return ps;
+        }, keyHolder);
+        return requireTeamTaskGroup(teamId, Objects.requireNonNull(keyHolder.getKey()).longValue());
+    }
+
+    @Transactional
+    public Map<String, Object> listTeamTaskGroups(long teamId, long userId) {
+        permissionService.requireActiveMember(teamId, userId);
+        createDefaultTeamTaskGroup(teamId);
+        List<Map<String, Object>> rows = jdbc.query("select id,user_id userId,team_id teamId,scope,name,sort_order sortOrder,is_default isDefault,created_at createdAt from task_group where team_id=? and scope='team' and deleted_at is null order by sort_order,id", taskGroupMapper(), teamId);
+        return Map.of("list", rows, "total", rows.size());
+    }
+
+    @Transactional
+    public Map<String, Object> updateTeamTaskGroup(long teamId, long groupId, long userId, Map<String, Object> req) {
+        permissionService.requireTeamManager(teamId, userId);
+        requireTeamTaskGroup(teamId, groupId);
+        String name = text(req, "name").trim();
+        validateTaskGroupName(name);
+        if (count("select count(*) from task_group where team_id=? and scope='team' and name=? and id<>? and deleted_at is null", teamId, name, groupId) > 0) throw new BusinessException(409, "task group already exists");
+        jdbc.update("update task_group set name=? where id=? and team_id=? and scope='team' and deleted_at is null", name, groupId, teamId);
+        jdbc.update("update team_task set group_name=? where team_id=? and group_id=? and deleted_at is null", name, teamId, groupId);
+        return requireTeamTaskGroup(teamId, groupId);
+    }
+
+    @Transactional
+    public void deleteTeamTaskGroup(long teamId, long groupId, long userId, Map<String, Object> req) {
+        permissionService.requireTeamManager(teamId, userId);
+        requireTeamTaskGroup(teamId, groupId);
+        List<Map<String, Object>> candidates = jdbc.query("select id,user_id userId,team_id teamId,scope,name,sort_order sortOrder,is_default isDefault,created_at createdAt from task_group where team_id=? and scope='team' and id<>? and deleted_at is null order by sort_order,id", taskGroupMapper(), teamId, groupId);
+        if (candidates.isEmpty()) throw new BusinessException(400, "at least one task group is required");
+        Map<String, Object> target;
+        if (req != null && req.get("targetGroupId") != null && !String.valueOf(req.get("targetGroupId")).isBlank()) {
+            target = requireTeamTaskGroup(teamId, number(req.get("targetGroupId")));
+            if (longValue(target.get("id")) == groupId) throw new BusinessException(400, "targetGroupId must be another task group");
+        } else target = candidates.get(0);
+        List<Long> taskIds = jdbc.queryForList("select id from team_task where team_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, teamId, groupId);
+        int sortOrder = nextTeamTaskSortOrder(teamId, longValue(target.get("id")));
+        for (Long taskId : taskIds) {
+            jdbc.update("update team_task set group_id=?, group_name=?, sort_order=? where id=? and team_id=?", target.get("id"), target.get("name"), sortOrder, taskId, teamId);
+            sortOrder += 10;
+        }
+        jdbc.update("update task_group set deleted_at=utc_timestamp() where id=? and team_id=? and scope='team' and deleted_at is null", groupId, teamId);
+    }
+
+    @Transactional
+    public Map<String, Object> sortTeamTaskGroups(long teamId, long userId, Map<String, Object> req) {
+        permissionService.requireTeamManager(teamId, userId);
+        createDefaultTeamTaskGroup(teamId);
+        List<Long> ids = idList(req, "groupIds");
+        validateCompleteIds(ids, jdbc.queryForList("select id from task_group where team_id=? and scope='team' and deleted_at is null order by sort_order,id", Long.class, teamId), "groupIds");
+        for (int i = 0; i < ids.size(); i++) jdbc.update("update task_group set sort_order=? where id=? and team_id=? and scope='team' and deleted_at is null", (i + 1) * 10, ids.get(i), teamId);
+        return listTeamTaskGroups(teamId, userId);
+    }
+
+    @Transactional
+    public Map<String, Object> sortTeamTasks(long teamId, long userId, Map<String, Object> req) {
+        long groupId = requiredId(req, "groupId");
+        requireTeamTaskGroup(teamId, groupId);
+        List<Long> ids = idList(req, "taskIds");
+        validateCompleteIds(ids, jdbc.queryForList("select id from team_task where team_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, teamId, groupId), "taskIds");
+        for (Long taskId : ids) requireTeamTaskManager(taskId, userId);
+        for (int i = 0; i < ids.size(); i++) jdbc.update("update team_task set sort_order=?, updated_by=? where id=? and team_id=? and group_id=? and deleted_at is null", (i + 1) * 10, userId, ids.get(i), teamId, groupId);
+        return Map.of("groupId", groupId, "taskIds", ids);
+    }
+
     // ===== Private Helpers =====
+
+    private Map<String, Object> resolveTeamTaskGroup(long teamId, Map<String, Object> req) {
+        Object rawGroupId = req.get("groupId");
+        if (rawGroupId != null && !String.valueOf(rawGroupId).isBlank()) return requireTeamTaskGroup(teamId, number(rawGroupId));
+        String groupName = text(req, "groupName").trim();
+        if (!groupName.isBlank()) {
+            try {
+                return jdbc.queryForObject("select id,user_id userId,team_id teamId,scope,name,sort_order sortOrder,is_default isDefault,created_at createdAt from task_group where team_id=? and scope='team' and name=? and deleted_at is null", taskGroupMapper(), teamId, groupName);
+            } catch (EmptyResultDataAccessException ex) {
+                throw new BusinessException(404, "task group not found");
+            }
+        }
+        createDefaultTeamTaskGroup(teamId);
+        return jdbc.queryForObject("select id,user_id userId,team_id teamId,scope,name,sort_order sortOrder,is_default isDefault,created_at createdAt from task_group where team_id=? and scope='team' and name='团队任务' and deleted_at is null", taskGroupMapper(), teamId);
+    }
+
+    private Map<String, Object> requireTeamTaskGroup(long teamId, long groupId) {
+        try {
+            return jdbc.queryForObject("select id,user_id userId,team_id teamId,scope,name,sort_order sortOrder,is_default isDefault,created_at createdAt from task_group where id=? and team_id=? and scope='team' and deleted_at is null", taskGroupMapper(), groupId, teamId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "task group not found");
+        }
+    }
+
+    private void createDefaultTeamTaskGroup(long teamId) {
+        if (count("select count(*) from task_group where team_id=? and scope='team' and name='团队任务' and deleted_at is null", teamId) == 0) {
+            jdbc.update("insert into task_group (team_id,scope,name,sort_order,is_default) values (?,'team','团队任务',10,true)", teamId);
+        }
+    }
+
+    private int nextTeamTaskSortOrder(long teamId, long groupId) {
+        Integer value = jdbc.queryForObject("select coalesce(max(sort_order),0)+10 from team_task where team_id=? and group_id=? and deleted_at is null", Integer.class, teamId, groupId);
+        return value == null ? 10 : value;
+    }
+
+    private RowMapper<Map<String, Object>> taskGroupMapper() {
+        return (rs, i) -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", rs.getLong("id")); m.put("userId", rs.getObject("userId")); m.put("teamId", rs.getObject("teamId")); m.put("scope", rs.getString("scope"));
+            m.put("name", rs.getString("name")); m.put("sortOrder", rs.getInt("sortOrder")); m.put("isDefault", rs.getBoolean("isDefault")); m.put("createdAt", iso(rs.getTimestamp("createdAt"))); return m;
+        };
+    }
+
+    private List<Long> idList(Map<String, Object> req, String key) {
+        Object raw = req.get(key);
+        if (!(raw instanceof List<?> values)) raw = req.get("ids");
+        if (!(raw instanceof List<?> values)) throw new BusinessException(400, key + " is required");
+        List<Long> ids = new ArrayList<>();
+        for (Object value : values) ids.add(number(value));
+        return ids;
+    }
+
+    private void validateCompleteIds(List<Long> ids, List<Long> expected, String field) {
+        if (ids.size() != expected.size() || new HashSet<>(ids).size() != ids.size() || !new HashSet<>(ids).equals(new HashSet<>(expected))) throw new BusinessException(400, field + " must contain the complete set of valid ids");
+    }
+
+    private long requiredId(Map<String, Object> req, String key) {
+        Object value = req.get(key);
+        if (value == null || String.valueOf(value).isBlank()) throw new BusinessException(400, key + " is required");
+        return number(value);
+    }
+
+    private void validateTaskGroupName(String name) {
+        if (name == null || name.isBlank()) throw new BusinessException(400, "task group name is required");
+        if (name.length() > 50) throw new BusinessException(400, "task group name is too long");
+    }
 
     private void requireTeamTaskManager(long taskId, long userId) {
         Map<String, Object> task = requireTeamTask(taskId);
@@ -209,7 +370,7 @@ public class TeamTaskService {
 
     private Map<String, Object> requireTeamTask(long taskId) {
         try {
-            return jdbc.queryForObject("select id,team_id teamId,creator_id creatorId,title,description,group_name groupName,start_time startTime,deadline_time deadlineTime,status,created_at createdAt from team_task where id=? and deleted_at is null", teamTaskMapper(), taskId);
+            return jdbc.queryForObject("select id,team_id teamId,creator_id creatorId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,start_time startTime,deadline_time deadlineTime,status,created_at createdAt from team_task where id=? and deleted_at is null", teamTaskMapper(), taskId);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "team task not found");
         }
@@ -259,7 +420,9 @@ public class TeamTaskService {
             m.put("creatorId", rs.getLong("creatorId"));
             m.put("title", rs.getString("title"));
             m.put("description", rs.getString("description"));
+            m.put("groupId", rs.getObject("groupId"));
             m.put("groupName", rs.getString("groupName"));
+            m.put("sortOrder", rs.getInt("sortOrder"));
             m.put("startTime", iso(rs.getTimestamp("startTime")));
             m.put("deadlineTime", iso(rs.getTimestamp("deadlineTime")));
             m.put("status", rs.getString("status"));

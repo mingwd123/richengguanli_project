@@ -45,6 +45,18 @@ public class ScheduleController {
         return ApiResponse.success(scheduleService.requireSchedule(id, userId));
     }
 
+    @PutMapping("/sort")
+    public ApiResponse<Map<String, Object>> sort(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.sortSchedules(userId, req));
+    }
+
+    @PutMapping("/{id}/move-group")
+    public ApiResponse<Map<String, Object>> moveGroup(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.moveScheduleGroup(id, userId, req));
+    }
+
     @PutMapping("/{id}")
     public ApiResponse<Map<String, Object>> update(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));

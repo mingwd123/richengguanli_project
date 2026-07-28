@@ -3,9 +3,11 @@ import { computed, reactive, ref } from 'vue'
 import { apiRequest } from '../api/http'
 
 const TOKEN_KEY = 'dayliane_admin_token'
+const THEME_KEY = 'dayliane_admin_theme'
 
 export const useAdminStore = defineStore('admin', () => {
   const token = ref(localStorage.getItem(TOKEN_KEY) || '')
+  const theme = ref(localStorage.getItem(THEME_KEY) || 'light')
   const activeResource = ref('users')
   const loading = ref(false)
   const detailLoading = ref(false)
@@ -15,6 +17,9 @@ export const useAdminStore = defineStore('admin', () => {
   const currentDetail = ref(null)
   const loginForm = reactive({ username: 'admin', password: 'Admin12345' })
   const adminCreateForm = reactive({ username: '', password: '', role: 'admin' })
+  const aiConfig = ref(null)
+  const aiConfigLoading = ref(false)
+  const aiTestResult = ref('')
 
   // Search/filter state
   const searchKeyword = ref('')
@@ -66,6 +71,18 @@ export const useAdminStore = defineStore('admin', () => {
     page.value = { list: [], total: 0, page: 1, size: 20 }
     currentDetail.value = null
   }
+
+  function applyTheme() {
+    document.documentElement.dataset.theme = theme.value
+  }
+
+  function toggleTheme() {
+    theme.value = theme.value === 'dark' ? 'light' : 'dark'
+    localStorage.setItem(THEME_KEY, theme.value)
+    applyTheme()
+  }
+
+  applyTheme()
 
   async function loadProfile() {
     if (!token.value) return
@@ -232,6 +249,74 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
+  async function fetchAiConfig() {
+    aiConfigLoading.value = true
+    try {
+      aiConfig.value = await request('/admin/ai/config')
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      aiConfigLoading.value = false
+    }
+  }
+
+  async function updateAiConfig(payload) {
+    aiConfigLoading.value = true
+    try {
+      aiConfig.value = await request('/admin/ai/config', { method: 'PUT', body: JSON.stringify(payload) })
+      notify('AI 配置已更新')
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      aiConfigLoading.value = false
+    }
+  }
+
+  async function updateAiEnabled(enabled) {
+    aiConfigLoading.value = true
+    try {
+      aiConfig.value = await request('/admin/ai/enabled', { method: 'PUT', body: JSON.stringify({ enabled }) })
+      notify(enabled ? 'AI 已启用' : 'AI 已关闭')
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      aiConfigLoading.value = false
+    }
+  }
+
+  async function fetchAiUsageLogs(params = {}) {
+    loading.value = true
+    try {
+      const queryParams = new URLSearchParams()
+      queryParams.set('page', String(params.page || 1))
+      queryParams.set('size', String(params.size || 20))
+      if (params.userId) queryParams.set('userId', params.userId)
+      if (params.featureType) queryParams.set('featureType', params.featureType)
+      if (params.status) queryParams.set('status', params.status)
+      if (params.dateFrom) queryParams.set('dateFrom', params.dateFrom)
+      if (params.dateTo) queryParams.set('dateTo', params.dateTo)
+      page.value = await request(`/admin/ai/usage-logs?${queryParams.toString()}`)
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function testAi() {
+    aiConfigLoading.value = true
+    try {
+      const data = await request('/admin/ai/test', { method: 'POST' })
+      aiTestResult.value = data.ok ? 'AI 连接正常: ' + (data.rawText || '') : 'AI 测试失败'
+      notify('AI 测试完成')
+    } catch (error) {
+      aiTestResult.value = 'AI 测试失败: ' + error.message
+      notify(error.message)
+    } finally {
+      aiConfigLoading.value = false
+    }
+  }
+
   function resetFilters() {
     searchKeyword.value = ''
     filterStatus.value = ''
@@ -252,13 +337,15 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   return {
-    token, activeResource, loading, detailLoading, toast, profile, page, currentDetail,
+    token, theme, activeResource, loading, detailLoading, toast, profile, page, currentDetail,
     loginForm, adminCreateForm, resources, currentResource, stats,
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
+    aiConfig, aiConfigLoading, aiTestResult,
     login, logout, loadProfile, fetchList, fetchDetail,
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,
-    createAdminUser, resetFilters, notify, formatValue,
+    createAdminUser, resetFilters, notify, formatValue, toggleTheme,
+    fetchAiConfig, updateAiConfig, updateAiEnabled, fetchAiUsageLogs, testAi,
   }
 })

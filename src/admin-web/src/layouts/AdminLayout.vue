@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Bell, Calendar, Document, House, List, Timer, User, UserFilled, Fold,
+  Connection, Monitor, DataAnalysis, Management,
 } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/admin'
 
@@ -18,8 +19,10 @@ const menuItems = [
   { path: '/team-tasks', label: '团队任务', icon: List },
   { path: '/notifications', label: '通知记录', icon: Bell },
   { path: '/reminders', label: '提醒记录', icon: Timer },
-  { path: '/admin-users', label: '管理员', icon: UserSwitch },
+  { path: '/admin-users', label: '管理员', icon: Management },
   { path: '/operation-logs', label: '操作日志', icon: Document },
+  { path: '/ai-config', label: 'AI 配置', icon: Connection },
+  { path: '/ai-logs', label: 'AI 调用记录', icon: DataAnalysis },
 ]
 const title = computed(() => menuItems.find(item => item.path === route.path)?.label || '管理后台')
 
@@ -48,7 +51,10 @@ onMounted(async () => {
     <el-container class="main-container">
       <el-header class="navbar">
         <div class="navbar-left"><el-button text circle @click="isCollapse = !isCollapse"><el-icon><Fold /></el-icon></el-button><el-breadcrumb separator="/"><el-breadcrumb-item>首页</el-breadcrumb-item><el-breadcrumb-item>{{ title }}</el-breadcrumb-item></el-breadcrumb></div>
-        <el-dropdown @command="handleLogout"><span class="profile-dropdown"><el-avatar :size="30">{{ store.profile?.username?.slice(0, 1)?.toUpperCase() || 'A' }}</el-avatar><span>{{ store.profile?.username || '管理员' }}</span></span><template #dropdown><el-dropdown-menu><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+        <div class="navbar-right">
+          <el-button text circle @click="store.toggleTheme()">{{ store.theme === 'dark' ? '日' : '夜' }}</el-button>
+          <el-dropdown @command="handleLogout"><span class="profile-dropdown"><el-avatar :size="30">{{ store.profile?.username?.slice(0, 1)?.toUpperCase() || 'A' }}</el-avatar><span>{{ store.profile?.username || '管理员' }}</span></span><template #dropdown><el-dropdown-menu><el-dropdown-item command="logout">退出登录</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+        </div>
       </el-header>
       <el-main class="page-main"><router-view /></el-main>
     </el-container>

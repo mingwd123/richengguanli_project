@@ -28,6 +28,9 @@ function closeDetail() {
         <h2>通知</h2>
         <div class="top-actions">
           <span class="muted">未读：{{ unreadCount }}</span>
+          <button v-if="store.browserNoticePermission !== 'granted'" @click="store.requestBrowserNoticePermission">
+            开启系统通知
+          </button>
           <button v-if="unreadCount > 0" @click="handleReadAll">全部已读</button>
         </div>
       </div>

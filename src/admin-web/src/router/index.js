@@ -21,6 +21,8 @@ const routes = [
       { path: 'reminders', name: 'Reminders', component: () => import('../views/RemindersPage.vue') },
       { path: 'admin-users', name: 'AdminUsers', component: () => import('../views/AdminUsersPage.vue') },
       { path: 'operation-logs', name: 'OperationLogs', component: () => import('../views/OperationLogsPage.vue') },
+      { path: 'ai-config', name: 'AiConfig', component: () => import('../views/AiConfigPage.vue') },
+      { path: 'ai-logs', name: 'AiLogs', component: () => import('../views/AiLogsPage.vue') },
     ],
   },
 ]

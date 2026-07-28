@@ -20,8 +20,7 @@ public class TaskGroupController {
     }
 
     @GetMapping
-    public ApiResponse<Map<String, Object>> list(HttpServletRequest request,
-                                                  @RequestParam(defaultValue = "personal") String scope) {
+    public ApiResponse<Map<String, Object>> list(HttpServletRequest request, @RequestParam(defaultValue = "personal") String scope) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         return ApiResponse.success(scheduleService.listTaskGroups(userId, scope));
     }
@@ -32,6 +31,12 @@ public class TaskGroupController {
         return ApiResponse.success(scheduleService.createTaskGroup(userId, req));
     }
 
+    @PutMapping("/sort")
+    public ApiResponse<Map<String, Object>> sort(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.sortTaskGroups(userId, req));
+    }
+
     @PutMapping("/{id}")
     public ApiResponse<Map<String, Object>> update(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
@@ -39,9 +44,9 @@ public class TaskGroupController {
     }
 
     @DeleteMapping("/{id}")
-    public ApiResponse<Map<String, Object>> delete(HttpServletRequest request, @PathVariable long id) {
+    public ApiResponse<Map<String, Object>> delete(HttpServletRequest request, @PathVariable long id, @RequestBody(required = false) Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        scheduleService.deleteTaskGroup(id, userId);
+        scheduleService.deleteTaskGroup(id, userId, req);
         return ApiResponse.success(Map.of("ok", true));
     }
 }

@@ -62,5 +62,18 @@ function goBack() {
         <button class="primary">保存</button>
       </div>
     </form>
+
+    <hr style="margin: 24px 0; border: none; border-top: 1px solid #eef2f7;" />
+    <h2>AI 数据记录</h2>
+    <form @submit.prevent="store.toggleAiRecord()">
+      <label class="toggle-row">
+        <span>允许记录 AI 调用数据</span>
+        <input type="checkbox" v-model="store.aiRecordEnabled" @change="store.toggleAiRecord()" />
+      </label>
+      <p class="hint">关闭后，AI 调用不再保存输入/输出内容，仅保留调用记录。</p>
+      <div class="form-actions">
+        <button type="button" @click="goBack">返回</button>
+      </div>
+    </form>
   </section>
 </template>

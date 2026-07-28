@@ -65,3 +65,82 @@ h1, h2, h3, p { margin: 0; }
 .detail-modal { width: 640px; max-height: 80vh; overflow: hidden; border-radius: 6px; background: #fff; box-shadow: 0 12px 32px rgba(0,0,0,.18); }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #ebeef5; }.modal-header button { border: 0; background: transparent; font-size: 24px; cursor: pointer; }.modal-body { max-height: calc(80vh - 64px); padding: 20px; overflow: auto; }.detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }.detail-item { display: grid; gap: 5px; }.detail-label { color: #909399; font-size: 12px; }.detail-value { color: #303133; word-break: break-all; }
 @media (max-width: 768px) { .sidebar { position: fixed; z-index: 100; height: 100vh; }.page-main { padding: 14px; }.navbar { padding: 0 12px 0 76px; }.profile-dropdown > span { display: none; }.stats { grid-template-columns: 1fr; }.table-toolbar { align-items: stretch; }.table-toolbar .filters { display: grid; grid-template-columns: 1fr 1fr; }.table-toolbar .filters select, .table-toolbar .filters input { width: 100%; }.detail-grid { grid-template-columns: 1fr; } }
+
+:root {
+  --admin-bg: #f5f7fa;
+  --admin-surface: #fff;
+  --admin-surface-soft: #fafafa;
+  --admin-border: #ebeef5;
+  --admin-text: #303133;
+  --admin-muted: #909399;
+  --admin-secondary: #606266;
+  --admin-primary: #409eff;
+  --admin-sidebar: #001529;
+  --admin-sidebar-hover: #0c2135;
+  --admin-shadow: 0 1px 4px rgba(0, 21, 41, .08);
+  --el-bg-color: var(--admin-surface);
+  --el-bg-color-overlay: var(--admin-surface);
+  --el-text-color-primary: var(--admin-text);
+  --el-text-color-regular: var(--admin-secondary);
+  --el-border-color: var(--admin-border);
+}
+
+[data-theme="dark"] {
+  --admin-bg: #111827;
+  --admin-surface: #1f2937;
+  --admin-surface-soft: #243244;
+  --admin-border: #374151;
+  --admin-text: #f3f4f6;
+  --admin-muted: #9ca3af;
+  --admin-secondary: #d1d5db;
+  --admin-primary: #60a5fa;
+  --admin-sidebar: #0f172a;
+  --admin-sidebar-hover: #1e293b;
+  --admin-shadow: 0 1px 8px rgba(0, 0, 0, .24);
+  --el-bg-color: var(--admin-surface);
+  --el-bg-color-overlay: #243244;
+  --el-fill-color-light: #243244;
+  --el-text-color-primary: var(--admin-text);
+  --el-text-color-regular: var(--admin-secondary);
+  --el-text-color-secondary: var(--admin-muted);
+  --el-border-color: var(--admin-border);
+  color-scheme: dark;
+}
+
+html, body, .pure-admin-layout, .page-main { background: var(--admin-bg); color: var(--admin-text); transition: background-color .2s ease, color .2s ease; }
+.sidebar { background: var(--admin-sidebar); transition: width .2s ease, background-color .2s ease; }
+.sidebar .el-menu { background: var(--admin-sidebar); }
+.sidebar .el-menu-item:hover { background: var(--admin-sidebar-hover); }
+.navbar { background: var(--admin-surface); border-bottom-color: var(--admin-border); box-shadow: var(--admin-shadow); transition: background-color .2s ease, border-color .2s ease, box-shadow .2s ease; }
+.navbar-right { display: flex; align-items: center; gap: 12px; }
+.profile-dropdown, .topbar h1, .stats strong, .table-title, .detail-value, .timeline-summary strong { color: var(--admin-text); }
+.topbar p, .muted, .empty, .loading, .detail-label, .stats article { color: var(--admin-muted); }
+.stats article, .welcome-card, .quick-link-card, .table-container, .create-panel, .login-panel, .detail-modal, .form-card, .data-table, .table-toolbar { background: var(--admin-surface); border-color: var(--admin-border); transition: background-color .2s ease, border-color .2s ease, transform .18s ease, box-shadow .18s ease; }
+.table-title { background: var(--admin-surface-soft); }
+.table-row { color: var(--admin-secondary); border-bottom-color: var(--admin-border); transition: background-color .16s ease, transform .16s ease; }
+.table-row:not(.table-title):hover, .stats article:hover, .welcome-card:hover, .quick-link-card:hover { background: var(--admin-surface-soft); transform: translateY(-1px); }
+.table-toolbar, .modal-header { border-color: var(--admin-border); }
+input, select, textarea, .pagination select, .login-form input { background: var(--admin-surface); border-color: var(--admin-border); color: var(--admin-text); transition: background-color .2s ease, border-color .2s ease, color .2s ease; }
+input:focus, select:focus, textarea:focus, .login-form input:focus { border-color: var(--admin-primary); outline: none; }
+button, .el-button { transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .16s ease; }
+button:hover, .el-button:hover { transform: translateY(-1px); }
+.primary { background: var(--admin-primary); }
+.row-actions .el-button, .row-actions button, .eyebrow { color: var(--admin-primary); }
+.modal-overlay { animation: admin-fade-in .16s ease; }
+.detail-modal { animation: admin-slide-up .18s ease; }
+.global-toast { animation: admin-slide-up .18s ease; }
+.status-active, .status-completed { color: #34d399; background: rgba(52, 211, 153, .12); }
+.status-disabled, .status-cancelled { color: #fb7185; background: rgba(251, 113, 133, .12); }
+.status-pending { color: #fbbf24; background: rgba(251, 191, 36, .12); }
+[data-theme="dark"] .login-page { background: #111827; }
+[data-theme="dark"] .sidebar .el-menu-item { color: rgba(243, 244, 246, .72); }
+[data-theme="dark"] .sidebar .el-menu-item.is-active { color: #fff; background: #2563eb; }
+[data-theme="dark"] .el-breadcrumb__inner, [data-theme="dark"] .el-dropdown-menu__item { color: var(--admin-secondary); }
+
+@keyframes admin-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes admin-slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  button:hover, .el-button:hover, .table-row:not(.table-title):hover, .stats article:hover, .welcome-card:hover, .quick-link-card:hover { transform: none; }
+}

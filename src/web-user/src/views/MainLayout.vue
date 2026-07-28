@@ -32,6 +32,10 @@ const routeName = computed(() => {
           <p>{{ new Date().toLocaleDateString('zh-CN') }} 今天</p>
         </div>
         <div class="top-actions">
+          <button @click="store.toggleTheme">{{ store.theme === 'dark' ? '日间' : '夜间' }}</button>
+          <button v-if="store.browserNoticePermission !== 'granted'" @click="store.requestBrowserNoticePermission">
+            通知权限
+          </button>
           <button class="primary" @click="store.loadAll">刷新</button>
         </div>
       </header>

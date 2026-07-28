@@ -1,0 +1,268 @@
+package com.dayliane.ai;
+
+import com.dayliane.admin.AdminService;
+import com.dayliane.common.BusinessException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+@Service
+public class AiService {
+    private static final int MAX_INPUT_LENGTH = 8000;
+    private static final int MAX_LOG_LENGTH = 12000;
+    private final JdbcTemplate jdbc;
+    private final AdminService adminService;
+    private final ObjectMapper objectMapper;
+    private final HttpClient httpClient;
+    private final boolean defaultEnabled;
+    private final String defaultProvider;
+    private final String defaultModel;
+    private final String defaultApiBaseUrl;
+    private final String apiKey;
+
+    public AiService(JdbcTemplate jdbc, AdminService adminService, ObjectMapper objectMapper,
+                     @Value("${app.ai.enabled:false}") boolean defaultEnabled,
+                     @Value("${app.ai.provider:}") String defaultProvider,
+                     @Value("${app.ai.model:}") String defaultModel,
+                     @Value("${app.ai.api-base-url:}") String defaultApiBaseUrl,
+                     @Value("${AI_API_KEY:}") String apiKey) {
+        this.jdbc = jdbc;
+        this.adminService = adminService;
+        this.objectMapper = objectMapper;
+        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.defaultEnabled = defaultEnabled;
+        this.defaultProvider = defaultProvider;
+        this.defaultModel = defaultModel;
+        this.defaultApiBaseUrl = defaultApiBaseUrl;
+        this.apiKey = apiKey;
+    }
+
+    public Map<String, Object> parseSchedule(long userId, String text, boolean recordUsage) {
+        requireText(text);
+        return suggest(userId, "schedule_parse", text, "Return JSON only: {\"title\":\"\",\"timeType\":\"\",\"startTime\":\"\",\"endTime\":\"\",\"deadlineTime\":\"\",\"description\":\"\"}. Extract a schedule draft from this text:", recordUsage);
+    }
+
+    public Map<String, Object> breakdownTeamTask(long userId, String text, boolean recordUsage) {
+        requireText(text);
+        return suggest(userId, "team_task_breakdown", text, "Return JSON only: {\"tasks\":[{\"title\":\"\",\"description\":\"\"}]}. Break this team task into actionable tasks:", recordUsage);
+    }
+
+    public Map<String, Object> dailyPlan(long userId, boolean recordUsage) {
+        String context = dailyContext(userId);
+        return suggest(userId, "daily_plan", context, "Return JSON only: {\"suggestion\":\"\"}. Give a concise daily plan using only this user's items:\n", recordUsage);
+    }
+
+    public Map<String, Object> optimizeTaskDescription(long userId, String text, boolean recordUsage) {
+        requireText(text);
+        return suggest(userId, "task_description_optimize", text, "Return JSON only: {\"description\":\"\"}. Improve this task description while preserving its intent:", recordUsage);
+    }
+
+    public Map<String, Object> configView() {
+        Map<String, Object> config = latestConfig();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("provider", config == null ? defaultProvider : config.get("provider"));
+        out.put("modelName", config == null ? defaultModel : config.get("modelName"));
+        out.put("apiBaseUrl", config == null ? defaultApiBaseUrl : config.get("apiBaseUrl"));
+        out.put("enabled", config == null ? defaultEnabled : config.get("enabled"));
+        out.put("remark", config == null ? "" : config.get("remark"));
+        out.put("apiKeyMasked", maskApiKey());
+        if (config != null) {
+            out.put("id", config.get("id"));
+            out.put("createdAt", config.get("createdAt"));
+            out.put("updatedAt", config.get("updatedAt"));
+        }
+        return out;
+    }
+
+    @Transactional
+    public Map<String, Object> updateConfig(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
+        Map<String, Object> before = configView();
+        String provider = valueOr(req, "provider", String.valueOf(before.get("provider")));
+        String modelName = valueOr(req, "modelName", String.valueOf(before.get("modelName")));
+        String apiBaseUrl = valueOr(req, "apiBaseUrl", String.valueOf(before.get("apiBaseUrl")));
+        boolean enabled = booleanOr(req, "enabled", Boolean.TRUE.equals(before.get("enabled")));
+        String remark = valueOr(req, "remark", String.valueOf(before.get("remark")));
+        validateConfig(provider, modelName, apiBaseUrl);
+        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,enabled,remark) values (?,?,?,?,?,?)",
+                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(), enabled, limit(remark, 4000));
+        Map<String, Object> after = configView();
+        adminService.writeAdminOperationLog(adminId, "update_ai_config", "ai_config", null, safeConfig(before), safeConfig(after), ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
+    public Map<String, Object> updateEnabled(long adminId, boolean enabled, String ipAddress, String userAgent) {
+        Map<String, Object> before = configView();
+        String provider = String.valueOf(before.get("provider"));
+        String modelName = String.valueOf(before.get("modelName"));
+        String apiBaseUrl = String.valueOf(before.get("apiBaseUrl"));
+        validateConfig(provider, modelName, apiBaseUrl);
+        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,enabled,remark) values (?,?,?,?,?,?)",
+                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(), enabled, limit(String.valueOf(before.get("remark")), 4000));
+        Map<String, Object> after = configView();
+        adminService.writeAdminOperationLog(adminId, "set_ai_enabled", "ai_config", null, safeConfig(before), safeConfig(after), ipAddress, userAgent);
+        return after;
+    }
+
+    public Map<String, Object> usageLogs(int page, int size, String userId, String featureType, String status, String dateFrom, String dateTo) {
+        StringBuilder sql = new StringBuilder("select id,user_id userId,feature_type featureType,input_text inputText,output_text outputText,status,error_message errorMessage,created_at createdAt from ai_usage_log where 1=1");
+        List<Object> params = new ArrayList<>();
+        if (!blank(userId)) { try { sql.append(" and user_id=?"); params.add(Long.parseLong(userId)); } catch (NumberFormatException ex) { throw new BusinessException(400, "userId is invalid"); } }
+        if (!blank(featureType)) { sql.append(" and feature_type=?"); params.add(featureType); }
+        if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
+        addDateFilters(sql, params, dateFrom, dateTo);
+        sql.append(" order by created_at desc");
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", rs.getLong("id")); row.put("userId", rs.getObject("userId")); row.put("featureType", rs.getString("featureType"));
+            row.put("inputText", rs.getString("inputText")); row.put("outputText", rs.getString("outputText")); row.put("status", rs.getString("status"));
+            row.put("errorMessage", rs.getString("errorMessage")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); return row;
+        }, params.toArray());
+        return pageResult(rows, page, size);
+    }
+
+    public Map<String, Object> usageStats(String dateFrom, String dateTo) {
+        StringBuilder sql = new StringBuilder("select feature_type featureType,status,count(*) total from ai_usage_log where 1=1");
+        List<Object> params = new ArrayList<>();
+        addDateFilters(sql, params, dateFrom, dateTo);
+        sql.append(" group by feature_type,status order by feature_type,status");
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> Map.of("featureType", rs.getString("featureType"), "status", rs.getString("status"), "total", rs.getLong("total")), params.toArray());
+        return Map.of("list", rows);
+    }
+
+    public Map<String, Object> test() {
+        String raw = call("Reply with JSON only: {\"suggestion\":\"ok\"}");
+        return Map.of("ok", true, "rawText", limit(raw, MAX_LOG_LENGTH));
+    }
+
+    private Map<String, Object> suggest(long userId, String featureType, String input, String instruction, boolean recordUsage) {
+        String safeInput = limit(input, MAX_INPUT_LENGTH);
+        try {
+            String raw = call(instruction + "\n" + safeInput);
+            Map<String, Object> result = formatResult(featureType, safeInput, raw);
+            if (recordUsage) log(userId, featureType, safeInput, raw, "success", null);
+            return result;
+        } catch (BusinessException ex) {
+            if (recordUsage) log(userId, featureType, safeInput, null, "failed", ex.getMessage());
+            throw ex;
+        }
+    }
+
+    private String call(String prompt) {
+        Map<String, Object> config = effectiveConfig();
+        if (!Boolean.TRUE.equals(config.get("enabled"))) throw new BusinessException(400, "AI service is disabled");
+        String baseUrl = String.valueOf(config.get("apiBaseUrl"));
+        String model = String.valueOf(config.get("modelName"));
+        if (blank(apiKey) || blank(baseUrl) || blank(model)) throw new BusinessException(400, "AI configuration is incomplete");
+        try {
+            String body = objectMapper.writeValueAsString(Map.of("model", model, "messages", List.of(Map.of("role", "system", "content", "You are a helpful scheduling assistant. Follow the requested JSON schema exactly."), Map.of("role", "user", "content", prompt)), "temperature", 0.2));
+            HttpRequest request = HttpRequest.newBuilder(URI.create(trimBaseUrl(baseUrl) + "/chat/completions"))
+                    .timeout(Duration.ofSeconds(30)).header("Content-Type", "application/json").header("Authorization", "Bearer " + apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) throw new BusinessException(503, "AI service is unavailable");
+            JsonNode content = objectMapper.readTree(response.body()).path("choices").path(0).path("message").path("content");
+            if (!content.isTextual() || content.asText().isBlank()) throw new BusinessException(503, "AI service returned an invalid response");
+            return content.asText();
+        } catch (BusinessException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new BusinessException(503, "AI service is unavailable");
+        }
+    }
+
+    private Map<String, Object> formatResult(String featureType, String input, String raw) {
+        Object parsed = parseJson(raw);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("rawText", limit(raw, MAX_LOG_LENGTH));
+        if ("schedule_parse".equals(featureType)) {
+            Map<String, Object> draft = parsed instanceof Map<?, ?> map ? mapValue(map, "draft", map) : Map.of();
+            Map<String, Object> normalized = new LinkedHashMap<>();
+            for (String key : List.of("title", "timeType", "startTime", "endTime", "deadlineTime", "description")) normalized.put(key, stringValue(draft.get(key)));
+            if (blank(String.valueOf(normalized.get("title")))) normalized.put("title", input);
+            result.put("draft", normalized);
+        } else if ("team_task_breakdown".equals(featureType)) {
+            List<Map<String, Object>> tasks = tasksFrom(parsed);
+            if (tasks.isEmpty()) for (String line : raw.split("\\R")) if (!line.trim().isBlank()) tasks.add(Map.of("title", line.replaceFirst("^[\\s•*\\-\\d.]+", "").trim(), "description", ""));
+            result.put("tasks", tasks);
+        } else if ("daily_plan".equals(featureType)) {
+            String suggestion = parsed instanceof Map<?, ?> map ? stringValue(map.get("suggestion")) : "";
+            result.put("suggestion", blank(suggestion) ? raw : suggestion);
+        } else {
+            String description = parsed instanceof Map<?, ?> map ? stringValue(map.get("description")) : "";
+            result.put("description", blank(description) ? raw : description);
+        }
+        return result;
+    }
+
+    private String dailyContext(long userId) {
+        List<Map<String, Object>> schedules = jdbc.query("select title,description,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime from schedule where user_id=? and deleted_at is null and status='pending' order by coalesce(deadline_time,start_time,created_at) asc limit 20", (rs, i) -> Map.of("title", rs.getString("title"), "description", nullToEmpty(rs.getString("description")), "timeType", rs.getString("timeType"), "startTime", String.valueOf(rs.getTimestamp("startTime")), "endTime", String.valueOf(rs.getTimestamp("endTime")), "deadlineTime", String.valueOf(rs.getTimestamp("deadlineTime"))), userId);
+        List<Map<String, Object>> tasks = jdbc.query("select t.title,t.description,t.start_time startTime,t.deadline_time deadlineTime from team_task t join team_task_assignee a on a.task_id=t.id where a.user_id=? and a.is_active=true and t.deleted_at is null and t.status='active' order by coalesce(t.deadline_time,t.start_time,t.created_at) asc limit 20", (rs, i) -> Map.of("title", rs.getString("title"), "description", nullToEmpty(rs.getString("description")), "startTime", String.valueOf(rs.getTimestamp("startTime")), "deadlineTime", String.valueOf(rs.getTimestamp("deadlineTime"))), userId);
+        try { return limit(objectMapper.writeValueAsString(Map.of("schedules", schedules, "teamTasks", tasks)), MAX_INPUT_LENGTH); }
+        catch (Exception ex) { return ""; }
+    }
+
+    private Map<String, Object> effectiveConfig() {
+        Map<String, Object> config = latestConfig();
+        if (config != null) return config;
+        return Map.of("provider", defaultProvider, "modelName", defaultModel, "apiBaseUrl", defaultApiBaseUrl, "enabled", defaultEnabled);
+    }
+
+    private Map<String, Object> latestConfig() {
+        try {
+            return jdbc.queryForObject("select id,provider,model_name modelName,api_base_url apiBaseUrl,enabled,remark,created_at createdAt,updated_at updatedAt from ai_config order by id desc limit 1", (rs, i) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id")); row.put("provider", rs.getString("provider")); row.put("modelName", rs.getString("modelName")); row.put("apiBaseUrl", rs.getString("apiBaseUrl")); row.put("enabled", rs.getBoolean("enabled")); row.put("remark", rs.getString("remark")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); row.put("updatedAt", iso(rs.getTimestamp("updatedAt"))); return row;
+            });
+        } catch (EmptyResultDataAccessException ex) { return null; }
+    }
+
+    private void log(long userId, String featureType, String input, String output, String status, String error) {
+        jdbc.update("insert into ai_usage_log (user_id,feature_type,input_text,output_text,status,error_message) values (?,?,?,?,?,?)", userId, featureType, limit(input, MAX_LOG_LENGTH), limit(output, MAX_LOG_LENGTH), status, limit(error, 500));
+    }
+
+    private Object parseJson(String raw) {
+        try { return objectMapper.readValue(stripCodeFence(raw), new TypeReference<Object>() {}); }
+        catch (Exception ex) { return null; }
+    }
+
+    @SuppressWarnings("unchecked") private Map<String, Object> mapValue(Map<?, ?> source, String key, Map<?, ?> fallback) { Object value = source.get(key); return value instanceof Map<?, ?> map ? (Map<String, Object>) map : (Map<String, Object>) fallback; }
+    private List<Map<String, Object>> tasksFrom(Object parsed) {
+        Object source = parsed instanceof Map<?, ?> map ? map.get("tasks") : parsed;
+        List<Map<String, Object>> tasks = new ArrayList<>();
+        if (source instanceof List<?> list) for (Object item : list) { if (item instanceof Map<?, ?> map) { Map<String, Object> task = new LinkedHashMap<>(); task.put("title", stringValue(map.get("title"))); task.put("description", stringValue(map.get("description"))); if (!blank(String.valueOf(task.get("title")))) tasks.add(task); } else if (!blank(String.valueOf(item))) tasks.add(Map.of("title", String.valueOf(item), "description", "")); }
+        return tasks;
+    }
+    private void requireText(String text) { if (blank(text)) throw new BusinessException(400, "text is required"); }
+    private void validateConfig(String provider, String modelName, String apiBaseUrl) { if (blank(provider) || blank(modelName) || blank(apiBaseUrl)) throw new BusinessException(400, "provider, modelName and apiBaseUrl are required"); try { URI.create(trimBaseUrl(apiBaseUrl)); } catch (Exception ex) { throw new BusinessException(400, "apiBaseUrl is invalid"); } }
+    private void addDateFilters(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) { if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); } if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); } }
+    private Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) { int p = Math.max(1, page); int s = Math.min(100, Math.max(1, size)); int from = Math.min(rows.size(), (p - 1) * s); return Map.of("list", rows.subList(from, Math.min(rows.size(), from + s)), "total", rows.size(), "page", p, "size", s); }
+    private Map<String, Object> safeConfig(Map<String, Object> config) { Map<String, Object> out = new LinkedHashMap<>(config); out.remove("apiKey"); out.put("apiKeyMasked", maskApiKey()); return out; }
+    private String maskApiKey() { if (blank(apiKey)) return ""; return apiKey.length() <= 8 ? "****" : apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4); }
+    private static String stripCodeFence(String value) { String text = value.trim(); if (text.startsWith("```")) { int firstNewline = text.indexOf('\n'); int end = text.lastIndexOf("```"); return firstNewline >= 0 && end > firstNewline ? text.substring(firstNewline + 1, end).trim() : text; } return text; }
+    private static String valueOr(Map<String, Object> req, String key, String fallback) { Object value = req.get(key); return value == null ? fallback : String.valueOf(value).trim(); }
+    private static boolean booleanOr(Map<String, Object> req, String key, boolean fallback) { Object value = req.get(key); return value == null ? fallback : value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value)); }
+    private static String stringValue(Object value) { return value == null ? "" : String.valueOf(value); }
+    private static String trimBaseUrl(String value) { String url = value == null ? "" : value.trim(); while (url.endsWith("/")) url = url.substring(0, url.length() - 1); return url; }
+    private static String limit(String value, int max) { if (value == null) return null; return value.length() <= max ? value : value.substring(0, max); }
+    private static boolean blank(String value) { return value == null || value.isBlank(); }
+    private static String nullToEmpty(String value) { return value == null ? "" : value; }
+    private static String iso(java.sql.Timestamp timestamp) { return timestamp == null ? "" : OffsetDateTime.ofInstant(timestamp.toInstant(), ZoneOffset.UTC).toString(); }
+}

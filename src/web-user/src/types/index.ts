@@ -16,6 +16,7 @@ export interface Schedule {
   title: string
   groupId: number | null
   groupName: string
+  sortOrder: number
   timeType: TimeType
   startTime: string
   endTime: string
@@ -31,6 +32,9 @@ export interface TaskGroup {
   id: number
   name: string
   scope: string
+  sortOrder: number
+  teamId: number | null
+  isDefault: boolean
 }
 
 /* ========== 团队 ========== */
@@ -85,6 +89,9 @@ export interface TeamTask {
   description: string
   teamId: number
   teamName: string
+  groupId: number | null
+  groupName: string
+  sortOrder: number
   creatorId: number
   creatorName: string
   deadlineTime: string
@@ -103,6 +110,10 @@ export interface MyTask {
   title: string
   teamId: number
   teamName: string
+  groupId: number | null
+  groupName: string
+  sortOrder: number
+  creatorId: number
   deadlineTime: string
   startTime: string
   status: TeamTaskStatus
@@ -193,10 +204,11 @@ export interface TeamForm {
 
 export interface TaskForm {
   teamId: string
+  groupId: string
   title: string
   deadlineTime: string
   startTime: string
-  assigneeUserIds: string
+  assigneeUserIds: number[]
 }
 
 /* ========== API 响应 ========== */

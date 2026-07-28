@@ -11,6 +11,19 @@ const store = useAppStore()
 
 const task = ref<TeamTask | null>(null)
 const loading = ref(false)
+const aiOptimizing = ref(false)
+const optimizedDesc = ref('')
+async function aiOptimizeDesc() {
+  if (!task.value?.description) return
+  aiOptimizing.value = true; optimizedDesc.value = ''
+  try {
+    const result = await store.aiRequest('/text/optimize-task-description', { text: task.value.description })
+    optimizedDesc.value = result.description || ''
+    if (!optimizedDesc.value) optimizedDesc.value = 'AI 未能生成优化建议'
+  } catch (e: any) {
+    optimizedDesc.value = '优化失败: ' + (e.message || '服务不可用')
+  } finally { aiOptimizing.value = false }
+}
 
 const isCreatorOrAdmin = computed(() => {
   if (!task.value || !store.profile) return false
@@ -86,6 +99,12 @@ onMounted(loadDetail)
         <div v-if="task.description">
           <span class="muted">描述：</span>
           <p>{{ task.description }}</p>
+          <button v-if="task.description" type="button" class="ai-btn" style="margin-top:8px" @click="aiOptimizeDesc" :disabled="aiOptimizing">
+            {{ aiOptimizing ? '优化中...' : '🤖 AI 优化描述' }}
+          </button>
+          <p v-if="optimizedDesc" style="margin-top:8px;padding:8px;background:#f0f9ff;border-radius:6px;border:1px solid #bae6fd">
+            <strong>AI 建议：</strong>{{ optimizedDesc }}
+          </p>
         </div>
         <div>
           <span class="muted">团队：</span>

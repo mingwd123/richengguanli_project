@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { formatTime, countdown, urgency, timeTypeLabel, groupByTaskState } from '../utils/helpers'
@@ -15,6 +15,18 @@ const scheduleModules = computed(() => groupByTaskState(
 
 function goSchedule(id: number) {
   router.push(`/schedules/${id}`)
+}
+
+const aiPlan = ref('')
+const aiLoadingPlan = ref(false)
+async function loadAiPlan() {
+  aiLoadingPlan.value = true
+  try {
+    const result = await store.aiRequest('/home/daily-plan', {})
+    aiPlan.value = result.suggestion || (result as any).rawText || ''
+  } catch (e: any) {
+    store.notify('AI 计划加载失败: ' + (e.message || '服务不可用'))
+  } finally { aiLoadingPlan.value = false }
 }
 </script>
 
@@ -33,6 +45,14 @@ function goSchedule(id: number) {
         <span>未读通知</span>
         <strong>{{ store.today.unreadNotificationCount }}</strong>
       </article>
+    </div>
+
+    <div class="ai-plan-section" v-if="aiPlan">
+      <div class="ai-plan-header"><span>🤖 AI 今日计划</span><button class="plain-button" @click="loadAiPlan" :disabled="aiLoadingPlan" style="font-size:12px">{{ aiLoadingPlan ? '生成中...' : '刷新' }}</button></div>
+      <p class="ai-plan-content">{{ aiPlan }}</p>
+    </div>
+    <div class="ai-plan-section" v-else style="cursor:pointer;background:#f0f9ff;border:1px dashed #93c5fd" @click="loadAiPlan">
+      <p class="muted" style="text-align:center;padding:12px">{{ aiLoadingPlan ? 'AI 正在思考今天的计划...' : '🤖 点击生成 AI 今日计划建议' }}</p>
     </div>
 
     <div class="home-content">
