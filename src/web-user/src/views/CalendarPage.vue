@@ -43,8 +43,10 @@ function goDetail(item: any) {
           :class="['date-cell', { today: d.today }]"
           @click="selectDate(d.day)"
         >
-          <strong>{{ d.day }}</strong>
-          <small v-if="d.items.length">{{ d.items.length }} 项</small>
+          <div class="date-cell-head">
+            <strong>{{ d.day }}</strong>
+            <small v-if="d.items.length">{{ d.items.length }} 项</small>
+          </div>
         </article>
       </div>
     </section>

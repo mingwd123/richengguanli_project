@@ -34,10 +34,11 @@ function kindName(kind: string) { return kind === 'point_event' ? '安排事项'
 
 export function buildMonthDays(items: any[]): CalendarDay[] {
   const now = new Date(); const first = new Date(now.getFullYear(), now.getMonth(), 1); const days: CalendarDay[] = []
+  const pad = (n: number) => String(n).padStart(2, '0')
   for (let i = 0; i < (first.getDay() + 6) % 7; i++) days.push({ day: '', today: false, items: [] })
   const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
   for (let d = 1; d <= count; d++) {
-    const key = new Date(now.getFullYear(), now.getMonth(), d).toISOString().slice(0, 10)
+    const key = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(d)}`
     days.push({ day: d, today: d === now.getDate(), items: items.filter(item => primaryTime(item).startsWith(key)) })
   }
   return days

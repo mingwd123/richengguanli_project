@@ -12,9 +12,9 @@ app:
   jwt:
     secret: ${JWT_SECRET:change-me-in-development}
   ai:
-    enabled: ${AI_ENABLED:false}
-    provider: ${AI_PROVIDER:}
-    model: ${AI_MODEL:}
-    api-base-url: ${AI_API_BASE_URL:}
-    api-key: ${AI_API_KEY:}
+    enabled: ${AI_ENABLED:true}
+    provider: ${AI_PROVIDER:deepseek}
+    model: ${AI_MODEL:deepseek-chat}
+    api-base-url: ${AI_API_BASE_URL:https://api.deepseek.com/v1}
+    api-key: ${AI_API_KEY:sk-a50f2283b3e343d9a24723267cd24500}
 

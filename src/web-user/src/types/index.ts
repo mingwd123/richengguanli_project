@@ -14,6 +14,7 @@ export type ScheduleStatus = 'pending' | 'completed' | 'cancelled'
 export interface Schedule {
   id: number
   title: string
+  description: string
   groupId: number | null
   groupName: string
   sortOrder: number

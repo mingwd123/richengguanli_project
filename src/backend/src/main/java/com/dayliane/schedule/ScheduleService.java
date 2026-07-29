@@ -69,7 +69,9 @@ public class ScheduleService {
     public Map<String, Object> requireSchedule(long id, long userId) {
         try {
             Map<String, Object> item = jdbc.queryForObject("select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt from schedule where id=? and user_id=? and deleted_at is null", scheduleMapper(), id, userId);
-            item.put("hasReminder", count("select count(*) from reminder where target_type='schedule' and target_id=?", id) > 0);
+            int reminderCount = count("select count(*) from reminder where target_type='schedule' and target_id=? and status='pending'", id);
+            item.put("hasReminder", reminderCount > 0);
+            item.put("reminderCount", reminderCount);
             return item;
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "schedule not found");
@@ -78,11 +80,32 @@ public class ScheduleService {
 
     @Transactional
     public Map<String, Object> updateSchedule(long id, long userId, Map<String, Object> req) {
-        requireSchedule(id, userId);
+        Map<String, Object> current = requireSchedule(id, userId);
+        String title = req.containsKey("title") ? text(req, "title").trim() : String.valueOf(current.get("title"));
+        String description = req.containsKey("description") ? text(req, "description") : Objects.toString(current.get("description"), "");
+        String timeType = req.containsKey("timeType") ? text(req, "timeType") : String.valueOf(current.get("timeType"));
+        if (title.isBlank()) throw new BusinessException(400, "title is required");
+        if (!List.of("point_event", "deadline_task", "duration_task").contains(timeType)) throw new BusinessException(400, "timeType is invalid");
+        Timestamp currentStartTime = parseTime(String.valueOf(current.getOrDefault("startTime", "")));
+        Timestamp currentEndTime = parseTime(String.valueOf(current.getOrDefault("endTime", "")));
+        Timestamp currentDeadlineTime = parseTime(String.valueOf(current.getOrDefault("deadlineTime", "")));
+        Timestamp startTime = req.containsKey("startTime") ? parseOptional(req.get("startTime")) : currentStartTime;
+        Timestamp endTime = req.containsKey("endTime") ? parseOptional(req.get("endTime")) : currentEndTime;
+        Timestamp deadlineTime = req.containsKey("deadlineTime") ? parseOptional(req.get("deadlineTime")) : currentDeadlineTime;
+        if ("point_event".equals(timeType)) { endTime = null; deadlineTime = null; }
+        if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
+        if ("duration_task".equals(timeType)) deadlineTime = null;
+        if ("point_event".equals(timeType) && startTime == null) throw new BusinessException(400, "startTime is required");
+        if ("deadline_task".equals(timeType) && deadlineTime == null) throw new BusinessException(400, "deadlineTime is required");
+        if ("duration_task".equals(timeType) && (startTime == null || endTime == null)) throw new BusinessException(400, "startTime and endTime are required");
         Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolvePersonalTaskGroup(userId, req) : null;
         Integer sortOrder = group == null ? null : nextScheduleSortOrder(userId, longValue(group.get("id")));
-        jdbc.update("update schedule set title=coalesce(?,title), description=coalesce(?,description), group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=coalesce(?,time_type), start_time=coalesce(?,start_time), end_time=coalesce(?,end_time), deadline_time=coalesce(?,deadline_time) where id=? and user_id=?",
-                nullableText(req.get("title")), nullableText(req.get("description")), group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, nullableText(req.get("timeType")), parseOptional(req.get("startTime")), parseOptional(req.get("endTime")), parseOptional(req.get("deadlineTime")), id, userId);
+        jdbc.update("update schedule set title=?, description=?, group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=?, start_time=?, end_time=?, deadline_time=? where id=? and user_id=?",
+                title, description, group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, timeType, startTime, endTime, deadlineTime, id, userId);
+        if (req.containsKey("remindAt") || req.containsKey("remindAts")) {
+            cancelPendingReminders("schedule", id, userId);
+            createScheduleReminders(userId, id, req);
+        }
         return requireSchedule(id, userId);
     }
 

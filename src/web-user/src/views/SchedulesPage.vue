@@ -15,17 +15,59 @@ const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; grou
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
 
+function toDatetimeLocal(value: string) {
+  const text = String(value).trim().replace(' ', 'T')
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) return text.slice(0, 16)
+  const date = new Date(text)
+  if (Number.isNaN(date.getTime())) return text.slice(0, 16)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function inferGroupId(draft: any, sourceText: string) {
+  const explicitGroupName = sourceText.match(/(?:放到?|归到|归入|分到|放进|放入)([^，。,.\s]+)/)?.[1]?.trim()
+  const matchedByExplicit = explicitGroupName && store.taskGroups.find(group => group.name === explicitGroupName)
+  if (matchedByExplicit) return String(matchedByExplicit.id)
+  const groupName = String(draft.groupName || '').trim()
+  const matchedByAi = groupName && store.taskGroups.find(group => group.name === groupName)
+  if (matchedByAi) return String(matchedByAi.id)
+  const text = `${sourceText} ${draft.title || ''}`
+  const keywordRules = [
+    { name: '学习', keywords: ['学习', '图书馆', '读书', '上课', '考试', '复习', '作业'] },
+    { name: '工作', keywords: ['工作', '开会', '会议', '项目', '汇报', '客户'] },
+    { name: '运动', keywords: ['运动', '健身', '跑步', '游泳', '训练'] },
+    { name: '生活', keywords: ['生活', '吃饭', '购物', '家务', '买菜'] }
+  ]
+  for (const rule of keywordRules) {
+    if (rule.keywords.some(keyword => text.includes(keyword))) {
+      const group = store.taskGroups.find(item => item.name === rule.name)
+      if (group) return String(group.id)
+    }
+  }
+  return ''
+}
+
 async function aiParseSchedule() {
   if (!store.scheduleForm.title.trim()) { store.notify('请先输入标题再使用 AI 解析'); return }
   aiParsing.value = true; aiParseError.value = ''
   try {
-    const result = await store.aiRequest('/schedules/parse', { text: store.scheduleForm.title.trim() })
+    const sourceText = store.scheduleForm.title.trim()
+    const result = await store.aiRequest('/schedules/parse', { text: sourceText })
     const draft = result.draft || {}
+    const groupId = inferGroupId(draft, sourceText)
+    if (groupId) store.scheduleForm.groupId = groupId
     if (draft.title) store.scheduleForm.title = draft.title
-    if (draft.timeType && ['point_event', 'deadline_task', 'duration_task'].includes(draft.timeType)) store.scheduleForm.timeType = draft.timeType
-    if (draft.startTime) store.scheduleForm.startTime = draft.startTime
-    if (draft.endTime) store.scheduleForm.endTime = draft.endTime
-    if (draft.deadlineTime) store.scheduleForm.deadlineTime = draft.deadlineTime
+    const nextTimeType = draft.startTime && draft.endTime
+      ? 'duration_task'
+      : draft.deadlineTime
+        ? 'deadline_task'
+        : ['point_event', 'deadline_task', 'duration_task'].includes(draft.timeType)
+          ? draft.timeType
+          : store.scheduleForm.timeType
+    store.scheduleForm.timeType = nextTimeType
+    if (draft.startTime) store.scheduleForm.startTime = toDatetimeLocal(draft.startTime)
+    if (draft.endTime) store.scheduleForm.endTime = toDatetimeLocal(draft.endTime)
+    if (draft.deadlineTime) store.scheduleForm.deadlineTime = toDatetimeLocal(draft.deadlineTime)
     if (draft.description) store.notify('已解析：' + draft.description.substring(0, 30))
     store.notify('AI 解析完成，请确认表单信息')
   } catch (e: any) {

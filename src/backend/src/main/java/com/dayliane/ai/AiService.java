@@ -17,6 +17,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -42,7 +43,7 @@ public class AiService {
                      @Value("${app.ai.provider:}") String defaultProvider,
                      @Value("${app.ai.model:}") String defaultModel,
                      @Value("${app.ai.api-base-url:}") String defaultApiBaseUrl,
-                     @Value("${AI_API_KEY:}") String apiKey) {
+                     @Value("${app.ai.api-key:}") String apiKey) {
         this.jdbc = jdbc;
         this.adminService = adminService;
         this.objectMapper = objectMapper;
@@ -56,7 +57,9 @@ public class AiService {
 
     public Map<String, Object> parseSchedule(long userId, String text, boolean recordUsage) {
         requireText(text);
-        return suggest(userId, "schedule_parse", text, "Return JSON only: {\"title\":\"\",\"timeType\":\"\",\"startTime\":\"\",\"endTime\":\"\",\"deadlineTime\":\"\",\"description\":\"\"}. Extract a schedule draft from this text:", recordUsage);
+        String now = OffsetDateTime.now(ZoneId.of("Asia/Shanghai")).toString();
+        String input = "Current time: " + now + "\nTimezone: Asia/Shanghai\nUser text: " + text;
+        return suggest(userId, "schedule_parse", input, "Return JSON only: {\"title\":\"\",\"groupName\":\"\",\"timeType\":\"\",\"startTime\":\"\",\"endTime\":\"\",\"deadlineTime\":\"\",\"description\":\"\"}. Resolve relative dates like 明天, 后天, 下周 using Current time and Timezone. Output all date-time fields as local Asia/Shanghai values in format yyyy-MM-dd'T'HH:mm, without UTC conversion. Infer groupName from explicit user instruction first: phrases like 放X, 放到X, 归到X, 分到X mean groupName must be X. If there is no explicit group instruction, infer groupName from the task topic in Chinese, for example 学习/读书/图书馆/上课/考试 -> 学习, 开会/项目/工作/汇报 -> 工作, 运动/健身/跑步 -> 运动, 吃饭/购物/家务/生活 -> 生活. timeType must be one of point_event, deadline_task, duration_task. Use duration_task when the text contains both a start time and an end time, such as \"8点到18点\". Use deadline_task when the text describes a deadline or due time. Use point_event only for a single occurrence time. All user-facing text values must be in Chinese. Extract a schedule draft from this context:", recordUsage);
     }
 
     public Map<String, Object> breakdownTeamTask(long userId, String text, boolean recordUsage) {
@@ -66,7 +69,7 @@ public class AiService {
 
     public Map<String, Object> dailyPlan(long userId, boolean recordUsage) {
         String context = dailyContext(userId);
-        return suggest(userId, "daily_plan", context, "Return JSON only: {\"suggestion\":\"\"}. Give a concise daily plan using only this user's items:\n", recordUsage);
+        return suggest(userId, "daily_plan", context, "Return JSON only: {\"suggestion\":\"\"}. The suggestion must be written in Chinese. Give a concise daily plan using only this user's items:\n", recordUsage);
     }
 
     public Map<String, Object> optimizeTaskDescription(long userId, String text, boolean recordUsage) {
@@ -172,7 +175,7 @@ public class AiService {
         String model = String.valueOf(config.get("modelName"));
         if (blank(apiKey) || blank(baseUrl) || blank(model)) throw new BusinessException(400, "AI configuration is incomplete");
         try {
-            String body = objectMapper.writeValueAsString(Map.of("model", model, "messages", List.of(Map.of("role", "system", "content", "You are a helpful scheduling assistant. Follow the requested JSON schema exactly."), Map.of("role", "user", "content", prompt)), "temperature", 0.2));
+            String body = objectMapper.writeValueAsString(Map.of("model", model, "messages", List.of(Map.of("role", "system", "content", "You are a helpful scheduling assistant. Follow the requested JSON schema exactly. All user-facing text in the JSON response must be written in Chinese."), Map.of("role", "user", "content", prompt)), "temperature", 0.2));
             HttpRequest request = HttpRequest.newBuilder(URI.create(trimBaseUrl(baseUrl) + "/chat/completions"))
                     .timeout(Duration.ofSeconds(30)).header("Content-Type", "application/json").header("Authorization", "Bearer " + apiKey)
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();
@@ -195,7 +198,14 @@ public class AiService {
         if ("schedule_parse".equals(featureType)) {
             Map<String, Object> draft = parsed instanceof Map<?, ?> map ? mapValue(map, "draft", map) : Map.of();
             Map<String, Object> normalized = new LinkedHashMap<>();
-            for (String key : List.of("title", "timeType", "startTime", "endTime", "deadlineTime", "description")) normalized.put(key, stringValue(draft.get(key)));
+            for (String key : List.of("title", "groupName", "timeType", "startTime", "endTime", "deadlineTime", "description")) normalized.put(key, stringValue(draft.get(key)));
+            String timeType = stringValue(normalized.get("timeType"));
+            String startTime = stringValue(normalized.get("startTime"));
+            String endTime = stringValue(normalized.get("endTime"));
+            String deadlineTime = stringValue(normalized.get("deadlineTime"));
+            if (!blank(startTime) && !blank(endTime)) normalized.put("timeType", "duration_task");
+            else if (!blank(deadlineTime)) normalized.put("timeType", "deadline_task");
+            else if (!List.of("point_event", "deadline_task", "duration_task").contains(timeType)) normalized.put("timeType", "point_event");
             if (blank(String.valueOf(normalized.get("title")))) normalized.put("title", input);
             result.put("draft", normalized);
         } else if ("team_task_breakdown".equals(featureType)) {

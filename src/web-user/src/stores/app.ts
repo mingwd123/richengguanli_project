@@ -161,6 +161,16 @@ export const useAppStore = defineStore('app', () => {
     } catch (e: any) { notify(e.message) }
   }
 
+  async function updateSchedule(id: number, form: ScheduleForm & { description?: string; remindAt?: string }) {
+    if (!form.title.trim()) return notify('请输入标题')
+    if (!form.groupId) return notify('请选择模块')
+    try {
+      await request(`/schedules/${id}`, { method: 'PUT', body: JSON.stringify({ ...toSchedulePayload(form), description: form.description || '', remindAt: form.remindAt ? new Date(form.remindAt).toISOString() : '' }) })
+      await loadAll(); notify('日程已更新')
+      return true
+    } catch (e: any) { notify(e.message); return false }
+  }
+
   async function setScheduleStatus(item: Schedule, action: string) {
     try { await request(`/schedules/${item.id}/${action}`, { method: 'PUT' }); await loadAll() } catch (e: any) { notify(e.message) }
   }
@@ -304,7 +314,7 @@ export const useAppStore = defineStore('app', () => {
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
     request, aiRequest, openScheduleModal, closeScheduleModal, login, register, logout, loadAll, loadTeamTaskGroups,
-    createSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules,
+    createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks,
     readAll, readNotification, openNotificationDetail, closeNotificationDetail, requestBrowserNoticePermission, updateProfile, changePassword, updateTimezone,
