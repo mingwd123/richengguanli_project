@@ -16,6 +16,16 @@ const props = defineProps({
   size: { type: Number, default: 20 },
   keyword: { type: String, default: '' },
   status: { type: String, default: '' },
+  statusOptions: {
+    type: Array,
+    default: () => [
+      { value: 'active', label: '启用' },
+      { value: 'disabled', label: '禁用' },
+      { value: 'pending', label: '待处理' },
+      { value: 'completed', label: '已完成' },
+      { value: 'cancelled', label: '已取消' },
+    ],
+  },
   dateFrom: { type: String, default: '' },
   dateTo: { type: String, default: '' },
 })
@@ -88,11 +98,7 @@ function sortBy(column) {
       <div class="filters">
         <select v-model="localStatus" @change="$emit('update:status', localStatus)">
           <option value="">全部状态</option>
-          <option value="active">启用</option>
-          <option value="disabled">禁用</option>
-          <option value="pending">待处理</option>
-          <option value="completed">已完成</option>
-          <option value="cancelled">已取消</option>
+          <option v-for="option in statusOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
         <input type="date" v-model="localDateFrom" @change="$emit('update:dateFrom', localDateFrom)" placeholder="开始日期" />
         <input type="date" v-model="localDateTo" @change="$emit('update:dateTo', localDateTo)" placeholder="结束日期" />

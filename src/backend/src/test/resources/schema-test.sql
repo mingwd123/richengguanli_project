@@ -1,5 +1,7 @@
 DROP TABLE IF EXISTS ai_config;
 DROP TABLE IF EXISTS ai_usage_log;
+DROP TABLE IF EXISTS auth_revoked_access_token;
+DROP TABLE IF EXISTS auth_refresh_token;
 DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
@@ -23,9 +25,23 @@ CREATE TABLE `user` (
   avatar_url VARCHAR(500),
   timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Shanghai',
   status VARCHAR(20) NOT NULL DEFAULT 'active',
+  token_version INT NOT NULL DEFAULT 0,
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE auth_refresh_token (
+  jti VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE auth_revoked_access_token (
+  jti VARCHAR(64) NOT NULL PRIMARY KEY,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE team (

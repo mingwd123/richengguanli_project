@@ -72,7 +72,7 @@ function refresh() {
           </div>
           <div>
             <label style="display:block;margin-bottom:4px;font-weight:700;font-size:13px;color:#475569">模型名称</label>
-            <input v-model="form.modelName" placeholder="deepseek-v4-flash" />
+            <input v-model="form.modelName" placeholder="deepseek-chat" />
           </div>
           <div>
             <label style="display:block;margin-bottom:4px;font-weight:700;font-size:13px;color:#475569">API Base URL</label>

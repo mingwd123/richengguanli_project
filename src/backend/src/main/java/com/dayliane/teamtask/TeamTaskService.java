@@ -42,6 +42,9 @@ public class TeamTaskService {
         List<?> assigneeIds = raw instanceof List<?> list ? list : List.of();
         if (assigneeIds.isEmpty()) throw new BusinessException(400, "assigneeUserIds is required");
         for (Object v : assigneeIds) permissionService.requireActiveMember(teamId, number(v));
+        Timestamp startTime = parseEditableTime(req.get("startTime"), "startTime");
+        Timestamp deadlineTime = parseEditableTime(req.get("deadlineTime"), "deadlineTime");
+        validateTimeRange(startTime, deadlineTime);
         Map<String, Object> group = resolveTeamTaskGroup(teamId, req);
         int sortOrder = nextTeamTaskSortOrder(teamId, longValue(group.get("id")));
         KeyHolder keyHolder = new GeneratedKeyHolder();
@@ -54,8 +57,8 @@ public class TeamTaskService {
             ps.setLong(5, longValue(group.get("id")));
             ps.setString(6, String.valueOf(group.get("name")));
             ps.setInt(7, sortOrder);
-            ps.setTimestamp(8, parseTime(text(req, "startTime")));
-            ps.setTimestamp(9, parseTime(text(req, "deadlineTime")));
+            ps.setTimestamp(8, startTime);
+            ps.setTimestamp(9, deadlineTime);
             ps.setLong(10, userId);
             return ps;
         }, keyHolder);
@@ -76,15 +79,13 @@ public class TeamTaskService {
     }
 
     public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus, String keyword, String dateFrom, String dateTo, String sort) {
-        StringBuilder sql = new StringBuilder("select t.id from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.deleted_at is null");
+        StringBuilder from = new StringBuilder(" from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.deleted_at is null");
         List<Object> params = new ArrayList<>(List.of(userId, userId));
-        if (!blank(assignStatus)) { sql.append(" and a.status=?"); params.add(assignStatus); }
-        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
-        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by ").append("completed".equals(assignStatus) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, false));
-        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
-        return pageResult(rows, page, size);
+        if (!blank(assignStatus)) { from.append(" and a.status=?"); params.add(assignStatus); }
+        if (!blank(keyword)) { from.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        appendDateOverlap(from, params, dateFrom, dateTo);
+        String order = "completed".equals(assignStatus) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, false);
+        return queryTaskPage(from.toString(), params, order, userId, page, size);
     }
 
     public Map<String, Object> listCreatedTeamTasks(long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo) {
@@ -92,15 +93,13 @@ public class TeamTaskService {
     }
 
     public Map<String, Object> listCreatedTeamTasks(long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo, String sort) {
-        StringBuilder sql = new StringBuilder("select t.id from team_task t join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where t.creator_id=? and t.deleted_at is null");
+        StringBuilder from = new StringBuilder(" from team_task t join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where t.creator_id=? and t.deleted_at is null");
         List<Object> params = new ArrayList<>(List.of(userId, userId));
-        if (!blank(status)) { sql.append(" and t.status=?"); params.add(status); }
-        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
-        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true));
-        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
-        return pageResult(rows, page, size);
+        if (!blank(status)) { from.append(" and t.status=?"); params.add(status); }
+        if (!blank(keyword)) { from.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        appendDateOverlap(from, params, dateFrom, dateTo);
+        String order = "completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true);
+        return queryTaskPage(from.toString(), params, order, userId, page, size);
     }
 
     public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo) {
@@ -109,16 +108,24 @@ public class TeamTaskService {
 
     public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo, String sort) {
         permissionService.requireActiveMember(teamId, userId);
-        StringBuilder sql = new StringBuilder("select t.id from team_task t where t.team_id=? and t.deleted_at is null");
+        StringBuilder from = new StringBuilder(" from team_task t where t.team_id=? and t.deleted_at is null");
         List<Object> params = new ArrayList<>();
         params.add(teamId);
-        if (!blank(status)) { sql.append(" and t.status=?"); params.add(status); }
-        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
-        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true));
-        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
-        return pageResult(rows, page, size);
+        if (!blank(status)) { from.append(" and t.status=?"); params.add(status); }
+        if (!blank(keyword)) { from.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        appendDateOverlap(from, params, dateFrom, dateTo);
+        String order = "completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true);
+        return queryTaskPage(from.toString(), params, order, userId, page, size);
+    }
+
+    public List<Map<String, Object>> listMyTeamTasksInRange(long userId, Instant startInclusive, Instant endExclusive) {
+        String sql = "select t.id from team_task t join team_task_assignee a on a.task_id=t.id " +
+                "join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' " +
+                "where a.user_id=? and a.is_active=true and a.status in ('pending','accepted') and t.status='active' and t.deleted_at is null " +
+                "and coalesce(t.deadline_time,t.start_time,t.created_at)>=? and coalesce(t.start_time,t.deadline_time,t.created_at)<? " +
+                "order by coalesce(t.deadline_time,t.start_time,t.created_at),t.id";
+        List<Long> ids = jdbc.queryForList(sql, Long.class, userId, userId, Timestamp.from(startInclusive), Timestamp.from(endExclusive));
+        return ids.stream().map(id -> teamTaskSummary(id, userId)).toList();
     }
 
     private static String teamTaskOrder(String sort, boolean groupedManualOrder) {
@@ -184,6 +191,9 @@ public class TeamTaskService {
         boolean hasDeadlineTime = req.containsKey("deadlineTime");
         Timestamp startTime = parseEditableTime(req.get("startTime"), "startTime");
         Timestamp deadlineTime = parseEditableTime(req.get("deadlineTime"), "deadlineTime");
+        Timestamp nextStartTime = hasStartTime ? startTime : parseTime(String.valueOf(task.getOrDefault("startTime", "")));
+        Timestamp nextDeadlineTime = hasDeadlineTime ? deadlineTime : parseTime(String.valueOf(task.getOrDefault("deadlineTime", "")));
+        validateTimeRange(nextStartTime, nextDeadlineTime);
         Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolveTeamTaskGroup(longValue(task.get("teamId")), req) : null;
         Integer sortOrder = group == null ? null : nextTeamTaskSortOrder(longValue(task.get("teamId")), longValue(group.get("id")));
         jdbc.update("update team_task set title=case when ? then ? else title end,description=case when ? then ? else description end,group_id=coalesce(?,group_id),group_name=coalesce(?,group_name),sort_order=coalesce(?,sort_order),start_time=case when ? then ? else start_time end,deadline_time=case when ? then ? else deadline_time end,time_updated_at=case when ? then utc_timestamp() else time_updated_at end,updated_by=? where id=? and deleted_at is null",
@@ -212,11 +222,15 @@ public class TeamTaskService {
     @Transactional
     public Map<String, Object> updateTeamTaskTime(long taskId, long userId, Map<String, Object> req) {
         requireTeamTaskManager(taskId, userId);
+        Map<String, Object> task = requireTeamTask(taskId);
         boolean hasStartTime = req.containsKey("startTime");
         boolean hasDeadlineTime = req.containsKey("deadlineTime");
         if (!hasStartTime && !hasDeadlineTime) throw new BusinessException(400, "startTime or deadlineTime is required");
+        Timestamp startTime = hasStartTime ? parseEditableTime(req.get("startTime"), "startTime") : parseTime(String.valueOf(task.getOrDefault("startTime", "")));
+        Timestamp deadlineTime = hasDeadlineTime ? parseEditableTime(req.get("deadlineTime"), "deadlineTime") : parseTime(String.valueOf(task.getOrDefault("deadlineTime", "")));
+        validateTimeRange(startTime, deadlineTime);
         jdbc.update("update team_task set start_time=case when ? then ? else start_time end,deadline_time=case when ? then ? else deadline_time end,time_updated_at=utc_timestamp(),updated_by=? where id=? and deleted_at is null",
-                hasStartTime, parseEditableTime(req.get("startTime"), "startTime"), hasDeadlineTime, parseEditableTime(req.get("deadlineTime"), "deadlineTime"), userId, taskId);
+                hasStartTime, startTime, hasDeadlineTime, deadlineTime, userId, taskId);
         recordEvent(taskId, userId, "time_updated", "更新了任务时间");
         return teamTaskDetail(taskId, userId);
     }
@@ -555,12 +569,22 @@ public class TeamTaskService {
         jdbc.update("update team_task set status=? where id=?", hasOpen ? "active" : allRejected ? "all_rejected" : "completed", taskId);
     }
 
-    public Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) {
-        int p = Math.max(1, page);
-        int s = Math.min(100, Math.max(1, size));
-        int from = Math.min(rows.size(), (p - 1) * s);
-        int to = Math.min(rows.size(), from + s);
-        return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", p, "size", s);
+    private Map<String, Object> queryTaskPage(String from, List<Object> params, String order, long userId, int page, int size) {
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        Integer totalValue = jdbc.queryForObject("select count(*)" + from, Integer.class, params.toArray());
+        int total = totalValue == null ? 0 : totalValue;
+        List<Object> pageParams = new ArrayList<>(params);
+        pageParams.add(safeSize);
+        pageParams.add((safePage - 1) * safeSize);
+        List<Long> ids = jdbc.queryForList("select t.id" + from + " order by " + order + " limit ? offset ?", Long.class, pageParams.toArray());
+        List<Map<String, Object>> rows = ids.stream().map(id -> teamTaskSummary(id, userId)).toList();
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
+    }
+
+    private static void appendDateOverlap(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) {
+        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(t.start_time,t.deadline_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
     }
 
     private void cancelPendingReminders(String type, long id, Long userId) {
@@ -603,9 +627,9 @@ public class TeamTaskService {
     private void createTeamTaskReminders(long userId, long taskId, Map<String, Object> req) {
         Object arr = req.get("remindAts");
         if (arr instanceof List<?> list) {
-            for (Object v : list) insertReminder(userId, taskId, parseTime(String.valueOf(v)));
-        } else if (req.get("remindAt") != null) {
-            insertReminder(userId, taskId, parseTime(String.valueOf(req.get("remindAt"))));
+            for (Object v : list) insertReminder(userId, taskId, parseRequiredTime(v, "remindAt"));
+        } else if (req.get("remindAt") != null && !String.valueOf(req.get("remindAt")).isBlank()) {
+            insertReminder(userId, taskId, parseRequiredTime(req.get("remindAt"), "remindAt"));
         }
     }
 
@@ -684,10 +708,12 @@ public class TeamTaskService {
 
     private static Timestamp parseEditableTime(Object value, String field) {
         if (value == null || String.valueOf(value).isBlank()) return null;
-        Timestamp parsed = parseTime(String.valueOf(value));
-        if (parsed == null) throw new BusinessException(400, field + " is invalid");
-        return parsed;
+        return parseRequiredTime(value, field);
     }
+
+    private static Timestamp parseRequiredTime(Object value, String field) { Timestamp parsed = parseTime(String.valueOf(value)); if (parsed == null) throw new BusinessException(400, field + " is invalid"); return parsed; }
+
+    private static void validateTimeRange(Timestamp startTime, Timestamp deadlineTime) { if (startTime != null && deadlineTime != null && deadlineTime.before(startTime)) throw new BusinessException(400, "deadlineTime must not be before startTime"); }
 
     private static Timestamp parseTime(String value) {
         if (value == null || value.isBlank()) return null;

@@ -39,3 +39,36 @@ jobs:
       - if: matrix.app == 'web-user'
         run: npm run typecheck
       - run: npm run build
+
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      DB_PASSWORD: ci-database-password
+      JWT_SECRET: ci-jwt-secret-at-least-32-characters-long
+      REMINDER_SCAN_TOKEN: ci-reminder-scan-token
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: backend
+            dockerfile: src/backend/Dockerfile
+          - name: web-user
+            dockerfile: src/web-user/Dockerfile
+          - name: admin-web
+            dockerfile: src/admin-web/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: dayliane-${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

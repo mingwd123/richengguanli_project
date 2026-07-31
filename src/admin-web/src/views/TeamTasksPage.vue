@@ -5,6 +5,12 @@ import DataTable from '../components/DataTable.vue'
 
 const store = useAdminStore()
 const showDetail = ref(false)
+const statusOptions = [
+  { value: 'active', label: '进行中' },
+  { value: 'completed', label: '已完成' },
+  { value: 'all_rejected', label: '全部拒绝' },
+  { value: 'cancelled', label: '已取消' },
+]
 
 const columns = [
   { key: 'id', label: 'ID' },
@@ -78,6 +84,7 @@ function closeDetail() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :status-options="statusOptions"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"

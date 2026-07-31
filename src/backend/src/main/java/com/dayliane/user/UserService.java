@@ -2,6 +2,7 @@ package com.dayliane.user;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.PermissionService;
+import com.dayliane.common.RefreshTokenStore;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -21,11 +22,13 @@ import java.util.Objects;
 public class UserService {
     private final JdbcTemplate jdbc;
     private final PermissionService permissionService;
+    private final RefreshTokenStore refreshTokenStore;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public UserService(JdbcTemplate jdbc, PermissionService permissionService) {
+    public UserService(JdbcTemplate jdbc, PermissionService permissionService, RefreshTokenStore refreshTokenStore) {
         this.jdbc = jdbc;
         this.permissionService = permissionService;
+        this.refreshTokenStore = refreshTokenStore;
     }
 
     public Map<String, Object> userView(long userId) {
@@ -62,7 +65,8 @@ public class UserService {
         String hash = String.valueOf(user.get("passwordHash"));
         if (!passwordEncoder.matches(oldPassword, hash) && !Objects.equals(oldPassword, hash)) throw new BusinessException(400, "old password is incorrect");
         if (newPassword == null || newPassword.length() < 8 || !newPassword.matches(".*[A-Za-z].*") || !newPassword.matches(".*\\d.*")) throw new BusinessException(400, "new password format is invalid");
-        jdbc.update("update `user` set password_hash = ? where id = ?", passwordEncoder.encode(newPassword), userId);
+        jdbc.update("update `user` set password_hash=?, token_version=token_version+1 where id=?", passwordEncoder.encode(newPassword), userId);
+        refreshTokenStore.invalidateAllForUser(userId);
     }
 
     public void updateTimezone(long userId, String timezone) {

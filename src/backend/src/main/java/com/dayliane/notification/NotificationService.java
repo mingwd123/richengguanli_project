@@ -30,15 +30,21 @@ public class NotificationService {
     }
 
     public Map<String, Object> listNotifications(long userId, int page, int size, Boolean isRead, String sort) {
-        String sql = "select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,is_read isRead,read_at readAt,created_at createdAt from notification where user_id=:userId and deleted_at is null";
+        String where = " from notification where user_id=:userId and deleted_at is null";
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
         if (isRead != null) {
-            sql += " and is_read=:isRead";
+            where += " and is_read=:isRead";
             p.addValue("isRead", isRead);
         }
-        sql += " order by " + notificationOrder(sort);
-        List<Map<String, Object>> rows = named.query(sql, p, notificationMapper());
-        return pageResult(rows, page, size);
+        String order = notificationOrder(sort);
+        Integer totalValue = named.queryForObject("select count(*)" + where, p, Integer.class);
+        int total = totalValue == null ? 0 : totalValue;
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        p.addValue("limit", safeSize).addValue("offset", (safePage - 1) * safeSize);
+        String select = "select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,is_read isRead,read_at readAt,created_at createdAt";
+        List<Map<String, Object>> rows = named.query(select + where + " order by " + order + " limit :limit offset :offset", p, notificationMapper());
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
     }
 
     private static String notificationOrder(String sort) {
@@ -121,14 +127,6 @@ public class NotificationService {
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
-    }
-
-    public Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) {
-        int p = Math.max(1, page);
-        int s = Math.min(100, Math.max(1, size));
-        int from = Math.min(rows.size(), (p - 1) * s);
-        int to = Math.min(rows.size(), from + s);
-        return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", p, "size", s);
     }
 
     private static String iso(Timestamp ts) {

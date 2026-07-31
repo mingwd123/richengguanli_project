@@ -28,22 +28,23 @@ public class JwtService {
         this.signingKey = Keys.hmacShaKeyFor(keyBytes);
     }
 
-    public String issueAccessToken(long userId) {
-        return issueToken(String.valueOf(userId), "access", 86_400);
+    public String issueAccessToken(long userId, int tokenVersion) {
+        return issueToken(String.valueOf(userId), "access", tokenVersion, 86_400);
     }
 
     public String issueAdminAccessToken(long adminId) {
-        return issueToken(String.valueOf(adminId), "admin_access", 86_400);
+        return issueToken(String.valueOf(adminId), "admin_access", 0, 86_400);
     }
 
-    public String issueRefreshToken(long userId) {
-        return issueToken(String.valueOf(userId), "refresh", 604_800);
+    public String issueRefreshToken(long userId, int tokenVersion) {
+        return issueToken(String.valueOf(userId), "refresh", tokenVersion, 604_800);
     }
 
-    private String issueToken(String sub, String tokenType, long ttlSeconds) {
+    private String issueToken(String sub, String tokenType, int tokenVersion, long ttlSeconds) {
         return Jwts.builder()
                 .subject(sub)
                 .claim("tokenType", tokenType)
+                .claim("tokenVersion", tokenVersion)
                 .issuedAt(Date.from(Instant.now()))
                 .expiration(Date.from(Instant.now().plusSeconds(ttlSeconds)))
                 .id(UUID.randomUUID().toString())
@@ -80,6 +81,15 @@ public class JwtService {
             return parseToken(token).getId();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    public int getTokenVersion(String token) {
+        try {
+            Number version = parseToken(token).get("tokenVersion", Number.class);
+            return version == null ? -1 : version.intValue();
+        } catch (Exception e) {
+            return -1;
         }
     }
 

@@ -5,6 +5,11 @@ export async function apiRequest(path, options = {}, token = '') {
   if (token) headers.Authorization = `Bearer ${token}`
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers })
   const body = await response.json().catch(() => ({ code: response.status, message: '请求失败' }))
-  if (body.code !== 0) throw new Error(body.message || '请求失败')
+  if (body.code !== 0) {
+    const error = new Error(body.message || '请求失败')
+    error.code = body.code
+    error.data = body.data
+    throw error
+  }
   return body.data
 }

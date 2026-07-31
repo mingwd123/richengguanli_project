@@ -37,19 +37,13 @@ public class HomeService {
         return today(userId, Instant.now());
     }
 
-    @SuppressWarnings("unchecked")
     public Map<String, Object> today(long userId, Instant now) {
         ZoneId zone = userZone(userId);
         LocalDate localToday = now.atZone(zone).toLocalDate();
-        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService
-                .listSchedules(userId, 1, 100, "pending", null, null, null, null).get("list");
-        List<Map<String, Object>> tasks = (List<Map<String, Object>>) teamTaskService
-                .listMyTeamTasks(userId, 1, 100, null, null, null, null).get("list");
-        List<Map<String, Object>> todaySchedules = schedules.stream()
-                .filter(item -> isOnDate(item, localToday, zone)).toList();
-        List<Map<String, Object>> todayTasks = tasks.stream()
-                .filter(HomeService::isOpenAssignedTask)
-                .filter(item -> isOnDate(item, localToday, zone)).toList();
+        Instant startInclusive = localToday.atStartOfDay(zone).toInstant();
+        Instant endExclusive = localToday.plusDays(1).atStartOfDay(zone).toInstant();
+        List<Map<String, Object>> todaySchedules = scheduleService.listSchedulesInRange(userId, "pending", startInclusive, endExclusive);
+        List<Map<String, Object>> todayTasks = teamTaskService.listMyTeamTasksInRange(userId, startInclusive, endExclusive);
         return Map.of(
                 "date", localToday.toString(),
                 "timezone", zone.getId(),
@@ -64,18 +58,14 @@ public class HomeService {
         return upcoming(userId, Instant.now());
     }
 
-    @SuppressWarnings("unchecked")
     public Map<String, Object> upcoming(long userId, Instant now) {
         ZoneId zone = userZone(userId);
         LocalDate tomorrow = now.atZone(zone).toLocalDate().plusDays(1);
         LocalDate endExclusive = tomorrow.plusDays(7);
-        List<Map<String, Object>> schedules = ((List<Map<String, Object>>) scheduleService
-                .listSchedules(userId, 1, 100, "pending", null, null, null, null).get("list")).stream()
-                .filter(item -> isInRange(item, tomorrow, endExclusive, zone)).toList();
-        List<Map<String, Object>> tasks = ((List<Map<String, Object>>) teamTaskService
-                .listMyTeamTasks(userId, 1, 100, null, null, null, null).get("list")).stream()
-                .filter(HomeService::isOpenAssignedTask)
-                .filter(item -> isInRange(item, tomorrow, endExclusive, zone)).toList();
+        Instant startInclusive = tomorrow.atStartOfDay(zone).toInstant();
+        Instant endInstant = endExclusive.atStartOfDay(zone).toInstant();
+        List<Map<String, Object>> schedules = scheduleService.listSchedulesInRange(userId, "pending", startInclusive, endInstant);
+        List<Map<String, Object>> tasks = teamTaskService.listMyTeamTasksInRange(userId, startInclusive, endInstant);
         List<Map<String, Object>> combined = new ArrayList<>();
         schedules.forEach(item -> combined.add(withSource(item, "schedule")));
         tasks.forEach(item -> combined.add(withSource(item, "team_task")));
@@ -97,31 +87,6 @@ public class HomeService {
         } catch (DateTimeException ignored) {
             return ZoneId.of("Asia/Shanghai");
         }
-    }
-
-    private static boolean isOpenAssignedTask(Map<String, Object> task) {
-        String status = String.valueOf(task.getOrDefault("status", ""));
-        String assignStatus = String.valueOf(task.getOrDefault("assignStatus", ""));
-        return "active".equals(status) && ("pending".equals(assignStatus) || "accepted".equals(assignStatus));
-    }
-
-    private static boolean isOnDate(Map<String, Object> item, LocalDate date, ZoneId zone) {
-        Instant instant = parseInstant(primaryTime(item), zone);
-        return instant != null && instant.atZone(zone).toLocalDate().equals(date);
-    }
-
-    private static boolean isInRange(Map<String, Object> item, LocalDate start, LocalDate endExclusive, ZoneId zone) {
-        Instant instant = parseInstant(primaryTime(item), zone);
-        if (instant == null) return false;
-        LocalDate date = instant.atZone(zone).toLocalDate();
-        return !date.isBefore(start) && date.isBefore(endExclusive);
-    }
-
-    private static Instant parseInstant(String value, ZoneId zone) {
-        if (value == null || value.isBlank()) return null;
-        try { return OffsetDateTime.parse(value).toInstant(); } catch (DateTimeException ignored) {}
-        try { return LocalDateTime.parse(value).atZone(zone).toInstant(); } catch (DateTimeException ignored) {}
-        return null;
     }
 
     private static Map<String, Object> withSource(Map<String, Object> item, String sourceType) {

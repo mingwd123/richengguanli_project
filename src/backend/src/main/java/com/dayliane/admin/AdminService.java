@@ -97,7 +97,9 @@ public class AdminService {
             case "notifications" -> {
                 sql.append("select id,user_id userId,type,title,related_type relatedType,related_id relatedId,is_read isRead,created_at createdAt from notification where deleted_at is null");
                 if (!blank(keyword)) { sql.append(" and title like ?"); params.add("%" + keyword + "%"); }
-                if (!blank(status)) { sql.append(" and type=?"); params.add(status); }
+                if ("read".equals(status)) sql.append(" and is_read=true");
+                else if ("unread".equals(status)) sql.append(" and is_read=false");
+                else if (!blank(status)) throw new BusinessException(400, "notification status is invalid");
             }
             case "reminders" -> {
                 sql.append("select id,user_id userId,target_type targetType,target_id targetId,remind_at remindAt,status,created_at createdAt from reminder where 1=1");
@@ -113,7 +115,14 @@ public class AdminService {
 
         if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
         if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
+        Integer totalValue = jdbc.queryForObject("select count(*) from (" + sql + ") filtered", Integer.class, params.toArray());
+        int total = totalValue == null ? 0 : totalValue;
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
         sql.append(" order by ").append(adminSort(table, sort));
+        sql.append(" limit ? offset ?");
+        params.add(safeSize);
+        params.add((safePage - 1) * safeSize);
 
         List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -123,7 +132,7 @@ public class AdminService {
             }
             return m;
         }, params.toArray()).stream().map(this::normalizeAdminRow).toList();
-        return pageResult(rows, page, size);
+        return pagedResult(rows, total, safePage, safeSize);
     }
 
     public Map<String, Object> dashboardStats() {
@@ -143,7 +152,7 @@ public class AdminService {
         Map<String, String> allowed = new LinkedHashMap<>();
         allowed.put("id", "id");
         allowed.put("createdAt", "created_at");
-        allowed.put("status", "status");
+        allowed.put("status", "notifications".equals(table) ? "is_read" : "status");
         if (List.of("schedules", "teamTasks", "notifications").contains(table)) allowed.put("title", "title");
         if ("teamTasks".equals(table)) allowed.put("deadlineTime", "deadline_time");
         if ("reminders".equals(table)) allowed.put("remindAt", "remind_at");
@@ -418,17 +427,32 @@ public class AdminService {
     // ==================== Operation logs ====================
 
     public Map<String, Object> adminOperationLogs(int page, int size, String adminId, String action, String targetType, String dateFrom, String dateTo, String keyword) {
-        StringBuilder sql = new StringBuilder("select id,admin_id adminId,action,target_type targetType,target_id targetId,before_data beforeData,after_data afterData,ip_address ipAddress,user_agent userAgent,created_at createdAt from admin_operation_log where 1=1");
+        StringBuilder where = new StringBuilder(" from admin_operation_log where 1=1");
         List<Object> params = new ArrayList<>();
-        if (!blank(adminId)) { sql.append(" and admin_id=?"); try { params.add(Long.parseLong(adminId)); } catch (NumberFormatException ignored) {} }
-        if (!blank(action)) { sql.append(" and action like ?"); params.add("%" + action + "%"); }
-        if (!blank(targetType)) { sql.append(" and target_type=?"); params.add(targetType); }
-        if (!blank(keyword)) { sql.append(" and (action like ? or target_type like ?)"); String kw = "%" + keyword + "%"; params.add(kw); params.add(kw); }
-        if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by created_at desc");
+        if (!blank(adminId)) {
+            where.append(" and admin_id=?");
+            try {
+                params.add(Long.parseLong(adminId));
+            } catch (NumberFormatException ex) {
+                throw new BusinessException(400, "adminId is invalid");
+            }
+        }
+        if (!blank(action)) { where.append(" and action like ?"); params.add("%" + action + "%"); }
+        if (!blank(targetType)) { where.append(" and target_type=?"); params.add(targetType); }
+        if (!blank(keyword)) { where.append(" and (action like ? or target_type like ?)"); String kw = "%" + keyword + "%"; params.add(kw); params.add(kw); }
+        if (!blank(dateFrom)) { where.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { where.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
 
-        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
+        Integer totalValue = jdbc.queryForObject("select count(*)" + where, Integer.class, params.toArray());
+        int total = totalValue == null ? 0 : totalValue;
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        String sql = "select id,admin_id adminId,action,target_type targetType,target_id targetId,before_data beforeData,after_data afterData,ip_address ipAddress,user_agent userAgent,created_at createdAt" +
+                where + " order by created_at desc,id desc limit ? offset ?";
+        params.add(safeSize);
+        params.add((safePage - 1) * safeSize);
+
+        List<Map<String, Object>> rows = jdbc.query(sql, (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("adminId", rs.getLong("adminId"));
@@ -443,7 +467,7 @@ public class AdminService {
             return m;
         }, params.toArray());
 
-        return pageResult(rows, page, size);
+        return pagedResult(rows, total, safePage, safeSize);
     }
 
     public void writeAdminOperationLog(long adminId, String action, String targetType, Long targetId, Map<String, Object> beforeData, Map<String, Object> afterData, String ipAddress, String userAgent) {
@@ -487,12 +511,8 @@ public class AdminService {
         }, taskId);
     }
 
-    public Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) {
-        int p = Math.max(1, page);
-        int s = Math.min(100, Math.max(1, size));
-        int from = Math.min(rows.size(), (p - 1) * s);
-        int to = Math.min(rows.size(), from + s);
-        return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", p, "size", s);
+    private static Map<String, Object> pagedResult(List<Map<String, Object>> rows, int total, int page, int size) {
+        return Map.of("list", rows, "total", total, "page", page, "size", size);
     }
 
     private RowMapper<Map<String, Object>> adminMapper() {

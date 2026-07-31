@@ -10,6 +10,7 @@ import com.dayliane.ai.AiService;
 import com.dayliane.schedule.ScheduleService;
 import com.dayliane.team.TeamService;
 import com.dayliane.teamtask.TeamTaskService;
+import com.dayliane.user.UserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,11 +41,12 @@ class BusinessAcceptanceTests {
     @Autowired NotificationService notificationService;
     @Autowired HomeService homeService;
     @Autowired AiService aiService;
+    @Autowired UserService userService;
     @Autowired JdbcTemplate jdbc;
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_config", "notification", "notification_preference", "reminder", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "notification_preference", "reminder", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
     }
@@ -77,6 +79,22 @@ class BusinessAcceptanceTests {
             assertBusinessCode(401, () -> authService.login("15000000001", "BadPass123", "10.0.0.2"));
         }
         assertBusinessCode(429, () -> authService.login("15000000001", "BadPass123", "10.0.0.2"));
+    }
+
+    @Test
+    void passwordChangeInvalidatesExistingAccessAndRefreshTokens() {
+        long userId = register("15000000020", "Password User");
+        Map<String, Object> login = authService.login("15000000020", "Abc12345", "10.0.0.20");
+        String accessToken = text(login, "accessToken");
+        String refreshToken = text(login, "refreshToken");
+
+        userService.updatePassword(userId, "Abc12345", "Changed12345");
+
+        assertBusinessCode(401, () -> authService.requireUser("Bearer " + accessToken));
+        assertBusinessCode(401, () -> authService.refreshToken(refreshToken));
+        assertThat(count("select count(*) from auth_refresh_token where user_id=?", userId)).isZero();
+        Map<String, Object> nextLogin = authService.login("15000000020", "Changed12345", "10.0.0.20");
+        assertThat(authService.requireUser("Bearer " + text(nextLogin, "accessToken"))).isEqualTo(userId);
     }
 
     @Test
@@ -291,6 +309,108 @@ class BusinessAcceptanceTests {
         teamService.joinTeam(laUser, invite);
         teamTaskService.createTeamTask(utcUser, Map.of("teamId", teamId, "title", "Assigned tomorrow", "deadlineTime", deadline, "assigneeUserIds", List.of(utcUser)));
         assertThat((List<?>) homeService.upcoming(utcUser, now).get("teamTasks")).hasSize(1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void dateRangesIncludeCrossMonthItemsAndRejectInvalidTimes() {
+        long userId = authService.register("15000000021", "Abc12345", "Range User", "UTC");
+        long scheduleId = id(scheduleService.createSchedule(userId, Map.of(
+                "title", "Cross-month schedule",
+                "timeType", "duration_task",
+                "startTime", "2026-01-31T23:00:00Z",
+                "endTime", "2026-02-02T01:00:00Z"
+        )));
+        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService
+                .listSchedules(userId, 1, 20, null, null, null, "2026-02-01", "2026-02-01").get("list");
+        assertThat(schedules).extracting(item -> item.get("id")).containsExactly(scheduleId);
+
+        Map<String, Object> calendar = scheduleService.calendar(userId, 2026, 2);
+        List<Map<String, Object>> days = (List<Map<String, Object>>) calendar.get("days");
+        Map<String, Object> februaryFirst = days.stream()
+                .filter(day -> "2026-02-01".equals(day.get("date")))
+                .findFirst().orElseThrow();
+        assertThat((List<Map<String, Object>>) februaryFirst.get("schedules"))
+                .extracting(item -> item.get("id")).containsExactly(scheduleId);
+        assertThat(calendar).containsEntry("timezone", "UTC");
+
+        long teamId = id(teamService.createTeam(userId, "Range Team"));
+        long taskId = id(teamTaskService.createTeamTask(userId, Map.of(
+                "teamId", teamId,
+                "title", "Cross-month task",
+                "assigneeUserIds", List.of(userId),
+                "startTime", "2026-01-31T23:30:00Z",
+                "deadlineTime", "2026-02-02T02:00:00Z"
+        )));
+        List<Map<String, Object>> tasks = (List<Map<String, Object>>) teamTaskService
+                .listMyTeamTasks(userId, 1, 20, null, null, "2026-02-01", "2026-02-01").get("list");
+        assertThat(tasks).extracting(item -> item.get("id")).containsExactly(taskId);
+
+        assertBusinessCode(400, () -> scheduleService.createSchedule(userId, Map.of(
+                "title", "Invalid schedule", "timeType", "deadline_task", "deadlineTime", "not-a-time")));
+        assertBusinessCode(400, () -> scheduleService.createSchedule(userId, Map.of(
+                "title", "Reversed schedule", "timeType", "duration_task",
+                "startTime", "2026-02-02T10:00:00Z", "endTime", "2026-02-02T09:00:00Z")));
+        assertBusinessCode(400, () -> teamTaskService.createTeamTask(userId, Map.of(
+                "teamId", teamId, "title", "Invalid task", "deadlineTime", "not-a-time")));
+        assertBusinessCode(400, () -> teamTaskService.createTeamTask(userId, Map.of(
+                "teamId", teamId, "title", "Reversed task",
+                "startTime", "2026-02-02T10:00:00Z", "deadlineTime", "2026-02-02T09:00:00Z")));
+        assertBusinessCode(400, () -> scheduleService.calendar(userId, 2026, 13));
+    }
+
+    @Test
+    void homeTodayIsNotCappedAtOneHundredItems() {
+        long userId = authService.register("15000000022", "Abc12345", "Busy User", "UTC");
+        Instant now = Instant.parse("2026-03-01T00:00:00Z");
+        Timestamp dueAt = Timestamp.from(now.plus(1, ChronoUnit.HOURS));
+        for (int i = 0; i < 105; i++) {
+            jdbc.update("insert into schedule (user_id,title,time_type,deadline_time,status) values (?,?, 'deadline_task',?, 'pending')",
+                    userId, "Schedule " + i, dueAt);
+        }
+
+        assertThat((List<?>) homeService.today(userId, now).get("personalSchedules")).hasSize(105);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminFiltersAndDatabasePagesReturnAccurateTotals() {
+        long userId = register("15000000023", "Paged User");
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values ('root','Admin12345','super_admin','active')");
+        long adminId = jdbc.queryForObject("select id from admin_user where username='root'", Long.class);
+
+        jdbc.update("insert into notification (user_id,type,title,is_read) values (?, 'test','Unread notice',false)", userId);
+        jdbc.update("insert into notification (user_id,type,title,is_read) values (?, 'test','Read notice',true)", userId);
+        Map<String, Object> unread = adminService.adminList("notifications", 1, 20, null, "unread", null, null);
+        assertThat(unread).containsEntry("total", 1);
+        assertThat((List<Map<String, Object>>) unread.get("list")).singleElement()
+                .satisfies(item -> assertThat(item).containsEntry("title", "Unread notice"));
+
+        jdbc.update("insert into reminder (user_id,target_type,target_id,remind_at,status) values (?, 'schedule',1,?, 'pending')", userId, Timestamp.from(Instant.now()));
+        jdbc.update("insert into reminder (user_id,target_type,target_id,remind_at,status) values (?, 'schedule',2,?, 'sent')", userId, Timestamp.from(Instant.now()));
+        assertThat(adminService.adminList("reminders", 1, 20, null, "sent", null, null)).containsEntry("total", 1);
+
+        for (int i = 0; i < 3; i++) {
+            jdbc.update("insert into admin_operation_log (admin_id,action,target_type) values (?,?,'user')", adminId, "action_" + i);
+            jdbc.update("insert into ai_usage_log (user_id,feature_type,status) values (?,'schedule_parse','success')", userId);
+            jdbc.update("insert into team (name,invite_code,invite_code_expire_at,owner_id,status) values (?,?,?,?,'active')",
+                    "Team " + i, "PAGE0" + i, Timestamp.from(Instant.now().plus(1, ChronoUnit.DAYS)), userId);
+            long teamId = jdbc.queryForObject("select id from team where invite_code=?", Long.class, "PAGE0" + i);
+            jdbc.update("insert into team_member (team_id,user_id,role,status,joined_at) values (?,?,'owner','active',utc_timestamp())", teamId, userId);
+        }
+
+        Map<String, Object> operationLogs = adminService.adminOperationLogs(2, 2, null, null, null, null, null, null);
+        assertThat(operationLogs).containsEntry("total", 3).containsEntry("page", 2).containsEntry("size", 2);
+        assertThat((List<?>) operationLogs.get("list")).hasSize(1);
+        assertBusinessCode(400, () -> adminService.adminOperationLogs(1, 20, "invalid", null, null, null, null, null));
+
+        Map<String, Object> aiLogs = aiService.usageLogs(2, 2, String.valueOf(userId), null, "success", null, null);
+        assertThat(aiLogs).containsEntry("total", 3).containsEntry("page", 2).containsEntry("size", 2);
+        assertThat((List<?>) aiLogs.get("list")).hasSize(1);
+
+        Map<String, Object> teams = teamService.listTeams(userId, 2, 2);
+        assertThat(teams).containsEntry("total", 3).containsEntry("page", 2).containsEntry("size", 2);
+        assertThat((List<?>) teams.get("list")).hasSize(1);
     }
 
     @Test

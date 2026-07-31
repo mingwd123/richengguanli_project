@@ -36,14 +36,16 @@ public class ReminderService {
         });
         int sentCount = 0;
         for (Map<String, Object> item : due) {
+            int claimed = jdbc.update("update reminder set status='processing' where id=? and status='pending'", item.get("id"));
+            if (claimed == 0) continue;
             if (!targetIsActive(item)) {
-                jdbc.update("update reminder set status='cancelled' where id=? and status='pending'", item.get("id"));
+                jdbc.update("update reminder set status='cancelled' where id=? and status='processing'", item.get("id"));
                 continue;
             }
             boolean sent = notificationService.createNotification(
                     ((Number) item.get("userId")).longValue(), "reminder", "日程提醒", "你有一项日程或任务即将到期",
                     String.valueOf(item.get("targetType")), ((Number) item.get("targetId")).longValue(), ((Number) item.get("id")).longValue());
-            jdbc.update("update reminder set status=?, sent_at=case when ? then utc_timestamp() else sent_at end where id=?",
+            jdbc.update("update reminder set status=?, sent_at=case when ? then utc_timestamp() else sent_at end where id=? and status='processing'",
                     sent ? "sent" : "cancelled", sent, item.get("id"));
             if (sent) sentCount++;
         }
@@ -56,7 +58,13 @@ public class ReminderService {
         params.add(userId);
         if (status != null && !status.isBlank()) { sql.append(" and r.status=?"); params.add(status); }
         if (targetType != null && !targetType.isBlank()) { sql.append(" and r.target_type=?"); params.add(targetType); }
-        sql.append(" order by r.remind_at desc,r.id desc");
+        Integer totalValue = jdbc.queryForObject("select count(*) from (" + sql + ") filtered", Integer.class, params.toArray());
+        int total = totalValue == null ? 0 : totalValue;
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        sql.append(" order by r.remind_at desc,r.id desc limit ? offset ?");
+        params.add(safeSize);
+        params.add((safePage - 1) * safeSize);
         List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", rs.getLong("id"));
@@ -71,11 +79,7 @@ public class ReminderService {
             row.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return row;
         }, params.toArray());
-        int safePage = Math.max(1, page);
-        int safeSize = Math.min(100, Math.max(1, size));
-        int from = Math.min(rows.size(), (safePage - 1) * safeSize);
-        int to = Math.min(rows.size(), from + safeSize);
-        return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", safePage, "size", safeSize);
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
     }
 
     private boolean targetIsActive(Map<String, Object> reminder) {

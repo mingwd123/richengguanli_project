@@ -135,20 +135,27 @@ public class AiService {
     }
 
     public Map<String, Object> usageLogs(int page, int size, String userId, String featureType, String status, String dateFrom, String dateTo) {
-        StringBuilder sql = new StringBuilder("select id,user_id userId,feature_type featureType,input_text inputText,output_text outputText,status,error_message errorMessage,created_at createdAt from ai_usage_log where 1=1");
+        StringBuilder where = new StringBuilder(" from ai_usage_log where 1=1");
         List<Object> params = new ArrayList<>();
-        if (!blank(userId)) { try { sql.append(" and user_id=?"); params.add(Long.parseLong(userId)); } catch (NumberFormatException ex) { throw new BusinessException(400, "userId is invalid"); } }
-        if (!blank(featureType)) { sql.append(" and feature_type=?"); params.add(featureType); }
-        if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
-        addDateFilters(sql, params, dateFrom, dateTo);
-        sql.append(" order by created_at desc");
-        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
+        if (!blank(userId)) { try { where.append(" and user_id=?"); params.add(Long.parseLong(userId)); } catch (NumberFormatException ex) { throw new BusinessException(400, "userId is invalid"); } }
+        if (!blank(featureType)) { where.append(" and feature_type=?"); params.add(featureType); }
+        if (!blank(status)) { where.append(" and status=?"); params.add(status); }
+        addDateFilters(where, params, dateFrom, dateTo);
+        Integer totalValue = jdbc.queryForObject("select count(*)" + where, Integer.class, params.toArray());
+        int total = totalValue == null ? 0 : totalValue;
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        String sql = "select id,user_id userId,feature_type featureType,input_text inputText,output_text outputText,status,error_message errorMessage,created_at createdAt" +
+                where + " order by created_at desc,id desc limit ? offset ?";
+        params.add(safeSize);
+        params.add((safePage - 1) * safeSize);
+        List<Map<String, Object>> rows = jdbc.query(sql, (rs, i) -> {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", rs.getLong("id")); row.put("userId", rs.getObject("userId")); row.put("featureType", rs.getString("featureType"));
             row.put("inputText", rs.getString("inputText")); row.put("outputText", rs.getString("outputText")); row.put("status", rs.getString("status"));
             row.put("errorMessage", rs.getString("errorMessage")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); return row;
         }, params.toArray());
-        return pageResult(rows, page, size);
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
     }
 
     public Map<String, Object> usageStats(String dateFrom, String dateTo) {
@@ -283,7 +290,6 @@ public class AiService {
     private void requireText(String text) { if (blank(text)) throw new BusinessException(400, "text is required"); }
     private void validateConfig(String provider, String modelName, String apiBaseUrl) { if (blank(provider) || blank(modelName) || blank(apiBaseUrl)) throw new BusinessException(400, "provider, modelName and apiBaseUrl are required"); try { URI.create(trimBaseUrl(apiBaseUrl)); } catch (Exception ex) { throw new BusinessException(400, "apiBaseUrl is invalid"); } }
     private void addDateFilters(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) { if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); } if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); } }
-    private Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) { int p = Math.max(1, page); int s = Math.min(100, Math.max(1, size)); int from = Math.min(rows.size(), (p - 1) * s); return Map.of("list", rows.subList(from, Math.min(rows.size(), from + s)), "total", rows.size(), "page", p, "size", s); }
     private Map<String, Object> safeConfig(Map<String, Object> config) { Map<String, Object> out = new LinkedHashMap<>(config); out.remove("apiKey"); out.put("apiKeyMasked", maskApiKey()); return out; }
     private String maskApiKey() { if (blank(apiKey)) return ""; return apiKey.length() <= 8 ? "****" : apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4); }
     private static String stripCodeFence(String value) { String text = value.trim(); if (text.startsWith("```")) { int firstNewline = text.indexOf('\n'); int end = text.lastIndexOf("```"); return firstNewline >= 0 && end > firstNewline ? text.substring(firstNewline + 1, end).trim() : text; } return text; }

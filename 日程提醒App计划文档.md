@@ -928,7 +928,7 @@ app:
 - GET /api/v1/teams/{teamId}/tasks 查询某团队任务（支持分页、状态筛选、时间范围筛选）
 - GET /api/v1/team-tasks/{id} 查询任务详情
 - PUT /api/v1/team-tasks/{id} 修改任务
-- PUT /api/v1/team-tasks/{id}/deadline 修改任务开始时间/截止时间
+- PUT /api/v1/team-tasks/{id}/time 修改任务开始时间/截止时间
 - DELETE /api/v1/team-tasks/{id} 删除任务（软删除）
 - POST /api/v1/team-tasks/{id}/accept 接受任务
 - POST /api/v1/team-tasks/{id}/reject 拒绝任务
@@ -1213,7 +1213,7 @@ V1.1 为支持拖拽排序，个人日程表 schedule 和团队任务表 team_ta
 - DELETE /api/v1/task-groups/{id} 删除分组
 - PUT /api/v1/task-groups/sort 调整分组顺序
 - PUT /api/v1/schedules/sort 调整个人日程排序
-- PUT /api/v1/team-tasks/sort 调整团队任务排序
+- PUT /api/v1/teams/{teamId}/tasks/sort 调整团队任务排序
 - PUT /api/v1/schedules/{id}/move-group 移动个人日程到分组
 - PUT /api/v1/team-tasks/{id}/move-group 移动团队任务到分组
 

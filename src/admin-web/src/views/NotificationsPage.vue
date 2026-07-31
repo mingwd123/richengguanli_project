@@ -5,6 +5,10 @@ import DataTable from '../components/DataTable.vue'
 
 const store = useAdminStore()
 const showDetail = ref(false)
+const statusOptions = [
+  { value: 'unread', label: '未读' },
+  { value: 'read', label: '已读' },
+]
 
 const columns = [
   { key: 'id', label: 'ID' },
@@ -79,6 +83,7 @@ function closeDetail() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :status-options="statusOptions"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"

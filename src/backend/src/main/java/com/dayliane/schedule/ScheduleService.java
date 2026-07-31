@@ -32,9 +32,16 @@ public class ScheduleService {
         String timeType = textOr(req, "timeType", "deadline_task");
         if (title.isBlank()) throw new BusinessException(400, "title is required");
         if (!List.of("point_event", "deadline_task", "duration_task").contains(timeType)) throw new BusinessException(400, "timeType is invalid");
-        if ("point_event".equals(timeType) && blank(text(req, "startTime"))) throw new BusinessException(400, "startTime is required");
-        if ("deadline_task".equals(timeType) && blank(text(req, "deadlineTime"))) throw new BusinessException(400, "deadlineTime is required");
-        if ("duration_task".equals(timeType) && (blank(text(req, "startTime")) || blank(text(req, "endTime")))) throw new BusinessException(400, "startTime and endTime are required");
+        Timestamp startTime = parseEditableTime(req.get("startTime"), "startTime");
+        Timestamp endTime = parseEditableTime(req.get("endTime"), "endTime");
+        Timestamp deadlineTime = parseEditableTime(req.get("deadlineTime"), "deadlineTime");
+        if ("point_event".equals(timeType)) { endTime = null; deadlineTime = null; }
+        if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
+        if ("duration_task".equals(timeType)) deadlineTime = null;
+        validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
+        Timestamp storedStartTime = startTime;
+        Timestamp storedEndTime = endTime;
+        Timestamp storedDeadlineTime = deadlineTime;
         Map<String, Object> group = resolvePersonalTaskGroup(userId, req);
         int sortOrder = nextScheduleSortOrder(userId, longValue(group.get("id")));
         KeyHolder keyHolder = new GeneratedKeyHolder();
@@ -47,9 +54,9 @@ public class ScheduleService {
             ps.setString(5, String.valueOf(group.get("name")));
             ps.setInt(6, sortOrder);
             ps.setString(7, timeType);
-            ps.setTimestamp(8, parseTime(text(req, "startTime")));
-            ps.setTimestamp(9, parseTime(text(req, "endTime")));
-            ps.setTimestamp(10, parseTime(text(req, "deadlineTime")));
+            ps.setTimestamp(8, storedStartTime);
+            ps.setTimestamp(9, storedEndTime);
+            ps.setTimestamp(10, storedDeadlineTime);
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
@@ -62,17 +69,91 @@ public class ScheduleService {
     }
 
     public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName, String keyword, String dateFrom, String dateTo, String sort) {
-        StringBuilder sql = new StringBuilder("select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt from schedule where user_id=:userId and deleted_at is null");
+        StringBuilder where = new StringBuilder(" from schedule where user_id=:userId and deleted_at is null");
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
-        if (!blank(status)) { sql.append(" and status=:status"); p.addValue("status", status); }
-        if (!blank(groupName)) { sql.append(" and group_name=:groupName"); p.addValue("groupName", groupName); }
-        if (!blank(keyword)) { sql.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
-        if (!blank(dateFrom)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) >= :dateFrom"); p.addValue("dateFrom", dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) <= :dateTo"); p.addValue("dateTo", dateTo + " 23:59:59"); }
-        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "sort_order asc,id asc" : scheduleOrder(sort));
-        List<Map<String, Object>> rows = named.query(sql.toString(), p, scheduleMapper());
-        rows.forEach(item -> addReminderSummary(item, userId));
-        return pageResult(rows, page, size);
+        if (!blank(status)) { where.append(" and status=:status"); p.addValue("status", status); }
+        if (!blank(groupName)) { where.append(" and group_name=:groupName"); p.addValue("groupName", groupName); }
+        if (!blank(keyword)) { where.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
+        if (!blank(dateFrom)) { where.append(" and coalesce(end_time,deadline_time,start_time,created_at) >= :dateFrom"); p.addValue("dateFrom", dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { where.append(" and coalesce(start_time,deadline_time,end_time,created_at) <= :dateTo"); p.addValue("dateTo", dateTo + " 23:59:59"); }
+        String order = "completed".equals(status) && "manual".equals(sort) ? "sort_order asc,id asc" : scheduleOrder(sort);
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        Integer totalValue = named.queryForObject("select count(*)" + where, p, Integer.class);
+        int total = totalValue == null ? 0 : totalValue;
+        p.addValue("limit", safeSize).addValue("offset", (safePage - 1) * safeSize);
+        String select = "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt";
+        List<Map<String, Object>> rows = named.query(select + where + " order by " + order + " limit :limit offset :offset", p, scheduleMapper());
+        addReminderSummaries(rows, userId);
+        return pagedResult(rows, total, safePage, safeSize);
+    }
+
+    public List<Map<String, Object>> listSchedulesInRange(long userId, String status, Instant startInclusive, Instant endExclusive) {
+        String sql = "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt " +
+                "from schedule where user_id=? and deleted_at is null and (? is null or status=?) " +
+                "and coalesce(end_time,deadline_time,start_time,created_at)>=? and coalesce(start_time,deadline_time,end_time,created_at)<? " +
+                "order by coalesce(deadline_time,end_time,start_time,created_at),id";
+        List<Map<String, Object>> rows = jdbc.query(sql, scheduleMapper(), userId, status, status, Timestamp.from(startInclusive), Timestamp.from(endExclusive));
+        addReminderSummaries(rows, userId);
+        return rows;
+    }
+
+    public Map<String, Object> calendar(long userId, int year, int month) {
+        YearMonth yearMonth;
+        try {
+            yearMonth = YearMonth.of(year, month);
+        } catch (DateTimeException ex) {
+            throw new BusinessException(400, "year or month is invalid");
+        }
+        ZoneId zone = userZone(userId);
+        Instant monthStart = yearMonth.atDay(1).atStartOfDay(zone).toInstant();
+        Instant nextMonthStart = yearMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant();
+        List<Map<String, Object>> all = listSchedulesInRange(userId, null, monthStart, nextMonthStart);
+        List<Map<String, Object>> days = new ArrayList<>();
+        for (int day = 1; day <= yearMonth.lengthOfMonth(); day++) {
+            LocalDate date = yearMonth.atDay(day);
+            List<Map<String, Object>> schedules = all.stream().filter(item -> overlapsDay(item, date, zone)).toList();
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("date", date.toString());
+            row.put("hasSchedule", !schedules.isEmpty());
+            row.put("pendingCount", schedules.stream().filter(item -> "pending".equals(item.get("status"))).count());
+            row.put("completedCount", schedules.stream().filter(item -> "completed".equals(item.get("status"))).count());
+            row.put("schedules", schedules);
+            days.add(row);
+        }
+        return Map.of("year", year, "month", month, "timezone", zone.getId(), "days", days);
+    }
+
+    private ZoneId userZone(long userId) {
+        String timezone = jdbc.queryForObject("select timezone from `user` where id=? and deleted_at is null", String.class, userId);
+        try {
+            return ZoneId.of(timezone == null ? "Asia/Shanghai" : timezone);
+        } catch (DateTimeException ex) {
+            return ZoneId.of("Asia/Shanghai");
+        }
+    }
+
+    private static boolean overlapsDay(Map<String, Object> schedule, LocalDate date, ZoneId zone) {
+        Instant dayStart = date.atStartOfDay(zone).toInstant();
+        Instant dayEnd = date.plusDays(1).atStartOfDay(zone).toInstant();
+        Instant start = instantValue(schedule.get("startTime"));
+        Instant end = instantValue(schedule.get("endTime"));
+        if ("duration_task".equals(schedule.get("timeType")) && start != null && end != null) {
+            return start.isBefore(dayEnd) && end.isAfter(dayStart);
+        }
+        Instant point = instantValue(schedule.get("deadlineTime"));
+        if (point == null) point = start;
+        if (point == null) point = instantValue(schedule.get("createdAt"));
+        return point != null && !point.isBefore(dayStart) && point.isBefore(dayEnd);
+    }
+
+    private static Instant instantValue(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) return null;
+        try {
+            return OffsetDateTime.parse(String.valueOf(value)).toInstant();
+        } catch (DateTimeException ex) {
+            return null;
+        }
     }
 
     private static String scheduleOrder(String sort) {
@@ -112,15 +193,13 @@ public class ScheduleService {
         Timestamp currentStartTime = parseTime(String.valueOf(current.getOrDefault("startTime", "")));
         Timestamp currentEndTime = parseTime(String.valueOf(current.getOrDefault("endTime", "")));
         Timestamp currentDeadlineTime = parseTime(String.valueOf(current.getOrDefault("deadlineTime", "")));
-        Timestamp startTime = req.containsKey("startTime") ? parseOptional(req.get("startTime")) : currentStartTime;
-        Timestamp endTime = req.containsKey("endTime") ? parseOptional(req.get("endTime")) : currentEndTime;
-        Timestamp deadlineTime = req.containsKey("deadlineTime") ? parseOptional(req.get("deadlineTime")) : currentDeadlineTime;
+        Timestamp startTime = req.containsKey("startTime") ? parseEditableTime(req.get("startTime"), "startTime") : currentStartTime;
+        Timestamp endTime = req.containsKey("endTime") ? parseEditableTime(req.get("endTime"), "endTime") : currentEndTime;
+        Timestamp deadlineTime = req.containsKey("deadlineTime") ? parseEditableTime(req.get("deadlineTime"), "deadlineTime") : currentDeadlineTime;
         if ("point_event".equals(timeType)) { endTime = null; deadlineTime = null; }
         if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
         if ("duration_task".equals(timeType)) deadlineTime = null;
-        if ("point_event".equals(timeType) && startTime == null) throw new BusinessException(400, "startTime is required");
-        if ("deadline_task".equals(timeType) && deadlineTime == null) throw new BusinessException(400, "deadlineTime is required");
-        if ("duration_task".equals(timeType) && (startTime == null || endTime == null)) throw new BusinessException(400, "startTime and endTime are required");
+        validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
         Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolvePersonalTaskGroup(userId, req) : null;
         Integer sortOrder = group == null ? null : nextScheduleSortOrder(userId, longValue(group.get("id")));
         jdbc.update("update schedule set title=?, description=?, group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=?, start_time=?, end_time=?, deadline_time=? where id=? and user_id=?",
@@ -320,6 +399,18 @@ public class ScheduleService {
         item.put("remindAt", rows.isEmpty() ? "" : iso(rows.get(0)));
     }
 
+    private void addReminderSummaries(List<Map<String, Object>> items, long userId) {
+        if (items.isEmpty()) return;
+        List<Long> ids = items.stream().map(item -> longValue(item.get("id"))).toList();
+        MapSqlParameterSource params = new MapSqlParameterSource("userId", userId).addValue("ids", ids);
+        Map<Long, Timestamp> reminders = new HashMap<>();
+        List<Map.Entry<Long, Timestamp>> reminderRows = named.query(
+                "select target_id targetId,min(remind_at) remindAt from reminder where user_id=:userId and target_type='schedule' and target_id in (:ids) and status='pending' group by target_id",
+                params, (rs, i) -> Map.entry(rs.getLong("targetId"), rs.getTimestamp("remindAt")));
+        reminderRows.forEach(row -> reminders.put(row.getKey(), row.getValue()));
+        items.forEach(item -> item.put("remindAt", iso(reminders.get(longValue(item.get("id"))))));
+    }
+
     private long requiredId(Map<String, Object> req, String key) {
         Object value = req.get(key);
         if (value == null || String.valueOf(value).isBlank()) throw new BusinessException(400, key + " is required");
@@ -327,10 +418,10 @@ public class ScheduleService {
     }
 
     private void validateTaskGroupName(String name) { if (name == null || name.isBlank()) throw new BusinessException(400, "task group name is required"); if (name.length() > 50) throw new BusinessException(400, "task group name is too long"); }
-    private void createScheduleReminders(long userId, long scheduleId, Map<String, Object> req) { Object arr = req.get("remindAts"); if (arr instanceof List<?> list) for (Object v : list) insertReminder(userId, "schedule", scheduleId, parseTime(String.valueOf(v))); else if (req.get("remindAt") != null) insertReminder(userId, "schedule", scheduleId, parseTime(String.valueOf(req.get("remindAt")))); }
+    private void createScheduleReminders(long userId, long scheduleId, Map<String, Object> req) { Object arr = req.get("remindAts"); if (arr instanceof List<?> list) for (Object v : list) insertReminder(userId, "schedule", scheduleId, parseRequiredTime(v, "remindAt")); else if (req.get("remindAt") != null && !String.valueOf(req.get("remindAt")).isBlank()) insertReminder(userId, "schedule", scheduleId, parseRequiredTime(req.get("remindAt"), "remindAt")); }
     private void insertReminder(long userId, String type, long id, Timestamp remindAt) { if (remindAt != null) jdbc.update("insert into reminder (user_id,target_type,target_id,remind_at,status) values (?,?,?,?, 'pending')", userId, type, id, remindAt); }
     private void cancelPendingReminders(String type, long id, Long userId) { if (userId == null) jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and status='pending'", type, id); else jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and user_id=? and status='pending'", type, id, userId); }
-    public Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) { int p = Math.max(1, page); int s = Math.min(100, Math.max(1, size)); int from = Math.min(rows.size(), (p - 1) * s); int to = Math.min(rows.size(), from + s); return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", p, "size", s); }
+    private static Map<String, Object> pagedResult(List<Map<String, Object>> rows, int total, int page, int size) { return Map.of("list", rows, "total", total, "page", page, "size", size); }
     private Integer count(String sql, Object... args) { Integer n = jdbc.queryForObject(sql, Integer.class, args); return n == null ? 0 : n; }
     private static String iso(Timestamp ts) { return ts == null ? "" : OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC).toString(); }
     private static boolean blank(String s) { return s == null || s.isBlank(); }
@@ -339,6 +430,8 @@ public class ScheduleService {
     private static String nullableText(Object v) { if (v == null) return null; String s = String.valueOf(v); return s.isBlank() ? null : s; }
     private static long longValue(Object v) { return ((Number) v).longValue(); }
     private static long number(Object v) { return v instanceof Number n ? n.longValue() : Long.parseLong(String.valueOf(v)); }
-    private static Timestamp parseOptional(Object v) { return v == null ? null : parseTime(String.valueOf(v)); }
+    private static Timestamp parseEditableTime(Object value, String field) { if (value == null || String.valueOf(value).isBlank()) return null; return parseRequiredTime(value, field); }
+    private static Timestamp parseRequiredTime(Object value, String field) { Timestamp parsed = parseTime(String.valueOf(value)); if (parsed == null) throw new BusinessException(400, field + " is invalid"); return parsed; }
+    private static void validateScheduleTimes(String timeType, Timestamp startTime, Timestamp endTime, Timestamp deadlineTime) { if ("point_event".equals(timeType) && startTime == null) throw new BusinessException(400, "startTime is required"); if ("deadline_task".equals(timeType) && deadlineTime == null) throw new BusinessException(400, "deadlineTime is required"); if ("duration_task".equals(timeType) && (startTime == null || endTime == null)) throw new BusinessException(400, "startTime and endTime are required"); if (startTime != null && endTime != null && endTime.before(startTime)) throw new BusinessException(400, "endTime must not be before startTime"); }
     private static Timestamp parseTime(String value) { if (value == null || value.isBlank()) return null; try { return Timestamp.from(OffsetDateTime.parse(value).toInstant()); } catch (Exception ignored) {} try { return Timestamp.valueOf(LocalDateTime.parse(value)); } catch (Exception ignored) {} return null; }
 }

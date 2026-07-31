@@ -127,12 +127,15 @@ public class AuthService {
         if (count("select count(*) from `user` where id=? and status='active' and deleted_at is null", userId) == 0) {
             throw new BusinessException(401, "refresh token is invalid");
         }
+        if (jwtService.getTokenVersion(refreshToken) != tokenVersion(userId)) {
+            throw new BusinessException(401, "refresh token is invalid");
+        }
         String jti = jwtService.getJti(refreshToken);
         if (jti == null || !refreshTokenStore.isValid(jti, userId)) {
             throw new BusinessException(401, "refresh token is invalid");
         }
         refreshTokenStore.invalidate(jti);
-        String newAccessToken = jwtService.issueAccessToken(userId);
+        String newAccessToken = issueAccessToken(userId);
         String newRefreshToken = issueRefreshToken(userId);
         return Map.of(
                 "userId", userId,
@@ -180,6 +183,9 @@ public class AuthService {
         if (count("select count(*) from `user` where id=? and status='active' and deleted_at is null", userId) == 0) {
             throw new BusinessException(401, "unauthorized");
         }
+        if (jwtService.getTokenVersion(token) != tokenVersion(userId)) {
+            throw new BusinessException(401, "unauthorized");
+        }
         return userId;
     }
 
@@ -195,11 +201,11 @@ public class AuthService {
     }
 
     public String issueAccessToken(long userId) {
-        return jwtService.issueAccessToken(userId);
+        return jwtService.issueAccessToken(userId, tokenVersion(userId));
     }
 
     public String issueRefreshToken(long userId) {
-        String token = jwtService.issueRefreshToken(userId);
+        String token = jwtService.issueRefreshToken(userId, tokenVersion(userId));
         String jti = jwtService.getJti(token);
         if (jti != null) {
             refreshTokenStore.save(jti, userId);
@@ -210,7 +216,7 @@ public class AuthService {
     private Map<String, Object> tokensMap(long userId) {
         return Map.of(
                 "userId", userId,
-                "accessToken", jwtService.issueAccessToken(userId),
+                "accessToken", issueAccessToken(userId),
                 "refreshToken", issueRefreshToken(userId),
                 "expiresIn", 86400
         );
@@ -288,6 +294,12 @@ public class AuthService {
     private Integer count(String sql, Object... args) {
         Integer n = jdbc.queryForObject(sql, Integer.class, args);
         return n == null ? 0 : n;
+    }
+
+    private int tokenVersion(long userId) {
+        Integer version = jdbc.queryForObject("select token_version from `user` where id=? and deleted_at is null", Integer.class, userId);
+        if (version == null) throw new BusinessException(401, "unauthorized");
+        return version;
     }
 
     private static boolean blank(String s) {

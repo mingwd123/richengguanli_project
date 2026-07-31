@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Bell, Calendar, CircleCheck, Connection, DataAnalysis, Document, Expand,
@@ -53,9 +53,15 @@ function handleSelect(path) { router.push(path) }
 function handleLogout() { store.logout(); router.replace('/login') }
 function handleMediaChange(event) { if (event.matches) isCollapse.value = true }
 
+watch(() => store.token, value => {
+  if (!value && route.path !== '/login') router.replace('/login')
+})
+
 onMounted(async () => {
   compactMedia.addEventListener('change', handleMediaChange)
-  if (store.token && !store.profile) await store.loadProfile()
+  if (store.token && !store.profile) {
+    try { await store.loadProfile() } catch { return }
+  }
   if (route.path === '/admin-users' && !store.isSuperAdmin) await router.replace('/')
 })
 onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))

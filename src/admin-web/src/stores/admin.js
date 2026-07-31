@@ -50,7 +50,12 @@ export const useAdminStore = defineStore('admin', () => {
   }))
 
   async function request(path, options = {}) {
-    return apiRequest(path, options, token.value)
+    try {
+      return await apiRequest(path, options, token.value)
+    } catch (error) {
+      if (error.code === 401) logout()
+      throw error
+    }
   }
 
   async function login() {

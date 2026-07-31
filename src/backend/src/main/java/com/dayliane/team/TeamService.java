@@ -57,8 +57,14 @@ public class TeamService {
             case "name_asc" -> "t.name asc, t.id asc";
             default -> throw new BusinessException(400, "sort is invalid");
         };
-        List<Map<String, Object>> rows = jdbc.query("select t.id from team t join team_member m on m.team_id=t.id where m.user_id=? and m.status='active' and t.deleted_at is null order by " + order, (rs, i) -> teamView(rs.getLong("id"), userId), userId);
-        return pageResult(rows, page, size);
+        String from = " from team t join team_member m on m.team_id=t.id where m.user_id=? and m.status='active' and t.deleted_at is null";
+        int total = count("select count(*)" + from, userId);
+        int safePage = Math.max(1, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        List<Long> ids = jdbc.queryForList("select t.id" + from + " order by " + order + " limit ? offset ?", Long.class,
+                userId, safeSize, (safePage - 1) * safeSize);
+        List<Map<String, Object>> rows = ids.stream().map(id -> teamView(id, userId)).toList();
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
     }
 
     public Map<String, Object> teamDetail(long teamId, long userId) {
@@ -159,14 +165,6 @@ public class TeamService {
 
     private String inviteCode() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 6).toUpperCase();
-    }
-
-    private Map<String, Object> pageResult(List<Map<String, Object>> rows, int page, int size) {
-        int p = Math.max(1, page);
-        int s = Math.min(100, Math.max(1, size));
-        int from = Math.min(rows.size(), (p - 1) * s);
-        int to = Math.min(rows.size(), from + s);
-        return Map.of("list", rows.subList(from, to), "total", rows.size(), "page", p, "size", s);
     }
 
     private static String iso(Timestamp ts) {

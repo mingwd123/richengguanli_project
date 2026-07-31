@@ -16,6 +16,6 @@ describe('admin api client', () => {
 
   it('surfaces API errors', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ code: 403, message: 'forbidden' }) }))
-    await expect(apiRequest('/admin-users')).rejects.toThrow('forbidden')
+    await expect(apiRequest('/admin-users')).rejects.toMatchObject({ message: 'forbidden', code: 403 })
   })
 })

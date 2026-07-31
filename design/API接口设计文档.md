@@ -902,7 +902,7 @@ Authorization: Bearer {access_token}
 | DELETE | /api/v1/task-groups/{id} | 删除分组 | 是 |
 | PUT | /api/v1/task-groups/sort | 调整分组顺序 | 是 |
 | PUT | /api/v1/schedules/sort | 调整个人日程排序 | 是 |
-| PUT | /api/v1/team-tasks/sort | 调整团队任务排序 | 是 |
+| PUT | /api/v1/teams/{teamId}/tasks/sort | 调整团队任务排序 | 是 |
 | PUT | /api/v1/schedules/{id}/move-group | 移动个人日程到分组 | 是 |
 | PUT | /api/v1/team-tasks/{id}/move-group | 移动团队任务到分组 | 是 |
 
