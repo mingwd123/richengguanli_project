@@ -57,11 +57,14 @@ public class ScheduleService {
         return requireSchedule(id, userId);
     }
 
-    public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName) {
+    public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName, String keyword, String dateFrom, String dateTo) {
         StringBuilder sql = new StringBuilder("select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt from schedule where user_id=:userId and deleted_at is null");
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
         if (!blank(status)) { sql.append(" and status=:status"); p.addValue("status", status); }
         if (!blank(groupName)) { sql.append(" and group_name=:groupName"); p.addValue("groupName", groupName); }
+        if (!blank(keyword)) { sql.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
+        if (!blank(dateFrom)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) >= :dateFrom"); p.addValue("dateFrom", dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) <= :dateTo"); p.addValue("dateTo", dateTo + " 23:59:59"); }
         sql.append(" order by group_id asc, sort_order asc, coalesce(deadline_time,end_time,start_time,created_at) asc, id asc");
         return pageResult(named.query(sql.toString(), p, scheduleMapper()), page, size);
     }

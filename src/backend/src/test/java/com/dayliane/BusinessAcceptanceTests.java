@@ -108,7 +108,7 @@ class BusinessAcceptanceTests {
         assertBusinessCode(403, () -> teamService.teamDetail(teamId, member));
 
         teamService.joinTeam(member, text(team, "inviteCode"));
-        assertThat(teamTaskService.listMyTeamTasks(member, 1, 20, null)).containsEntry("total", 0);
+        assertThat(teamTaskService.listMyTeamTasks(member, 1, 20, null, null, null, null)).containsEntry("total", 0);
         assertThat(count("select count(*) from team_task_assignee where task_id=? and user_id=? and is_active=false", id(task), member)).isEqualTo(1);
     }
 

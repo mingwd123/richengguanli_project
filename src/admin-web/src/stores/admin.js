@@ -194,7 +194,7 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
-  async function fetchOperationLogs(pageNum = 1, pageSize = 20, adminId = '', action = '', targetType = '', dateFrom = '', dateTo = '') {
+  async function fetchOperationLogs(pageNum = 1, pageSize = 20, adminId = '', action = '', targetType = '', dateFrom = '', dateTo = '', keyword = '') {
     loading.value = true
     try {
       const params = new URLSearchParams()
@@ -203,6 +203,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (adminId) params.set('adminId', adminId)
       if (action) params.set('action', action)
       if (targetType) params.set('targetType', targetType)
+      if (keyword) params.set('keyword', keyword)
       if (dateFrom) params.set('dateFrom', dateFrom)
       if (dateTo) params.set('dateTo', dateTo)
       page.value = await request(`/admin/operation-logs?${params.toString()}`)
@@ -246,6 +247,26 @@ export const useAdminStore = defineStore('admin', () => {
       notify(error.message)
     } finally {
       loading.value = false
+    }
+  }
+
+  async function adminSetScheduleStatus(scheduleId, status) {
+    try {
+      await request(`/admin/schedules/${scheduleId}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
+      await fetchList()
+      notify('日程状态已更新')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  async function adminTeamTaskAction(taskId, action) {
+    try {
+      await request(`/admin/team-tasks/${taskId}/${action}`, { method: 'PUT' })
+      await fetchList()
+      notify('操作成功')
+    } catch (error) {
+      notify(error.message)
     }
   }
 
@@ -345,7 +366,8 @@ export const useAdminStore = defineStore('admin', () => {
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,
-    createAdminUser, resetFilters, notify, formatValue, toggleTheme,
+    createAdminUser, adminSetScheduleStatus, adminTeamTaskAction,
+    resetFilters, notify, formatValue, toggleTheme,
     fetchAiConfig, updateAiConfig, updateAiEnabled, fetchAiUsageLogs, testAi,
   }
 })

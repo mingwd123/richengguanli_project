@@ -290,14 +290,81 @@ public class AdminService {
         return after;
     }
 
+    // ==================== Admin team task operations ====================
+
+    @Transactional
+    public Map<String, Object> adminCancelTeamTask(long adminId, long taskId, String ipAddress, String userAgent) {
+        Map<String, Object> task = adminTeamTaskDetail(taskId);
+        String currentStatus = String.valueOf(task.get("status"));
+        if (!"active".equals(currentStatus) && !"all_rejected".equals(currentStatus)) {
+            throw new BusinessException(400, "only active or all_rejected task can be cancelled");
+        }
+        jdbc.update("update team_task set status='cancelled', updated_by=? where id=? and deleted_at is null", adminId, taskId);
+        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "cancelled", "管理员取消了任务");
+        jdbc.update("update reminder set status='cancelled' where target_type='team_task' and target_id=? and status='pending'", taskId);
+        Map<String, Object> after = adminTeamTaskDetail(taskId);
+        writeAdminOperationLog(adminId, "cancel_team_task", "team_task", taskId, task, after, ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
+    public Map<String, Object> adminRestoreTeamTask(long adminId, long taskId, String ipAddress, String userAgent) {
+        Map<String, Object> task = adminTeamTaskDetail(taskId);
+        if (!"cancelled".equals(task.get("status"))) {
+            throw new BusinessException(400, "only cancelled task can be restored");
+        }
+        jdbc.update("update team_task set status='active', updated_by=? where id=? and deleted_at is null", adminId, taskId);
+        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "restored", "管理员恢复了任务");
+        Map<String, Object> after = adminTeamTaskDetail(taskId);
+        writeAdminOperationLog(adminId, "restore_team_task", "team_task", taskId, task, after, ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
+    public Map<String, Object> adminCorrectAssigneeStatus(long adminId, long taskId, long assigneeId, String status, String ipAddress, String userAgent) {
+        if (!List.of("pending", "accepted", "rejected", "completed").contains(status)) throw new BusinessException(400, "status is invalid");
+        Map<String, Object> before = adminTeamTaskDetail(taskId);
+        int updated = jdbc.update("update team_task_assignee set status=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=?", status, adminId, assigneeId, taskId);
+        if (updated == 0) throw new BusinessException(404, "assignee not found");
+        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "status_corrected", "管理员修正执行人状态为: " + statusLabel(status));
+        Map<String, Object> after = adminTeamTaskDetail(taskId);
+        writeAdminOperationLog(adminId, "correct_assignee_status", "team_task", taskId, before, after, ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
+    public Map<String, Object> adminSetScheduleStatus(long adminId, long scheduleId, String status, String ipAddress, String userAgent) {
+        if (!List.of("pending", "completed", "cancelled").contains(status)) throw new BusinessException(400, "status is invalid");
+        Map<String, Object> before = adminScheduleDetail(scheduleId);
+        int updated = jdbc.update("update schedule set status=? where id=? and deleted_at is null", status, scheduleId);
+        if (updated == 0) throw new BusinessException(404, "schedule not found");
+        if (List.of("completed", "cancelled").contains(status)) {
+            jdbc.update("update reminder set status='cancelled' where target_type='schedule' and target_id=? and status='pending'", scheduleId);
+        }
+        Map<String, Object> after = adminScheduleDetail(scheduleId);
+        writeAdminOperationLog(adminId, "set_schedule_status", "schedule", scheduleId, before, after, ipAddress, userAgent);
+        return after;
+    }
+
+    private static String statusLabel(String status) {
+        return switch (status) {
+            case "pending" -> "待接受";
+            case "accepted" -> "已接受";
+            case "rejected" -> "已拒绝";
+            case "completed" -> "已完成";
+            default -> status;
+        };
+    }
+
     // ==================== Operation logs ====================
 
-    public Map<String, Object> adminOperationLogs(int page, int size, String adminId, String action, String targetType, String dateFrom, String dateTo) {
+    public Map<String, Object> adminOperationLogs(int page, int size, String adminId, String action, String targetType, String dateFrom, String dateTo, String keyword) {
         StringBuilder sql = new StringBuilder("select id,admin_id adminId,action,target_type targetType,target_id targetId,before_data beforeData,after_data afterData,ip_address ipAddress,user_agent userAgent,created_at createdAt from admin_operation_log where 1=1");
         List<Object> params = new ArrayList<>();
         if (!blank(adminId)) { sql.append(" and admin_id=?"); try { params.add(Long.parseLong(adminId)); } catch (NumberFormatException ignored) {} }
         if (!blank(action)) { sql.append(" and action like ?"); params.add("%" + action + "%"); }
         if (!blank(targetType)) { sql.append(" and target_type=?"); params.add(targetType); }
+        if (!blank(keyword)) { sql.append(" and (action like ? or target_type like ?)"); String kw = "%" + keyword + "%"; params.add(kw); params.add(kw); }
         if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
         if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
         sql.append(" order by created_at desc");

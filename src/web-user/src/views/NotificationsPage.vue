@@ -12,8 +12,8 @@ function handleReadAll() {
 }
 
 function handleClick(n: any) {
-  store.readNotification(n.id)
   store.openNotificationDetail(n)
+  store.markNotificationRead(n)
 }
 
 function closeDetail() {

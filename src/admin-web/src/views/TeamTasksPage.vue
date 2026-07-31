@@ -88,6 +88,8 @@ function closeDetail() {
       </template>
       <template #actions="{ row }">
         <button @click="viewDetail(row)">详情</button>
+        <button v-if="row.status === 'active' || row.status === 'all_rejected'" class="warning" @click="store.adminTeamTaskAction(row.id, 'cancel')">取消</button>
+        <button v-if="row.status === 'cancelled'" @click="store.adminTeamTaskAction(row.id, 'restore')">恢复</button>
       </template>
     </DataTable>
 

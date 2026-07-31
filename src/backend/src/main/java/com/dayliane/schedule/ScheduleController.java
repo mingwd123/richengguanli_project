@@ -34,9 +34,12 @@ public class ScheduleController {
                                                   @RequestParam(defaultValue = "1") int page,
                                                   @RequestParam(defaultValue = "20") int size,
                                                   @RequestParam(required = false) String status,
-                                                  @RequestParam(name = "group_name", required = false) String groupName) {
+                                                  @RequestParam(name = "group_name", required = false) String groupName,
+                                                  @RequestParam(required = false) String keyword,
+                                                  @RequestParam(required = false) String dateFrom,
+                                                  @RequestParam(required = false) String dateTo) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName));
+        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo));
     }
 
     @GetMapping("/{id}")
@@ -84,7 +87,7 @@ public class ScheduleController {
     public ApiResponse<Map<String, Object>> calendar(HttpServletRequest request, @RequestParam int year, @RequestParam int month) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         YearMonth ym = YearMonth.of(year, month);
-        List<Map<String, Object>> all = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 500, null, null).get("list");
+        List<Map<String, Object>> all = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 500, null, null, null, null, null).get("list");
         List<Map<String, Object>> days = new ArrayList<>();
         for (int day = 1; day <= ym.lengthOfMonth(); day++) {
             LocalDate date = ym.atDay(day);

@@ -243,6 +243,12 @@ export const useAppStore = defineStore('app', () => {
   async function readNotification(id: number) { try { await request(`/notifications/${id}/read`, { method: 'PUT' }); await loadAll() } catch (e: any) { notify(e.message) } }
   function openNotificationDetail(n: Notification) { notificationDetail.value = n }
   function closeNotificationDetail() { notificationDetail.value = null }
+  async function markNotificationRead(n: Notification) {
+    try {
+      await request(`/notifications/${n.id}/read`, { method: 'PUT' });
+      n.isRead = true;
+    } catch (e: any) { notify(e.message) }
+  }
 
   async function requestBrowserNoticePermission() {
     if (typeof Notification === 'undefined') {
@@ -317,7 +323,7 @@ export const useAppStore = defineStore('app', () => {
     createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks,
-    readAll, readNotification, openNotificationDetail, closeNotificationDetail, requestBrowserNoticePermission, updateProfile, changePassword, updateTimezone,
+    readAll, readNotification, markNotificationRead, openNotificationDetail, closeNotificationDetail, requestBrowserNoticePermission, updateProfile, changePassword, updateTimezone,
     setMemberRole, removeMember, regenerateInviteCode, notify, primaryTime, toggleAiRecord, toggleTheme
   }
 })

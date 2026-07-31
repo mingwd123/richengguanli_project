@@ -137,13 +137,37 @@ public class AdminController {
         return ApiResponse.success(adminService.adminReminderDetail(id));
     }
 
+    @PutMapping("/team-tasks/{id}/cancel")
+    public ApiResponse<Map<String, Object>> cancelTeamTask(HttpServletRequest request, @PathVariable long id) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.adminCancelTeamTask(adminId, id, clientIp(request), userAgent(request)));
+    }
+
+    @PutMapping("/team-tasks/{id}/restore")
+    public ApiResponse<Map<String, Object>> restoreTeamTask(HttpServletRequest request, @PathVariable long id) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.adminRestoreTeamTask(adminId, id, clientIp(request), userAgent(request)));
+    }
+
+    @PutMapping("/team-tasks/{id}/assignees/{assigneeId}/status")
+    public ApiResponse<Map<String, Object>> correctAssigneeStatus(HttpServletRequest request, @PathVariable long id, @PathVariable long assigneeId, @RequestBody Map<String, Object> req) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.adminCorrectAssigneeStatus(adminId, id, assigneeId, String.valueOf(req.getOrDefault("status", "pending")), clientIp(request), userAgent(request)));
+    }
+
+    @PutMapping("/schedules/{id}/status")
+    public ApiResponse<Map<String, Object>> setScheduleStatus(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.adminSetScheduleStatus(adminId, id, String.valueOf(req.getOrDefault("status", "pending")), clientIp(request), userAgent(request)));
+    }
+
     @GetMapping("/operation-logs")
     public ApiResponse<Map<String, Object>> operationLogs(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                           @RequestParam(required = false) String adminId, @RequestParam(required = false) String action,
                                                           @RequestParam(required = false) String targetType, @RequestParam(required = false) String dateFrom,
-                                                          @RequestParam(required = false) String dateTo) {
+                                                          @RequestParam(required = false) String dateTo, @RequestParam(required = false) String keyword) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminOperationLogs(page, size, adminId, action, targetType, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminOperationLogs(page, size, adminId, action, targetType, dateFrom, dateTo, keyword));
     }
 
     private static String text(Map<String, Object> req, String key) { return String.valueOf(req.getOrDefault(key, "")); }

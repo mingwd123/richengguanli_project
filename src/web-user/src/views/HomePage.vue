@@ -9,8 +9,22 @@ const store = useAppStore()
 const router = useRouter()
 const nowTs = ref(Date.now())
 let nowTimer = 0
+const collapsedModules = ref<string[]>([])
+const collapsedTeamModules = ref<string[]>([])
 
 const TIMELINE_LIMIT = 12
+
+function toggleModule(name: string) {
+  collapsedModules.value = collapsedModules.value.includes(name)
+    ? collapsedModules.value.filter(v => v !== name)
+    : [...collapsedModules.value, name]
+}
+
+function toggleTeamModule(name: string) {
+  collapsedTeamModules.value = collapsedTeamModules.value.includes(name)
+    ? collapsedTeamModules.value.filter(v => v !== name)
+    : [...collapsedTeamModules.value, name]
+}
 
 const scheduleModules = computed(() => groupByTaskState(
   store.schedules.filter(schedule => !['completed', 'cancelled'].includes(schedule.status)),
@@ -173,23 +187,26 @@ async function loadAiPlan() {
           <h2>日程模块</h2>
         </div>
         <section v-for="module in scheduleModules" :key="module.name" class="home-module">
-          <div class="module-title">
-            <strong>{{ module.name }}</strong>
+          <div class="module-title" style="cursor:pointer" @click="toggleModule(module.name)">
+            <button class="plain-button"><span>{{ collapsedModules.includes(module.name) ? '▸' : '▾' }} {{ module.name }}</span></button>
             <span>{{ module.items.filter(item => item.status === 'pending').length }} 项待办</span>
           </div>
-          <article
-            v-for="schedule in module.items.slice(0, 3)"
-            :key="schedule.id"
-            :class="['task-card', { overdue: urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime) === 'danger' }]"
-            @click="goSchedule(schedule.id)"
-          >
-            <div>
-              <strong>{{ schedule.title }}</strong>
-              <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
-            </div>
-            <span :class="['tag', urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime)]">{{ countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</span>
-          </article>
-          <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项日程，请前往日程页查看</p>
+          <template v-if="!collapsedModules.includes(module.name)">
+            <article
+              v-for="schedule in module.items.slice(0, 3)"
+              :key="schedule.id"
+              :class="['task-card', { overdue: urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime) === 'danger' }]"
+              @click="goSchedule(schedule.id)"
+              :title="`${schedule.title}\n模块: ${schedule.groupName || '未分组'}\n状态: ${schedule.status}\n截止: ${formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime)}\n${countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime)}`"
+            >
+              <div>
+                <strong>{{ schedule.title }}</strong>
+                <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
+              </div>
+              <span :class="['tag', urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime)]">{{ countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</span>
+            </article>
+            <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项日程，请前往日程页查看</p>
+          </template>
         </section>
         <p v-if="scheduleModules.length === 0" class="muted" style="padding: 20px; text-align: center;">暂无日程</p>
 
@@ -197,23 +214,26 @@ async function loadAiPlan() {
           <h2>团队任务模块</h2>
         </div>
         <section v-for="module in teamTaskModules" :key="`team-${module.name}`" class="home-module">
-          <div class="module-title">
-            <strong>{{ module.name }}</strong>
+          <div class="module-title" style="cursor:pointer" @click="toggleTeamModule(module.name)">
+            <button class="plain-button"><span>{{ collapsedTeamModules.includes(module.name) ? '▸' : '▾' }} {{ module.name }}</span></button>
             <span>{{ module.items.length }} 项待处理</span>
           </div>
-          <article
-            v-for="task in module.items.slice(0, 3)"
-            :key="task.id"
-            :class="['task-card', { overdue: urgency(task.deadlineTime || task.startTime) === 'danger' }]"
-            @click="goTask(task.id)"
-          >
-            <div>
-              <strong>{{ task.title }}</strong>
-              <small>{{ task.groupName || '团队任务' }} · {{ formatTime(task.deadlineTime || task.startTime) }}</small>
-            </div>
-            <span :class="['tag', urgency(task.deadlineTime || task.startTime)]">{{ countdown(task.deadlineTime || task.startTime) }}</span>
-          </article>
-          <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项团队任务，请前往任务页查看</p>
+          <template v-if="!collapsedTeamModules.includes(module.name)">
+            <article
+              v-for="task in module.items.slice(0, 3)"
+              :key="task.id"
+              :class="['task-card', { overdue: urgency(task.deadlineTime || task.startTime) === 'danger' }]"
+              @click="goTask(task.id)"
+              :title="`${task.title}\n团队: ${task.teamName || ''}\n状态: ${task.assignStatus || task.status}\n截止: ${formatTime(task.deadlineTime || task.startTime)}\n${countdown(task.deadlineTime || task.startTime)}`"
+            >
+              <div>
+                <strong>{{ task.title }}</strong>
+                <small>{{ task.groupName || '团队任务' }} · {{ formatTime(task.deadlineTime || task.startTime) }}</small>
+              </div>
+              <span :class="['tag', urgency(task.deadlineTime || task.startTime)]">{{ countdown(task.deadlineTime || task.startTime) }}</span>
+            </article>
+            <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项团队任务，请前往任务页查看</p>
+          </template>
         </section>
         <p v-if="teamTaskModules.length === 0" class="muted" style="padding: 16px 20px; text-align: center;">暂无团队任务</p>
       </section>

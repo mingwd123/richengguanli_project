@@ -5,6 +5,12 @@ import { useAppStore } from '../stores/app'
 import { formatTime, countdown, urgency, statusLabel } from '../utils/helpers'
 import type { TeamTask, TeamTaskAssignee } from '../types'
 
+const eventTypeLabels: Record<string, string> = {
+  created: '创建', assigned: '分配', accepted: '接受', rejected: '拒绝',
+  completed: '完成', cancelled: '取消', restored: '恢复', reassigned: '重新分配',
+  time_updated: '修改时间', status_corrected: '修正状态'
+}
+
 const props = defineProps<{ id: string }>()
 const router = useRouter()
 const store = useAppStore()
@@ -159,12 +165,18 @@ onMounted(loadDetail)
 
       <div style="margin-top:24px">
         <h3>操作时间轴</h3>
-        <article v-for="event in task.events" :key="event.id" class="mini-row" style="margin-top:10px">
-          <div>
-            <strong>{{ event.actorName || '系统' }}{{ event.content }}</strong>
-            <small>{{ formatTime(event.createdAt) }}</small>
-          </div>
-        </article>
+        <div style="position:relative;margin-top:10px;padding-left:20px">
+          <div style="position:absolute;left:7px;top:6px;bottom:6px;width:2px;background:#edf1f6"></div>
+          <article v-for="event in (task.events || []).slice().reverse()" :key="event.id" style="position:relative;display:grid;grid-template-columns:14px minmax(0,1fr);gap:8px;padding:8px 0">
+            <span style="width:8px;height:8px;border-radius:50%;background:#2f80ed;box-shadow:0 0 0 3px #eaf3ff;margin-top:4px"></span>
+            <div>
+              <span class="tag" style="font-size:10px;background:#eaf3ff;color:#2f80ed;margin-right:6px">{{ eventTypeLabels[event.eventType] || event.eventType }}</span>
+              <strong style="font-size:13px">{{ event.actorName || '系统' }}</strong>
+              <span style="font-size:12px;color:#64748b;margin-left:4px">{{ event.content }}</span>
+              <span style="display:block;font-size:11px;color:#94a3b8;margin-top:2px">{{ formatTime(event.createdAt) }}</span>
+            </div>
+          </article>
+        </div>
         <p v-if="!task.events?.length" class="muted" style="padding:12px 0">暂无操作记录</p>
       </div>
 

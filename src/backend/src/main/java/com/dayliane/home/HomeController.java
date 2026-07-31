@@ -34,8 +34,8 @@ public class HomeController {
     public ApiResponse<Map<String, Object>> today(HttpServletRequest request) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         LocalDate today = LocalDate.now();
-        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, null, null).get("list");
-        List<Map<String, Object>> teamTasks = (List<Map<String, Object>>) teamTaskService.listMyTeamTasks(userId, 1, 100, null).get("list");
+        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, null, null, null, null, null).get("list");
+        List<Map<String, Object>> teamTasks = (List<Map<String, Object>>) teamTaskService.listMyTeamTasks(userId, 1, 100, null, null, null, null).get("list");
         List<Map<String, Object>> todaySchedules = schedules.stream().filter(s -> sameDate(primaryTime(s), today)).collect(Collectors.toList());
         List<Map<String, Object>> todayTeamTasks = teamTasks.stream().filter(t -> sameDate(primaryTime(t), today)).collect(Collectors.toList());
         return ApiResponse.success(Map.of(
@@ -50,7 +50,7 @@ public class HomeController {
     @GetMapping("/upcoming")
     public ApiResponse<Map<String, Object>> upcoming(HttpServletRequest request) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, "pending", null).get("list");
+        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, "pending", null, null, null, null).get("list");
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> s : schedules) {
             Map<String, Object> row = new LinkedHashMap<>();

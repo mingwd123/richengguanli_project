@@ -68,32 +68,29 @@ public class TeamTaskService {
         return teamTaskSummary(taskId, userId);
     }
 
-    public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus) {
-        String sql = "select t.id from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.deleted_at is null";
-        Object[] args;
-        if (blank(assignStatus)) {
-            args = new Object[]{userId, userId};
-        } else {
-            sql += " and a.status=?";
-            args = new Object[]{userId, userId, assignStatus};
-        }
-        sql += " order by t.deadline_time asc";
-        List<Map<String, Object>> rows = jdbc.query(sql, (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), args);
+    public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus, String keyword, String dateFrom, String dateTo) {
+        StringBuilder sql = new StringBuilder("select t.id from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.deleted_at is null");
+        List<Object> params = new ArrayList<>(List.of(userId, userId));
+        if (!blank(assignStatus)) { sql.append(" and a.status=?"); params.add(assignStatus); }
+        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
+        sql.append(" order by t.deadline_time asc");
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
         return pageResult(rows, page, size);
     }
 
-    public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status) {
+    public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo) {
         permissionService.requireActiveMember(teamId, userId);
-        String sql = "select id from team_task where team_id=? and deleted_at is null";
-        Object[] args;
-        if (blank(status)) {
-            args = new Object[]{teamId};
-        } else {
-            sql += " and status=?";
-            args = new Object[]{teamId, status};
-        }
-        sql += " order by group_id asc, sort_order asc, coalesce(deadline_time,start_time,created_at) asc, id asc";
-        List<Map<String, Object>> rows = jdbc.query(sql, (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), args);
+        StringBuilder sql = new StringBuilder("select id from team_task where team_id=? and deleted_at is null");
+        List<Object> params = new ArrayList<>();
+        params.add(teamId);
+        if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
+        if (!blank(keyword)) { sql.append(" and title like ?"); params.add("%" + keyword + "%"); }
+        if (!blank(dateFrom)) { sql.append(" and coalesce(deadline_time,start_time,created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(deadline_time,start_time,created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
+        sql.append(" order by group_id asc, sort_order asc, coalesce(deadline_time,start_time,created_at) asc, id asc");
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
         return pageResult(rows, page, size);
     }
 

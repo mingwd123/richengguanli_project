@@ -11,7 +11,13 @@ const store = useAppStore()
 const collapsedGroups = ref<string[]>([])
 const aiParsing = ref(false)
 const aiParseError = ref('')
+const showDraftConfirm = ref(false)
+const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; description: string }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', description: '' })
 const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; group?: any; schedule?: Schedule } | null>(null)
+const filterKeyword = ref('')
+const filterStatus = ref('')
+const filterDateFrom = ref('')
+const filterDateTo = ref('')
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
 
@@ -55,8 +61,6 @@ async function aiParseSchedule() {
     const result = await store.aiRequest('/schedules/parse', { text: sourceText })
     const draft = result.draft || {}
     const groupId = inferGroupId(draft, sourceText)
-    if (groupId) store.scheduleForm.groupId = groupId
-    if (draft.title) store.scheduleForm.title = draft.title
     const nextTimeType = draft.startTime && draft.endTime
       ? 'duration_task'
       : draft.deadlineTime
@@ -64,20 +68,57 @@ async function aiParseSchedule() {
         : ['point_event', 'deadline_task', 'duration_task'].includes(draft.timeType)
           ? draft.timeType
           : store.scheduleForm.timeType
-    store.scheduleForm.timeType = nextTimeType
-    if (draft.startTime) store.scheduleForm.startTime = toDatetimeLocal(draft.startTime)
-    if (draft.endTime) store.scheduleForm.endTime = toDatetimeLocal(draft.endTime)
-    if (draft.deadlineTime) store.scheduleForm.deadlineTime = toDatetimeLocal(draft.deadlineTime)
-    if (draft.description) store.notify('已解析：' + draft.description.substring(0, 30))
-    store.notify('AI 解析完成，请确认表单信息')
+    aiDraft.value = {
+      title: draft.title || store.scheduleForm.title,
+      groupId,
+      timeType: nextTimeType,
+      startTime: draft.startTime ? toDatetimeLocal(draft.startTime) : '',
+      endTime: draft.endTime ? toDatetimeLocal(draft.endTime) : '',
+      deadlineTime: draft.deadlineTime ? toDatetimeLocal(draft.deadlineTime) : '',
+      description: draft.description || ''
+    }
+    showDraftConfirm.value = true
+    store.scheduleModalOpen = false
   } catch (e: any) {
     aiParseError.value = 'AI 解析失败: ' + (e.message || '服务不可用')
   } finally { aiParsing.value = false }
 }
+async function confirmAiDraft() {
+  const draft = aiDraft.value
+  store.scheduleForm.title = draft.title
+  store.scheduleForm.groupId = draft.groupId
+  store.scheduleForm.timeType = draft.timeType as any
+  store.scheduleForm.startTime = draft.startTime
+  store.scheduleForm.endTime = draft.endTime
+  store.scheduleForm.deadlineTime = draft.deadlineTime
+  if (draft.description) store.scheduleForm.description = draft.description
+  showDraftConfirm.value = false
+  await store.createSchedule()
+}
+function cancelAiDraft() {
+  showDraftConfirm.value = false
+  aiParseError.value = ''
+}
+
+const filteredSchedules = computed(() => {
+  return store.schedules.filter(schedule => {
+    if (filterKeyword.value && !schedule.title.toLowerCase().includes(filterKeyword.value.toLowerCase()) && !(schedule.groupName || '').toLowerCase().includes(filterKeyword.value.toLowerCase())) return false
+    if (filterStatus.value && schedule.status !== filterStatus.value) return false
+    if (filterDateFrom.value) {
+      const time = primaryTime(schedule)
+      if (time && new Date(time) < new Date(filterDateFrom.value + 'T00:00:00')) return false
+    }
+    if (filterDateTo.value) {
+      const time = primaryTime(schedule)
+      if (time && new Date(time) > new Date(filterDateTo.value + 'T23:59:59')) return false
+    }
+    return true
+  })
+})
 
 const scheduleGroups = computed(() => {
-  const completed = store.schedules.filter(schedule => schedule.status === 'completed')
-  const active = store.schedules.filter(schedule => schedule.status !== 'completed')
+  const completed = filteredSchedules.value.filter(schedule => schedule.status === 'completed')
+  const active = filteredSchedules.value.filter(schedule => schedule.status !== 'completed')
   const groups = store.taskGroups.map(group => ({
     id: group.id,
     name: group.name,
@@ -157,12 +198,16 @@ function selectContextAction(action: string) {
     if (action === 'delete') deleteGroup(menu.group.id, menu.group.name)
     if (action === 'up') moveGroup(menu.group.id, -1)
     if (action === 'down') moveGroup(menu.group.id, 1)
+    if (action === 'toggle') toggleGroup(menu.group.name)
   } else if (menu.schedule) {
     if (action === 'detail') goDetail(menu.schedule.id)
     if (action === 'complete') handleAction(menu.schedule, 'complete')
     if (action === 'uncomplete') handleAction(menu.schedule, 'uncomplete')
     if (action === 'cancel') handleAction(menu.schedule, 'cancel')
     if (action === 'delete') handleDelete(menu.schedule.id)
+    if (action === 'edit-time') editScheduleTime(menu.schedule)
+    if (action === 'remove-time') removeScheduleDeadline(menu.schedule)
+    if (action === 'move-group') moveScheduleToGroup(menu.schedule)
   }
 }
 function dropGroup(targetGroupId: number) {
@@ -190,10 +235,45 @@ function dropSchedule(group: any, targetId?: number) {
   ids.splice(to, 0, ids.splice(from, 1)[0])
   store.sortSchedules(group.id, ids)
 }
+async function editScheduleTime(schedule: Schedule) {
+  const current = schedule.deadlineTime || schedule.endTime || schedule.startTime || ''
+  const userInput = window.prompt('请输入新时间 (格式: yyyy-MM-dd HH:mm)', current.slice(0, 16).replace('T', ' '))
+  if (userInput === null || !userInput.trim()) return
+  const iso = new Date(userInput.trim()).toISOString()
+  try {
+    const payload: any = {}
+    if (schedule.timeType === 'deadline_task') payload.deadlineTime = iso
+    else if (schedule.timeType === 'duration_task') payload.endTime = iso
+    else payload.startTime = iso
+    await store.request(`/schedules/${schedule.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+    await store.loadAll()
+    store.notify('时间已更新')
+  } catch (e: any) { store.notify(e.message || '更新失败') }
+}
+async function removeScheduleDeadline(schedule: Schedule) {
+  if (!window.confirm('确定移除时间吗？')) return
+  try {
+    const payload: any = {}
+    if (schedule.timeType === 'deadline_task') payload.deadlineTime = ''
+    else if (schedule.timeType === 'duration_task') payload.endTime = ''
+    else payload.startTime = ''
+    await store.request(`/schedules/${schedule.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+    await store.loadAll()
+    store.notify('时间已移除')
+  } catch (e: any) { store.notify(e.message || '移除失败') }
+}
+async function moveScheduleToGroup(schedule: Schedule) {
+  const groupName = window.prompt('输入目标模块名称\n可选: ' + store.taskGroups.map(g => g.name).join(', '), schedule.groupName || '')
+  if (!groupName?.trim()) return
+  const group = store.taskGroups.find(g => g.name === groupName.trim())
+  if (!group) { store.notify('未找到模块: ' + groupName.trim()); return }
+  store.moveScheduleGroup(schedule.id, group.id)
+}
 const contextItems = computed(() => {
   const menu = contextMenu.value
   if (!menu) return []
   if (menu.type === 'group') return [
+    { label: '折叠/展开', action: 'toggle' },
     { label: '重命名', action: 'rename' },
     { label: '上移', action: 'up' },
     { label: '下移', action: 'down' },
@@ -205,6 +285,11 @@ const contextItems = computed(() => {
     { label: '完成', action: 'complete', disabled: schedule.status !== 'pending' },
     { label: '恢复', action: 'uncomplete', disabled: schedule.status !== 'completed' },
     { label: '取消', action: 'cancel', disabled: schedule.status !== 'pending' },
+    { separator: true as any, label: '' },
+    { label: '修改截止时间', action: 'edit-time', disabled: schedule.status !== 'pending' },
+    { label: '移除时间', action: 'remove-time', disabled: schedule.status !== 'pending' },
+    { label: '移动至模块', action: 'move-group', disabled: schedule.status !== 'pending' },
+    { separator: true as any, label: '' },
     { label: '删除', action: 'delete' }
   ]
 })
@@ -212,7 +297,14 @@ const contextItems = computed(() => {
 
 <template>
   <section class="list-page">
-    <div class="filter-bar"><button class="primary" @click="store.openScheduleModal()">新建日程</button></div>
+    <div class="search-bar">
+      <input v-model="filterKeyword" placeholder="搜索标题或模块..." class="search-input" />
+      <select v-model="filterStatus"><option value="">全部状态</option><option value="pending">待处理</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select>
+      <input v-model="filterDateFrom" type="date" title="开始日期" />
+      <input v-model="filterDateTo" type="date" title="截止日期" />
+      <button v-if="filterKeyword || filterStatus || filterDateFrom || filterDateTo" class="plain-button" @click="filterKeyword='';filterStatus='';filterDateFrom='';filterDateTo=''" style="color:#e11d48">清除</button>
+      <button class="primary" @click="store.openScheduleModal()">新建日程</button>
+    </div>
     <section class="table-card">
       <section
         v-for="group in scheduleGroups"
@@ -291,5 +383,24 @@ const contextItems = computed(() => {
       </section>
     </div>
     <ContextMenu v-if="contextMenu" :x="contextMenu.x" :y="contextMenu.y" :items="contextItems" @select="selectContextAction" @close="contextMenu = null" />
+
+    <div v-if="showDraftConfirm" class="modal-backdrop" @click.self="cancelAiDraft">
+      <section class="modal-panel">
+        <div class="modal-head"><h2>AI 草稿确认</h2><span class="muted" style="font-size: 12px;color:#6366f1">AI 不会直接写入数据库，请确认后保存</span><button class="modal-close" @click="cancelAiDraft">✕</button></div>
+        <form @submit.prevent="confirmAiDraft">
+          <label>标题<input v-model="aiDraft.title" required /></label>
+          <label>描述<input v-model="aiDraft.description" placeholder="可选" /></label>
+          <label>模块<select v-model="aiDraft.groupId"><option value="">未分组</option><option v-for="group in store.taskGroups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
+          <label>类型<select v-model="aiDraft.timeType"><option value="point_event">安排事项</option><option value="deadline_task">待办任务</option><option value="duration_task">时间段任务</option></select></label>
+          <label v-if="aiDraft.timeType === 'point_event'">发生时间<input v-model="aiDraft.startTime" type="datetime-local" /></label>
+          <label v-if="aiDraft.timeType === 'deadline_task'">截止时间<input v-model="aiDraft.deadlineTime" type="datetime-local" /></label>
+          <template v-if="aiDraft.timeType === 'duration_task'"><label>开始时间<input v-model="aiDraft.startTime" type="datetime-local" /></label><label>结束时间<input v-model="aiDraft.endTime" type="datetime-local" /></label></template>
+          <div class="form-actions">
+            <button type="button" @click="cancelAiDraft">取消</button>
+            <button class="primary">确认保存</button>
+          </div>
+        </form>
+      </section>
+    </div>
   </section>
 </template>

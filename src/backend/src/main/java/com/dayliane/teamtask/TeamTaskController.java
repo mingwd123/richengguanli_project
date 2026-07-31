@@ -29,18 +29,24 @@ public class TeamTaskController {
     public ApiResponse<Map<String, Object>> my(HttpServletRequest request,
                                                 @RequestParam(defaultValue = "1") int page,
                                                 @RequestParam(defaultValue = "20") int size,
-                                                @RequestParam(required = false) String status) {
+                                                @RequestParam(required = false) String status,
+                                                @RequestParam(required = false) String keyword,
+                                                @RequestParam(required = false) String dateFrom,
+                                                @RequestParam(required = false) String dateTo) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamTaskService.listMyTeamTasks(userId, page, size, status));
+        return ApiResponse.success(teamTaskService.listMyTeamTasks(userId, page, size, status, keyword, dateFrom, dateTo));
     }
 
     @GetMapping("/teams/{teamId}/tasks")
     public ApiResponse<Map<String, Object>> teamTasks(HttpServletRequest request, @PathVariable long teamId,
                                                        @RequestParam(defaultValue = "1") int page,
                                                        @RequestParam(defaultValue = "20") int size,
-                                                       @RequestParam(required = false) String status) {
+                                                       @RequestParam(required = false) String status,
+                                                       @RequestParam(required = false) String keyword,
+                                                       @RequestParam(required = false) String dateFrom,
+                                                       @RequestParam(required = false) String dateTo) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamTaskService.listTeamTasks(teamId, userId, page, size, status));
+        return ApiResponse.success(teamTaskService.listTeamTasks(teamId, userId, page, size, status, keyword, dateFrom, dateTo));
     }
 
     @GetMapping("/teams/{teamId}/task-groups")
