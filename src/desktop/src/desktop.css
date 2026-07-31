@@ -1,0 +1,129 @@
+:root {
+  --desktop-titlebar-height: 38px;
+  --desktop-opacity: 96%;
+}
+
+html, body, #app { width: 100%; height: 100%; overflow: hidden; }
+body { background: transparent; user-select: none; }
+input, textarea, [contenteditable="true"] { user-select: text; }
+
+.desktop-root {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: var(--desktop-titlebar-height) minmax(0, 1fr);
+  overflow: hidden;
+  background: transparent;
+}
+
+.desktop-titlebar {
+  position: relative;
+  z-index: 100;
+  height: var(--desktop-titlebar-height);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--text);
+  backdrop-filter: blur(20px) saturate(1.15);
+}
+
+.desktop-titlebar-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  pointer-events: none;
+}
+.desktop-app-mark {
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--text-strong);
+  color: var(--surface);
+  box-shadow: inset -5px -5px 0 var(--primary);
+  font-size: 10px;
+  font-weight: 900;
+}
+.desktop-titlebar-brand strong { font-size: 11px; }
+.desktop-titlebar-brand > span:last-child { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-titlebar-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 9px; pointer-events: none; }
+.desktop-titlebar-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
+.desktop-titlebar-status i.native { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+
+.desktop-window-actions { height: 100%; justify-self: end; display: flex; align-items: stretch; }
+.desktop-window-actions button {
+  width: 42px;
+  min-width: 42px;
+  min-height: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted-strong);
+}
+.desktop-window-actions button:hover { transform: none; box-shadow: none; background: var(--surface-muted); color: var(--text-strong); }
+.desktop-window-actions button.active { color: var(--primary); background: var(--primary-soft); }
+.desktop-window-actions .desktop-close-button:hover { background: #dc3552; color: #fff; }
+.desktop-action-divider { width: 1px; height: 16px; align-self: center; margin: 0 3px; background: var(--border); }
+
+.desktop-viewport {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg) var(--desktop-opacity), transparent);
+}
+.desktop-viewport > .login-canvas { min-height: 100%; height: 100%; }
+.desktop-app-frame { height: 100%; min-height: 0; background: transparent; }
+.desktop-app-frame .side-nav { height: 100%; }
+.desktop-main-area { height: 100%; overflow: auto; scrollbar-gutter: stable; }
+.desktop-main-area .page-topbar { top: 0; }
+.desktop-main-area::-webkit-scrollbar { width: 8px; }
+.desktop-main-area::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: color-mix(in srgb, var(--muted) 42%, transparent); background-clip: padding-box; }
+
+.desktop-preferences-backdrop { position: fixed; inset: var(--desktop-titlebar-height) 0 0; z-index: 80; background: rgba(20, 31, 38, .08); }
+.desktop-preferences {
+  position: fixed;
+  z-index: 90;
+  top: calc(var(--desktop-titlebar-height) + 10px);
+  right: 12px;
+  width: 330px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: 0 22px 55px rgba(20, 38, 48, .18);
+  backdrop-filter: blur(24px) saturate(1.12);
+}
+.desktop-preferences > header { display: flex; align-items: flex-start; justify-content: space-between; padding: 2px 2px 14px; border-bottom: 1px solid var(--border-soft); }
+.desktop-preferences > header p { color: var(--primary); font-size: 9px; font-weight: 800; }
+.desktop-preferences > header h2 { margin-top: 3px; font-size: 16px; }
+.desktop-preference-close { width: 32px; min-width: 32px; min-height: 32px; padding: 0; display: grid; place-items: center; border: 0; background: transparent; }
+.desktop-preference-row { min-height: 66px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 11px; border-bottom: 1px solid var(--border-soft); }
+.desktop-preference-row.compact { min-height: 52px; border-bottom: 0; }
+.desktop-preference-row > div { min-width: 0; display: grid; gap: 3px; }
+.desktop-preference-row strong { color: var(--text-strong); font-size: 12px; }
+.desktop-preference-row small { font-size: 10px; }
+.desktop-preference-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; background: var(--primary-soft); color: var(--primary); }
+.desktop-preference-icon.coral { background: var(--danger-soft); color: var(--danger); }
+.desktop-preference-slider { padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
+.desktop-preference-slider > input { height: 4px; padding: 0; accent-color: var(--primary); }
+.desktop-switch { position: relative; width: 36px; height: 20px; }
+.desktop-switch input { position: absolute; opacity: 0; }
+.desktop-switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--border-strong); transition: background var(--motion-fast); }
+.desktop-switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.16); transition: transform var(--motion-fast); }
+.desktop-switch input:checked + span { background: var(--primary); }
+.desktop-switch input:checked + span::after { transform: translateX(16px); }
+.desktop-permission-button { min-height: 30px; padding: 0 10px; color: var(--primary); border-color: var(--primary); font-size: 10px; }
+.desktop-ready-dot { width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px var(--success-soft); }
+
+@media (max-width: 1050px) {
+  .desktop-titlebar { grid-template-columns: minmax(0, 1fr) auto; }
+  .desktop-titlebar-status { display: none; }
+}
