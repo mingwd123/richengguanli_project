@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
+import { ArrowLeft, ArrowRight, RefreshLeft, Search } from '@element-plus/icons-vue'
 
 const props = defineProps({
   columns: { type: Array, required: true },
@@ -71,7 +72,7 @@ function formatValue(value) {
   <div class="table-container">
     <div class="table-toolbar">
       <div class="search-bar">
-        <input v-model="localKeyword" placeholder="搜索..." @input="onSearch" />
+        <span class="table-search-field"><el-icon><Search /></el-icon><input v-model="localKeyword" placeholder="搜索关键词" @input="onSearch" /></span>
       </div>
       <div class="filters">
         <select v-model="localStatus" @change="$emit('update:status', localStatus)">
@@ -85,8 +86,8 @@ function formatValue(value) {
         <input type="date" v-model="localDateFrom" @change="$emit('update:dateFrom', localDateFrom)" placeholder="开始日期" />
         <input type="date" v-model="localDateTo" @change="$emit('update:dateTo', localDateTo)" placeholder="结束日期" />
       </div>
-      <button class="primary" @click="onSearch">查询</button>
-      <button @click="resetFilters">重置</button>
+      <button class="primary table-command" @click="onSearch"><el-icon><Search /></el-icon><span>查询</span></button>
+      <button class="table-command" @click="resetFilters"><el-icon><RefreshLeft /></el-icon><span>重置</span></button>
     </div>
 
     <div class="data-table">
@@ -110,9 +111,9 @@ function formatValue(value) {
 
     <div class="pagination" v-if="total > 0">
       <span>共 {{ total }} 条</span>
-      <button :disabled="page <= 1" @click="$emit('page-change', page - 1)">上一页</button>
+      <button class="pagination-icon" title="上一页" aria-label="上一页" :disabled="page <= 1" @click="$emit('page-change', page - 1)"><el-icon><ArrowLeft /></el-icon></button>
       <span>第 {{ page }} / {{ totalPages }} 页</span>
-      <button :disabled="page >= totalPages" @click="$emit('page-change', page + 1)">下一页</button>
+      <button class="pagination-icon" title="下一页" aria-label="下一页" :disabled="page >= totalPages" @click="$emit('page-change', page + 1)"><el-icon><ArrowRight /></el-icon></button>
       <select :value="size" @change="$emit('size-change', Number($event.target.value))">
         <option :value="10">10条/页</option>
         <option :value="20">20条/页</option>

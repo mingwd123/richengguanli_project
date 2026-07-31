@@ -4,6 +4,18 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { formatTime, countdown, urgency, groupByTaskState } from '../utils/helpers'
 import type { TimelineItem } from '../types'
+import {
+  ArrowRight,
+  CalendarDays,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  Inbox,
+  Plus,
+  Sparkles,
+  UsersRound,
+} from 'lucide-vue-next'
 
 const store = useAppStore()
 const router = useRouter()
@@ -13,6 +25,19 @@ const collapsedModules = ref<string[]>([])
 const collapsedTeamModules = ref<string[]>([])
 
 const TIMELINE_LIMIT = 12
+
+const greeting = computed(() => {
+  const hour = new Date().getHours()
+  if (hour < 6) return '夜深了'
+  if (hour < 11) return '早上好'
+  if (hour < 14) return '中午好'
+  if (hour < 18) return '下午好'
+  return '晚上好'
+})
+
+const todayLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
+  month: 'long', day: 'numeric', weekday: 'long'
+}).format(new Date()))
 
 function toggleModule(name: string) {
   collapsedModules.value = collapsedModules.value.includes(name)
@@ -154,42 +179,78 @@ async function loadAiPlan() {
     store.notify('AI 计划加载失败: ' + (e.message || '服务不可用'))
   } finally { aiLoadingPlan.value = false }
 }
+
+function openCreateSchedule() {
+  store.openScheduleModal()
+  router.push('/schedules')
+}
 </script>
 
 <template>
   <section class="home-layout">
+    <section class="home-welcome">
+      <div>
+        <p class="home-date">{{ todayLabel }}</p>
+        <h2>{{ greeting }}，{{ store.profile?.nickname || '朋友' }}</h2>
+        <p>先处理最重要的一件事，剩下的交给节奏。</p>
+      </div>
+      <button class="primary home-create" aria-label="添加今天的安排" title="添加今天的安排" @click="openCreateSchedule">
+        <Plus :size="17" />
+        <span>添加今天的安排</span>
+      </button>
+    </section>
+
     <div class="stats-row">
       <article class="stat-card">
-        <span>待办日程</span>
-        <strong>{{ store.pendingScheduleCount }}</strong>
+        <span class="stat-icon schedule"><CalendarDays :size="19" /></span>
+        <div><span>待办日程</span><strong>{{ store.pendingScheduleCount }}</strong></div>
+        <button class="stat-link" title="查看个人日程" @click="router.push('/schedules')"><ArrowRight :size="16" /></button>
       </article>
       <article class="stat-card">
-        <span>团队任务</span>
-        <strong>{{ store.activeTaskCount }}</strong>
+        <span class="stat-icon task"><UsersRound :size="19" /></span>
+        <div><span>团队任务</span><strong>{{ store.activeTaskCount }}</strong></div>
+        <button class="stat-link" title="查看团队任务" @click="router.push('/tasks')"><ArrowRight :size="16" /></button>
       </article>
       <article class="stat-card">
-        <span>未读通知</span>
-        <strong>{{ store.today.unreadNotificationCount }}</strong>
+        <span class="stat-icon notice"><Inbox :size="19" /></span>
+        <div><span>未读通知</span><strong>{{ store.today.unreadNotificationCount }}</strong></div>
+        <button class="stat-link" title="查看通知" @click="router.push('/notifications')"><ArrowRight :size="16" /></button>
       </article>
     </div>
 
-    <div class="ai-plan-section" v-if="aiPlan">
-      <div class="ai-plan-header"><span>🤖 AI 今日计划</span><button class="plain-button" @click="loadAiPlan" :disabled="aiLoadingPlan" style="font-size:12px">{{ aiLoadingPlan ? '生成中...' : '刷新' }}</button></div>
-      <p class="ai-plan-content">{{ aiPlan }}</p>
-    </div>
-    <div class="ai-plan-section" v-else style="cursor:pointer;background:#f0f9ff;border:1px dashed #93c5fd" @click="loadAiPlan">
-      <p class="muted" style="text-align:center;padding:12px">{{ aiLoadingPlan ? 'AI 正在思考今天的计划...' : '🤖 点击生成 AI 今日计划建议' }}</p>
-    </div>
+    <section :class="['ai-plan-section', { empty: !aiPlan, loading: aiLoadingPlan }]" @click="!aiPlan && loadAiPlan()">
+      <span class="ai-plan-icon"><Sparkles :size="20" /></span>
+      <div class="ai-plan-body">
+        <div class="ai-plan-header">
+          <span>AI 今日计划</span>
+          <button v-if="aiPlan" class="plain-button" :disabled="aiLoadingPlan" @click.stop="loadAiPlan">
+            {{ aiLoadingPlan ? '生成中...' : '重新生成' }}
+          </button>
+        </div>
+        <p v-if="aiPlan" class="ai-plan-content">{{ aiPlan }}</p>
+        <p v-else class="ai-plan-placeholder">{{ aiLoadingPlan ? '正在整理今天的优先级...' : '生成一份结合日程与团队任务的今日建议' }}</p>
+      </div>
+      <ArrowRight v-if="!aiPlan && !aiLoadingPlan" class="ai-plan-arrow" :size="18" />
+    </section>
 
     <div class="home-content">
       <section class="group-panel">
         <div class="section-head">
-          <h2>日程模块</h2>
+          <div class="section-title">
+            <span class="section-icon"><CheckCircle2 :size="18" /></span>
+            <div><h2>今天要做</h2><p>个人日程与团队任务</p></div>
+          </div>
+          <button class="plain-button section-more" @click="router.push('/schedules')">查看全部 <ArrowRight :size="15" /></button>
         </div>
+        <p class="content-caption">个人日程</p>
         <section v-for="module in scheduleModules" :key="module.name" class="home-module">
-          <div class="module-title" style="cursor:pointer" @click="toggleModule(module.name)">
-            <button class="plain-button"><span>{{ collapsedModules.includes(module.name) ? '▸' : '▾' }} {{ module.name }}</span></button>
-            <span>{{ module.items.filter(item => item.status === 'pending').length }} 项待办</span>
+          <div class="module-title" @click="toggleModule(module.name)">
+            <button class="plain-button module-toggle">
+              <ChevronRight v-if="collapsedModules.includes(module.name)" :size="15" />
+              <ChevronDown v-else :size="15" />
+              <span>{{ module.name }}</span>
+            </button>
+            <span>{{ module.items.filter(item => item.status === 'pending').length }} 项</span>
           </div>
           <template v-if="!collapsedModules.includes(module.name)">
             <article
@@ -205,18 +266,20 @@ async function loadAiPlan() {
               </div>
               <span :class="['tag', urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime)]">{{ countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</span>
             </article>
-            <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项日程，请前往日程页查看</p>
+            <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项日程</p>
           </template>
         </section>
-        <p v-if="scheduleModules.length === 0" class="muted" style="padding: 20px; text-align: center;">暂无日程</p>
+        <div v-if="scheduleModules.length === 0" class="compact-empty"><CalendarDays :size="22" /><span>今天还没有个人日程</span></div>
 
-        <div class="section-head" style="margin-top:18px">
-          <h2>团队任务模块</h2>
-        </div>
+        <p class="content-caption team-caption">团队任务</p>
         <section v-for="module in teamTaskModules" :key="`team-${module.name}`" class="home-module">
-          <div class="module-title" style="cursor:pointer" @click="toggleTeamModule(module.name)">
-            <button class="plain-button"><span>{{ collapsedTeamModules.includes(module.name) ? '▸' : '▾' }} {{ module.name }}</span></button>
-            <span>{{ module.items.length }} 项待处理</span>
+          <div class="module-title" @click="toggleTeamModule(module.name)">
+            <button class="plain-button module-toggle">
+              <ChevronRight v-if="collapsedTeamModules.includes(module.name)" :size="15" />
+              <ChevronDown v-else :size="15" />
+              <span>{{ module.name }}</span>
+            </button>
+            <span>{{ module.items.length }} 项</span>
           </div>
           <template v-if="!collapsedTeamModules.includes(module.name)">
             <article
@@ -232,18 +295,22 @@ async function loadAiPlan() {
               </div>
               <span :class="['tag', urgency(task.deadlineTime || task.startTime)]">{{ countdown(task.deadlineTime || task.startTime) }}</span>
             </article>
-            <p v-if="module.items.length > 3" class="muted module-more">另有 {{ module.items.length - 3 }} 项团队任务，请前往任务页查看</p>
+            <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项团队任务</p>
           </template>
         </section>
-        <p v-if="teamTaskModules.length === 0" class="muted" style="padding: 16px 20px; text-align: center;">暂无团队任务</p>
+        <div v-if="teamTaskModules.length === 0" class="compact-empty"><UsersRound :size="22" /><span>暂时没有待处理的团队任务</span></div>
       </section>
 
       <aside class="timeline-panel">
         <div class="timeline-head">
-          <div>
-            <h2>时间轴</h2>
-            <p>{{ store.timelineStats.today }} 今天 / {{ store.timelineStats.overdue }} 逾期</p>
+          <div class="section-title">
+            <span class="section-icon time"><Clock3 :size="18" /></span>
+            <div>
+              <h2>时间轴</h2>
+              <p>{{ store.timelineStats.today }} 项在今天 · {{ store.timelineStats.overdue }} 项逾期</p>
+            </div>
           </div>
+          <button class="plain-button section-more" @click="router.push('/calendar')">日历 <ArrowRight :size="15" /></button>
         </div>
         <div class="timeline-track timeline-list">
           <div class="timeline-axis"></div>
@@ -275,7 +342,7 @@ async function loadAiPlan() {
             </div>
           </article>
         </div>
-        <p v-if="timelineEntries.length <= 1" class="muted" style="padding: 30px; text-align: center;">暂无时间轴数据</p>
+        <div v-if="timelineEntries.length <= 1" class="compact-empty"><Clock3 :size="22" /><span>时间轴还是空的</span></div>
       </aside>
     </div>
   </section>
