@@ -114,6 +114,7 @@ DB_SSL_ENABLED
 JWT_SECRET
 JWT_ACCESS_TOKEN_EXPIRE_SECONDS
 JWT_REFRESH_TOKEN_EXPIRE_SECONDS
+REMINDER_SCAN_TOKEN
 ```
 
 配置原则：
@@ -136,6 +137,8 @@ app:
     secret: ${JWT_SECRET}
     access-token-expire-seconds: ${JWT_ACCESS_TOKEN_EXPIRE_SECONDS:86400}
     refresh-token-expire-seconds: ${JWT_REFRESH_TOKEN_EXPIRE_SECONDS:604800}
+  internal:
+    reminder-scan-token: ${REMINDER_SCAN_TOKEN}
 ```
 
 ### 3.6 时区规则
@@ -495,6 +498,8 @@ app:
 - 通知可以标记已读
 - 可以全部标记已读
 - 通知支持分页查询
+- 用户可以分别关闭任务分配、任务状态和到期提醒通知
+- 浏览器通知由独立偏好控制；关闭后仍保留站内通知记录
 
 ---
 
@@ -895,7 +900,7 @@ app:
 
 ### 8.5 提醒接口（由后端定时任务触发）
 
-- POST /api/v1/internal/reminders/scan 扫描待发送提醒（内部接口，仅供定时任务调用）
+- POST /api/v1/internal/reminders/scan 扫描待发送提醒（内部接口，仅供定时任务调用，必须携带 `X-Internal-Token: <REMINDER_SCAN_TOKEN>`）
 - GET /api/v1/reminders/my 查询我的提醒记录（可选）
 
 ### 8.6 团队接口
@@ -953,6 +958,8 @@ app:
 - GET /api/v1/notifications/unread-count 查询未读消息数
 - PUT /api/v1/notifications/{id}/read 标记已读
 - PUT /api/v1/notifications/read-all 全部标记已读
+- GET /api/v1/notifications/preferences 查询浏览器、任务分配、任务状态和到期提醒偏好
+- PUT /api/v1/notifications/preferences 更新通知偏好
 
 ---
 
@@ -1069,6 +1076,8 @@ app:
 - 完成提醒记录保存，避免重复提醒
 - 完成通知已读和全部已读
 - 完成未读消息数统计
+- 完成通知偏好持久化和用户设置页面
+- 完成内部提醒扫描接口 Token 鉴权
 - 完成后台通知记录、提醒记录管理
 
 ### 阶段 7：测试和优化
@@ -1079,6 +1088,8 @@ app:
 - 测试登录、日程、团队、任务、通知完整流程
 - 测试权限控制
 - 测试时区处理
+- 完成后端验收测试、用户端类型检查和两套前端自动化测试
+- 完成用户端与管理端生产构建和桌面/手机视口浏览器验收
 - 准备网页端上线部署
 
 ---

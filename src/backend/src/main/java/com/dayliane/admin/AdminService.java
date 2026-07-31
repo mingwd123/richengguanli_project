@@ -36,6 +36,13 @@ public class AdminService {
         return admin;
     }
 
+    public void requireSuperAdmin(long adminId) {
+        Map<String, Object> admin = requireAdminEntity(adminId);
+        if (!"active".equals(admin.get("status")) || !"super_admin".equals(admin.get("role"))) {
+            throw new BusinessException(403, "super admin permission is required");
+        }
+    }
+
     private Map<String, Object> requireAdminEntity(long adminId) {
         try {
             return jdbc.queryForObject("select id,username,password_hash passwordHash,role,status,last_login_at lastLoginAt,last_login_ip lastLoginIp,created_at createdAt from admin_user where id=?", adminMapper(), adminId);
@@ -55,10 +62,14 @@ public class AdminService {
     // ==================== Admin CRUD ====================
 
     public Map<String, Object> adminList(String table, int page, int size) {
-        return adminList(table, page, size, null, null, null, null);
+        return adminList(table, page, size, null, null, null, null, null);
     }
 
     public Map<String, Object> adminList(String table, int page, int size, String keyword, String status, String dateFrom, String dateTo) {
+        return adminList(table, page, size, keyword, status, dateFrom, dateTo, null);
+    }
+
+    public Map<String, Object> adminList(String table, int page, int size, String keyword, String status, String dateFrom, String dateTo, String sort) {
         StringBuilder sql = new StringBuilder();
         List<Object> params = new ArrayList<>();
 
@@ -102,7 +113,7 @@ public class AdminService {
 
         if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
         if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by created_at desc");
+        sql.append(" order by ").append(adminSort(table, sort));
 
         List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -113,6 +124,38 @@ public class AdminService {
             return m;
         }, params.toArray()).stream().map(this::normalizeAdminRow).toList();
         return pageResult(rows, page, size);
+    }
+
+    public Map<String, Object> dashboardStats() {
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("users", count("select count(*) from `user` where deleted_at is null"));
+        stats.put("activeUsers", count("select count(*) from `user` where status='active' and deleted_at is null"));
+        stats.put("teams", count("select count(*) from team where deleted_at is null"));
+        stats.put("pendingSchedules", count("select count(*) from schedule where status='pending' and deleted_at is null"));
+        stats.put("activeTeamTasks", count("select count(*) from team_task where status='active' and deleted_at is null"));
+        stats.put("pendingReminders", count("select count(*) from reminder where status='pending'"));
+        stats.put("unreadNotifications", count("select count(*) from notification where is_read=false and deleted_at is null"));
+        stats.put("aiCallsToday", count("select count(*) from ai_usage_log where created_at >= current_date"));
+        return stats;
+    }
+
+    private String adminSort(String table, String sort) {
+        Map<String, String> allowed = new LinkedHashMap<>();
+        allowed.put("id", "id");
+        allowed.put("createdAt", "created_at");
+        allowed.put("status", "status");
+        if (List.of("schedules", "teamTasks", "notifications").contains(table)) allowed.put("title", "title");
+        if ("teamTasks".equals(table)) allowed.put("deadlineTime", "deadline_time");
+        if ("reminders".equals(table)) allowed.put("remindAt", "remind_at");
+        if ("users".equals(table)) { allowed.put("phone", "phone"); allowed.put("nickname", "nickname"); }
+        if ("teams".equals(table)) allowed.put("name", "name");
+        if ("adminUsers".equals(table)) { allowed.put("username", "username"); allowed.put("role", "role"); }
+        if (sort == null || sort.isBlank()) return "created_at desc";
+        String[] parts = sort.split(",", 2);
+        String column = allowed.get(parts[0]);
+        String direction = parts.length > 1 && "asc".equalsIgnoreCase(parts[1]) ? "asc" : "desc";
+        if (column == null) throw new BusinessException(400, "sort field is invalid");
+        return column + " " + direction + ",id " + direction;
     }
 
     // ==================== Details ====================
@@ -140,7 +183,20 @@ public class AdminService {
 
     public Map<String, Object> adminTeamDetail(long id) {
         Map<String, Object> team = requireTeamOnly(id);
-        team.put("members", activeMembersOnly(id));
+        team.put("memberCount", count("select count(*) from team_member where team_id=? and status='active'", id));
+        team.put("taskCount", count("select count(*) from team_task where team_id=? and deleted_at is null", id));
+        team.put("activeTaskCount", count("select count(*) from team_task where team_id=? and status='active' and deleted_at is null", id));
+        team.put("members", teamMembersOnly(id));
+        team.put("recentTasks", jdbc.query("select id,title,status,creator_id creatorId,deadline_time deadlineTime,created_at createdAt from team_task where team_id=? and deleted_at is null order by created_at desc,id desc limit 20", (rs, i) -> {
+            Map<String, Object> task = new LinkedHashMap<>();
+            task.put("id", rs.getLong("id"));
+            task.put("title", rs.getString("title"));
+            task.put("status", rs.getString("status"));
+            task.put("creatorId", rs.getLong("creatorId"));
+            task.put("deadlineTime", iso(rs.getTimestamp("deadlineTime")));
+            task.put("createdAt", iso(rs.getTimestamp("createdAt")));
+            return task;
+        }, id));
         return team;
     }
 
@@ -162,8 +218,8 @@ public class AdminService {
         }
     }
 
-    private List<Map<String, Object>> activeMembersOnly(long teamId) {
-        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,u.nickname,u.phone from team_member m join `user` u on u.id=m.user_id where m.team_id=? and m.status='active' order by m.id", (rs, i) -> {
+    private List<Map<String, Object>> teamMembersOnly(long teamId) {
+        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,m.removed_at removedAt,u.nickname,u.phone from team_member m join `user` u on u.id=m.user_id where m.team_id=? order by case when m.status='active' then 0 else 1 end,m.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("teamId", rs.getLong("teamId"));
@@ -171,6 +227,7 @@ public class AdminService {
             m.put("role", rs.getString("role"));
             m.put("status", rs.getString("status"));
             m.put("joinedAt", iso(rs.getTimestamp("joinedAt")));
+            m.put("removedAt", iso(rs.getTimestamp("removedAt")));
             m.put("nickname", rs.getString("nickname"));
             m.put("phone", rs.getString("phone"));
             return m;
@@ -257,12 +314,13 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> createAdminUser(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
+        requireSuperAdmin(adminId);
         String username = String.valueOf(req.getOrDefault("username", "")).trim();
         String password = String.valueOf(req.getOrDefault("password", ""));
         String role = String.valueOf(req.getOrDefault("role", "admin")).trim();
         if (username.isBlank()) throw new BusinessException(400, "username is required");
         if (password.length() < 8 || !password.matches(".*[A-Za-z].*") || !password.matches(".*\\d.*")) throw new BusinessException(400, "password format is invalid");
-        if (role.isBlank()) throw new BusinessException(400, "role is required");
+        if (!List.of("admin", "super_admin").contains(role)) throw new BusinessException(400, "role is invalid");
         if (count("select count(*) from admin_user where username=?", username) > 0) throw new BusinessException(409, "admin username already exists");
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
@@ -280,6 +338,7 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> adminSetAdminUserStatus(long adminId, long targetAdminId, String status, String ipAddress, String userAgent) {
+        requireSuperAdmin(adminId);
         if (!List.of("active", "disabled").contains(status)) throw new BusinessException(400, "status is invalid");
         if (adminId == targetAdminId && "disabled".equals(status)) throw new BusinessException(400, "cannot disable yourself");
         Map<String, Object> before = adminView(targetAdminId);

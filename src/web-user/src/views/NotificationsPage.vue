@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useAppStore } from '../stores/app'
-import { formatTime, statusLabel } from '../utils/helpers'
+import PaginationBar from '../components/PaginationBar.vue'
+import { formatTime } from '../utils/helpers'
 
 const store = useAppStore()
 
-const unreadCount = computed(() => store.notifications.filter(n => !n.isRead).length)
+const unreadCount = computed(() => store.today.unreadNotificationCount)
+
+function reloadNotifications() {
+  store.loadNotifications({ page: 1 })
+}
 
 function handleReadAll() {
   store.readAll()
@@ -35,6 +40,15 @@ function closeDetail() {
         </div>
       </div>
 
+      <div class="search-bar">
+        <select v-model="store.notificationPage.isRead" aria-label="通知状态" @change="reloadNotifications">
+          <option value="">全部通知</option><option value="false">仅未读</option><option value="true">仅已读</option>
+        </select>
+        <select v-model="store.notificationPage.sort" aria-label="通知排序" @change="reloadNotifications">
+          <option value="created_desc">最新优先</option><option value="created_asc">最早优先</option><option value="unread_first">未读优先</option>
+        </select>
+      </div>
+
       <article
         v-for="n in store.notifications"
         :key="n.id"
@@ -52,6 +66,14 @@ function closeDetail() {
         <span v-if="!n.isRead" class="tag blue">未读</span>
       </article>
       <p v-if="!store.notifications.length" class="hint" style="text-align:center;padding:40px 0">暂无通知</p>
+      <PaginationBar
+        :page="store.notificationPage.page"
+        :size="store.notificationPage.size"
+        :total="store.notificationPage.total"
+        :loading="store.notificationPage.loading"
+        @change="store.loadNotifications({ page: $event })"
+        @resize="store.loadNotifications({ page: 1, size: $event })"
+      />
     </section>
 
     <aside class="detail-panel">

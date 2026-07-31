@@ -1,13 +1,40 @@
 import type { ScheduleForm, TimelineItem, CalendarDay } from '../types'
 
+let displayTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+
+export function setDisplayTimezone(timezone: string) {
+  try {
+    new Intl.DateTimeFormat('zh-CN', { timeZone: timezone }).format()
+    displayTimezone = timezone
+  } catch {
+    displayTimezone = 'Asia/Shanghai'
+  }
+}
+
+export function getDisplayTimezone() { return displayTimezone }
+
+export function dateKeyInTimezone(value: number | string | Date = new Date(), timezone = displayTimezone) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
+  const part = (type: string) => parts.find(item => item.type === type)?.value || ''
+  return `${part('year')}-${part('month')}-${part('day')}`
+}
+
+export function currentDateParts(timezone = displayTimezone) {
+  const [year, month, day] = dateKeyInTimezone(new Date(), timezone).split('-').map(Number)
+  return { year, month, day }
+}
+
 export function toSchedulePayload(input: ScheduleForm) {
-  const out: Record<string, any> = { title: input.title, groupId: Number(input.groupId) || null, groupName: input.groupName, timeType: input.timeType, startTime: '', endTime: '', deadlineTime: '' }
+  const out: Record<string, any> = { title: input.title, description: input.description || '', groupId: Number(input.groupId) || null, groupName: input.groupName, timeType: input.timeType, startTime: '', endTime: '', deadlineTime: '' }
   if (input.timeType === 'point_event') out.startTime = toIso(input.startTime)
   if (input.timeType === 'deadline_task') out.deadlineTime = toIso(input.deadlineTime)
   if (input.timeType === 'duration_task') {
     out.startTime = toIso(input.startTime)
     out.endTime = toIso(input.endTime)
   }
+  if (input.remindAt) out.remindAt = toIso(input.remindAt)
   return out
 }
 
@@ -15,7 +42,7 @@ export function toIso(value: string) { return value ? new Date(value).toISOStrin
 
 export function toApiTimePayload(input: Record<string, any>) {
   const out = { ...input }
-  for (const key of ['startTime', 'endTime', 'deadlineTime']) if (out[key]) out[key] = new Date(out[key]).toISOString()
+  for (const key of ['startTime', 'endTime', 'deadlineTime', 'remindAt']) if (out[key]) out[key] = new Date(out[key]).toISOString()
   return out
 }
 
@@ -32,24 +59,36 @@ export function normalizeTimelineItem(item: any, sourceType: 'schedule' | 'team_
 
 function kindName(kind: string) { return kind === 'point_event' ? '安排事项' : kind === 'duration_task' ? '时间段任务' : '待办任务' }
 
-export function buildMonthDays(items: any[]): CalendarDay[] {
-  const now = new Date(); const first = new Date(now.getFullYear(), now.getMonth(), 1); const days: CalendarDay[] = []
+export function buildMonthDays(items: any[], timezone = displayTimezone): CalendarDay[] {
+  const now = currentDateParts(timezone); const firstDay = new Date(Date.UTC(now.year, now.month - 1, 1)).getUTCDay(); const days: CalendarDay[] = []
   const pad = (n: number) => String(n).padStart(2, '0')
-  for (let i = 0; i < (first.getDay() + 6) % 7; i++) days.push({ day: '', today: false, items: [] })
-  const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+  for (let i = 0; i < (firstDay + 6) % 7; i++) days.push({ day: '', today: false, items: [] })
+  const count = new Date(Date.UTC(now.year, now.month, 0)).getUTCDate()
   for (let d = 1; d <= count; d++) {
-    const key = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(d)}`
-    days.push({ day: d, today: d === now.getDate(), items: items.filter(item => primaryTime(item).startsWith(key)) })
+    const key = `${now.year}-${pad(now.month)}-${pad(d)}`
+    days.push({ day: d, today: d === now.day, items: items.filter(item => occursOnDate(item, key, timezone)) })
   }
   return days
 }
 
 export function primaryTime(item: any) { return item.deadlineTime || item.endTime || item.startTime || item.createdAt || '' }
 
-export function formatTime(value: string) {
+export function occursOnDate(item: any, dateKey: string, timezone = displayTimezone) {
+  const start = item.startTime || ''
+  const end = item.endTime || item.deadlineTime || ''
+  const isDuration = item.sourceType === 'team_task'
+    ? !!start && !!item.deadlineTime
+    : (item.timeType === 'duration_task' || (item.timeType === 'deadline_task' && !!start && !!item.deadlineTime)) && !!end
+  if (!isDuration) return dateKeyInTimezone(primaryTime(item), timezone) === dateKey
+  const startKey = dateKeyInTimezone(start, timezone)
+  const endKey = dateKeyInTimezone(end, timezone)
+  return !!startKey && !!endKey && dateKey >= startKey && dateKey <= endKey
+}
+
+export function formatTime(value: string, timezone = displayTimezone) {
   if (!value) return '未设置'
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date)
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { timeZone: timezone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date)
 }
 
 export function countdown(value: string) {

@@ -2,6 +2,7 @@ package com.dayliane.ai;
 
 import com.dayliane.admin.AdminService;
 import com.dayliane.common.BusinessException;
+import com.dayliane.user.UserService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,26 +11,33 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @Service
 public class AiService {
     private static final int MAX_INPUT_LENGTH = 8000;
     private static final int MAX_LOG_LENGTH = 12000;
+    private static final Pattern PHONE_PATTERN = Pattern.compile("(?<!\\d)(1\\d{2})\\d{4}(\\d{4})(?!\\d)");
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})");
     private final JdbcTemplate jdbc;
     private final AdminService adminService;
+    private final UserService userService;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final boolean defaultEnabled;
@@ -38,7 +46,7 @@ public class AiService {
     private final String defaultApiBaseUrl;
     private final String apiKey;
 
-    public AiService(JdbcTemplate jdbc, AdminService adminService, ObjectMapper objectMapper,
+    public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, ObjectMapper objectMapper,
                      @Value("${app.ai.enabled:false}") boolean defaultEnabled,
                      @Value("${app.ai.provider:}") String defaultProvider,
                      @Value("${app.ai.model:}") String defaultModel,
@@ -46,6 +54,7 @@ public class AiService {
                      @Value("${app.ai.api-key:}") String apiKey) {
         this.jdbc = jdbc;
         this.adminService = adminService;
+        this.userService = userService;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         this.defaultEnabled = defaultEnabled;
@@ -57,14 +66,15 @@ public class AiService {
 
     public Map<String, Object> parseSchedule(long userId, String text, boolean recordUsage) {
         requireText(text);
-        String now = OffsetDateTime.now(ZoneId.of("Asia/Shanghai")).toString();
-        String input = "Current time: " + now + "\nTimezone: Asia/Shanghai\nUser text: " + text;
-        return suggest(userId, "schedule_parse", input, "Return JSON only: {\"title\":\"\",\"groupName\":\"\",\"timeType\":\"\",\"startTime\":\"\",\"endTime\":\"\",\"deadlineTime\":\"\",\"description\":\"\"}. Resolve relative dates like 明天, 后天, 下周 using Current time and Timezone. Output all date-time fields as local Asia/Shanghai values in format yyyy-MM-dd'T'HH:mm, without UTC conversion. Infer groupName from explicit user instruction first: phrases like 放X, 放到X, 归到X, 分到X mean groupName must be X. If there is no explicit group instruction, infer groupName from the task topic in Chinese, for example 学习/读书/图书馆/上课/考试 -> 学习, 开会/项目/工作/汇报 -> 工作, 运动/健身/跑步 -> 运动, 吃饭/购物/家务/生活 -> 生活. timeType must be one of point_event, deadline_task, duration_task. Use duration_task when the text contains both a start time and an end time, such as \"8点到18点\". Use deadline_task when the text describes a deadline or due time. Use point_event only for a single occurrence time. All user-facing text values must be in Chinese. Extract a schedule draft from this context:", recordUsage);
+        ZoneId zone = userZone(userId);
+        String now = OffsetDateTime.now(zone).toString();
+        String input = "Current time: " + now + "\nTimezone: " + zone.getId() + "\nUser text: " + text;
+        return suggest(userId, "schedule_parse", input, "Return JSON only: {\"title\":\"\",\"groupName\":\"\",\"timeType\":\"\",\"startTime\":\"\",\"endTime\":\"\",\"deadlineTime\":\"\",\"remindAt\":\"\",\"description\":\"\"}. Resolve relative dates like 明天, 后天, 下周 using Current time and Timezone. Output all date-time fields as local values in the provided Timezone using format yyyy-MM-dd'T'HH:mm, without UTC conversion. Infer groupName from explicit user instruction first: phrases like 放X, 放到X, 归到X, 分到X mean groupName must be X. If there is no explicit group instruction, infer groupName from the task topic in Chinese, for example 学习/读书/图书馆/上课/考试 -> 学习, 开会/项目/工作/汇报 -> 工作, 运动/健身/跑步 -> 运动, 吃饭/购物/家务/生活 -> 生活. timeType must be one of point_event, deadline_task, duration_task. Use duration_task when the text contains both a start time and an end time. Use deadline_task for a due time, and point_event for a single occurrence time. Infer remindAt only when the user asks for a reminder. All user-facing text values must be in Chinese. Extract a schedule draft from this context:", recordUsage);
     }
 
     public Map<String, Object> breakdownTeamTask(long userId, String text, boolean recordUsage) {
         requireText(text);
-        return suggest(userId, "team_task_breakdown", text, "Return JSON only: {\"tasks\":[{\"title\":\"\",\"description\":\"\"}]}. Break this team task into actionable tasks:", recordUsage);
+        return suggest(userId, "team_task_breakdown", text, "Return JSON only: {\"tasks\":[{\"title\":\"\",\"description\":\"\",\"deadlineTime\":\"\"}]}. Break this team task into actionable tasks. deadlineTime may be empty or an ISO local date-time:", recordUsage);
     }
 
     public Map<String, Object> dailyPlan(long userId, boolean recordUsage) {
@@ -160,10 +170,10 @@ public class AiService {
         try {
             String raw = call(instruction + "\n" + safeInput);
             Map<String, Object> result = formatResult(featureType, safeInput, raw);
-            if (recordUsage) log(userId, featureType, safeInput, raw, "success", null);
+            log(userId, featureType, safeInput, raw, "success", null, recordUsage);
             return result;
         } catch (BusinessException ex) {
-            if (recordUsage) log(userId, featureType, safeInput, null, "failed", ex.getMessage());
+            log(userId, featureType, safeInput, null, "failed", ex.getMessage(), recordUsage);
             throw ex;
         }
     }
@@ -198,7 +208,7 @@ public class AiService {
         if ("schedule_parse".equals(featureType)) {
             Map<String, Object> draft = parsed instanceof Map<?, ?> map ? mapValue(map, "draft", map) : Map.of();
             Map<String, Object> normalized = new LinkedHashMap<>();
-            for (String key : List.of("title", "groupName", "timeType", "startTime", "endTime", "deadlineTime", "description")) normalized.put(key, stringValue(draft.get(key)));
+            for (String key : List.of("title", "groupName", "timeType", "startTime", "endTime", "deadlineTime", "remindAt", "description")) normalized.put(key, stringValue(draft.get(key)));
             String timeType = stringValue(normalized.get("timeType"));
             String startTime = stringValue(normalized.get("startTime"));
             String endTime = stringValue(normalized.get("endTime"));
@@ -244,8 +254,16 @@ public class AiService {
         } catch (EmptyResultDataAccessException ex) { return null; }
     }
 
-    private void log(long userId, String featureType, String input, String output, String status, String error) {
-        jdbc.update("insert into ai_usage_log (user_id,feature_type,input_text,output_text,status,error_message) values (?,?,?,?,?,?)", userId, featureType, limit(input, MAX_LOG_LENGTH), limit(output, MAX_LOG_LENGTH), status, limit(error, 500));
+    private void log(long userId, String featureType, String input, String output, String status, String error, boolean recordContent) {
+        String storedInput = recordContent ? limit(maskSensitive(input), MAX_LOG_LENGTH) : null;
+        String storedOutput = recordContent ? limit(maskSensitive(output), MAX_LOG_LENGTH) : null;
+        jdbc.update("insert into ai_usage_log (user_id,feature_type,input_text,output_text,status,error_message) values (?,?,?,?,?,?)", userId, featureType, storedInput, storedOutput, status, limit(maskSensitive(error), 500));
+    }
+
+    @Scheduled(cron = "0 15 3 * * *")
+    @Transactional
+    public int cleanupExpiredUsageLogs() {
+        return jdbc.update("delete from ai_usage_log where created_at < ?", java.sql.Timestamp.from(Instant.now().minus(30, ChronoUnit.DAYS)));
     }
 
     private Object parseJson(String raw) {
@@ -257,9 +275,11 @@ public class AiService {
     private List<Map<String, Object>> tasksFrom(Object parsed) {
         Object source = parsed instanceof Map<?, ?> map ? map.get("tasks") : parsed;
         List<Map<String, Object>> tasks = new ArrayList<>();
-        if (source instanceof List<?> list) for (Object item : list) { if (item instanceof Map<?, ?> map) { Map<String, Object> task = new LinkedHashMap<>(); task.put("title", stringValue(map.get("title"))); task.put("description", stringValue(map.get("description"))); if (!blank(String.valueOf(task.get("title")))) tasks.add(task); } else if (!blank(String.valueOf(item))) tasks.add(Map.of("title", String.valueOf(item), "description", "")); }
+        if (source instanceof List<?> list) for (Object item : list) { if (item instanceof Map<?, ?> map) { Map<String, Object> task = new LinkedHashMap<>(); task.put("title", stringValue(map.get("title"))); task.put("description", stringValue(map.get("description"))); task.put("deadlineTime", stringValue(map.get("deadlineTime"))); if (!blank(String.valueOf(task.get("title")))) tasks.add(task); } else if (!blank(String.valueOf(item))) tasks.add(Map.of("title", String.valueOf(item), "description", "", "deadlineTime", "")); }
         return tasks;
     }
+    private ZoneId userZone(long userId) { try { return ZoneId.of(String.valueOf(userService.userView(userId).getOrDefault("timezone", "Asia/Shanghai"))); } catch (Exception ignored) { return ZoneId.of("Asia/Shanghai"); } }
+    private static String maskSensitive(String value) { if (value == null) return null; String masked = PHONE_PATTERN.matcher(value).replaceAll("$1****$2"); return EMAIL_PATTERN.matcher(masked).replaceAll("$1***@$2"); }
     private void requireText(String text) { if (blank(text)) throw new BusinessException(400, "text is required"); }
     private void validateConfig(String provider, String modelName, String apiBaseUrl) { if (blank(provider) || blank(modelName) || blank(apiBaseUrl)) throw new BusinessException(400, "provider, modelName and apiBaseUrl are required"); try { URI.create(trimBaseUrl(apiBaseUrl)); } catch (Exception ex) { throw new BusinessException(400, "apiBaseUrl is invalid"); } }
     private void addDateFilters(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) { if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); } if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); } }

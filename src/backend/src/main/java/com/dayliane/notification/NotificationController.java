@@ -22,9 +22,10 @@ public class NotificationController {
     public ApiResponse<Map<String, Object>> list(HttpServletRequest request,
                                                   @RequestParam(defaultValue = "1") int page,
                                                   @RequestParam(defaultValue = "20") int size,
-                                                  @RequestParam(name = "is_read", required = false) Boolean isRead) {
+                                                  @RequestParam(name = "is_read", required = false) Boolean isRead,
+                                                  @RequestParam(defaultValue = "created_desc") String sort) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(notificationService.listNotifications(userId, page, size, isRead));
+        return ApiResponse.success(notificationService.listNotifications(userId, page, size, isRead, sort));
     }
 
     @GetMapping("/unread-count")
@@ -45,5 +46,17 @@ public class NotificationController {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         notificationService.readAll(userId);
         return ApiResponse.success(Map.of("ok", true));
+    }
+
+    @GetMapping("/preferences")
+    public ApiResponse<Map<String, Object>> preferences(HttpServletRequest request) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(notificationService.preferences(userId));
+    }
+
+    @PutMapping("/preferences")
+    public ApiResponse<Map<String, Object>> updatePreferences(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(notificationService.updatePreferences(userId, req));
     }
 }

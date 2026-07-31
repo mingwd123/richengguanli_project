@@ -27,9 +27,10 @@ public class TeamController {
     @GetMapping
     public ApiResponse<Map<String, Object>> list(HttpServletRequest request,
                                                   @RequestParam(defaultValue = "1") int page,
-                                                  @RequestParam(defaultValue = "20") int size) {
+                                                  @RequestParam(defaultValue = "20") int size,
+                                                  @RequestParam(defaultValue = "created_desc") String sort) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamService.listTeams(userId, page, size));
+        return ApiResponse.success(teamService.listTeams(userId, page, size, sort));
     }
 
     @GetMapping("/{id}")

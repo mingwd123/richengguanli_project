@@ -13,6 +13,7 @@ const schedule = ref<Schedule | null>(null)
 const loading = ref(false)
 const editing = ref(false)
 const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '' })
+const initialRemindAt = ref('')
 
 function toDatetimeLocal(value: string) {
   if (!value) return ''
@@ -31,7 +32,8 @@ function fillEditForm(item: Schedule) {
   editForm.startTime = toDatetimeLocal(item.startTime)
   editForm.endTime = toDatetimeLocal(item.endTime)
   editForm.deadlineTime = toDatetimeLocal(item.deadlineTime)
-  editForm.remindAt = ''
+  editForm.remindAt = toDatetimeLocal(item.pendingReminders?.[0]?.remindAt || '')
+  initialRemindAt.value = editForm.remindAt
 }
 
 async function loadDetail() {
@@ -54,7 +56,7 @@ function openEdit() {
 
 async function saveEdit() {
   if (!schedule.value) return
-  const ok = await store.updateSchedule(schedule.value.id, editForm)
+  const ok = await store.updateSchedule(schedule.value.id, { ...editForm, reminderChanged: editForm.remindAt !== initialRemindAt.value })
   if (!ok) return
   editing.value = false
   await loadDetail()
@@ -133,6 +135,10 @@ onMounted(loadDetail)
           <span class="muted">提醒数：</span>
           <span>{{ schedule.reminderCount }}</span>
         </div>
+        <div v-if="schedule.pendingReminders?.length">
+          <span class="muted">下次提醒：</span>
+          <span>{{ formatTime(schedule.pendingReminders[0].remindAt) }}</span>
+        </div>
         <div>
           <span class="muted">创建时间：</span>
           <span>{{ formatTime(schedule.createdAt) }}</span>
@@ -143,6 +149,7 @@ onMounted(loadDetail)
         <button class="primary" @click="openEdit">编辑</button>
         <button v-if="schedule.status === 'pending'" @click="handleAction('complete')">标记完成</button>
         <button v-if="schedule.status === 'completed'" @click="handleAction('uncomplete')">恢复</button>
+        <button v-if="schedule.status === 'cancelled'" @click="handleAction('restore')">恢复</button>
         <button v-if="schedule.status === 'pending'" @click="handleAction('cancel')">取消日程</button>
         <button @click="handleDelete">删除</button>
       </div>
@@ -168,7 +175,7 @@ onMounted(loadDetail)
             <label>结束时间<input v-model="editForm.endTime" type="datetime-local" /></label>
           </template>
           <label>提醒时间<input v-model="editForm.remindAt" type="datetime-local" /></label>
-          <small class="muted">提醒时间留空会清除当前未发送提醒。</small>
+          <small class="muted">保持原值不会替换提醒；清空后保存会取消未发送提醒。</small>
           <div class="form-actions"><button type="button" @click="editing = false">取消</button><button class="primary" :disabled="store.loading">保存修改</button></div>
         </form>
       </section>

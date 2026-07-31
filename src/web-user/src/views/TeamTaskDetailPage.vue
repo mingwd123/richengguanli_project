@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import { Sparkles } from 'lucide-vue-next'
 import { formatTime, countdown, urgency, statusLabel } from '../utils/helpers'
-import type { TeamTask, TeamTaskAssignee } from '../types'
+import type { TeamTask, TeamTaskAssignee, TaskGroup } from '../types'
 
 const eventTypeLabels: Record<string, string> = {
   created: '创建', assigned: '分配', accepted: '接受', rejected: '拒绝',
@@ -19,6 +20,10 @@ const task = ref<TeamTask | null>(null)
 const loading = ref(false)
 const aiOptimizing = ref(false)
 const optimizedDesc = ref('')
+const editOpen = ref(false)
+const taskGroups = ref<TaskGroup[]>([])
+const editForm = reactive({ title: '', description: '', groupId: '', startTime: '', deadlineTime: '', remindAt: '' })
+const initialRemindAt = ref('')
 async function aiOptimizeDesc() {
   if (!task.value?.description) return
   aiOptimizing.value = true; optimizedDesc.value = ''
@@ -29,6 +34,16 @@ async function aiOptimizeDesc() {
   } catch (e: any) {
     optimizedDesc.value = '优化失败: ' + (e.message || '服务不可用')
   } finally { aiOptimizing.value = false }
+}
+
+async function applyOptimizedDescription() {
+  if (!task.value || !optimizedDesc.value || optimizedDesc.value.startsWith('优化失败')) return
+  try {
+    await store.request(`/team-tasks/${task.value.id}`, { method: 'PUT', body: JSON.stringify({ description: optimizedDesc.value }) })
+    optimizedDesc.value = ''
+    await Promise.all([loadDetail(), store.loadAll(), store.loadTeamTasks(task.value.teamId)])
+    store.notify('优化后的描述已保存')
+  } catch (e: any) { store.notify(e.message || '保存失败') }
 }
 
 const isCreatorOrAdmin = computed(() => {
@@ -47,6 +62,53 @@ async function loadDetail() {
   } finally {
     loading.value = false
   }
+}
+
+function toDatetimeLocal(value: string) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value.slice(0, 16)
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+async function startEdit() {
+  if (!task.value) return
+  taskGroups.value = await store.loadTeamTaskGroups(task.value.teamId)
+  Object.assign(editForm, {
+    title: task.value.title,
+    description: task.value.description || '',
+    groupId: String(task.value.groupId || ''),
+    startTime: toDatetimeLocal(task.value.startTime),
+    deadlineTime: toDatetimeLocal(task.value.deadlineTime),
+    remindAt: toDatetimeLocal(task.value.pendingReminders?.[0]?.remindAt || ''),
+  })
+  initialRemindAt.value = editForm.remindAt
+  editOpen.value = true
+}
+
+async function saveEdit() {
+  if (!task.value || !editForm.title.trim() || !editForm.groupId) {
+    store.notify('请填写标题并选择分组')
+    return
+  }
+  try {
+    const payload: Record<string, any> = {
+      title: editForm.title.trim(),
+      description: editForm.description,
+      groupId: Number(editForm.groupId),
+      startTime: editForm.startTime ? new Date(editForm.startTime).toISOString() : '',
+      deadlineTime: editForm.deadlineTime ? new Date(editForm.deadlineTime).toISOString() : '',
+    }
+    if (editForm.remindAt !== initialRemindAt.value) payload.remindAt = editForm.remindAt ? new Date(editForm.remindAt).toISOString() : ''
+    await store.request(`/team-tasks/${task.value.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    })
+    editOpen.value = false
+    await Promise.all([loadDetail(), store.loadAll(), store.loadTeamTasks(task.value.teamId)])
+    store.notify('任务已更新')
+  } catch (e: any) { store.notify(e.message || '更新失败') }
 }
 
 function handleTaskAction(action: string) {
@@ -99,18 +161,22 @@ onMounted(loadDetail)
     <div v-else-if="!task" class="hint" style="text-align:center;padding:60px 0">任务未找到</div>
 
     <section v-else class="form-card" style="margin-top:16px">
-      <h2>{{ task.title }}</h2>
+      <div class="section-head">
+        <div><h2>{{ task.title }}</h2><p class="muted">{{ task.groupName || '未分组' }}</p></div>
+        <button v-if="isCreatorOrAdmin" class="primary" @click="startEdit">编辑任务</button>
+      </div>
 
       <div style="display:grid;gap:16px;margin-top:20px">
         <div v-if="task.description">
           <span class="muted">描述：</span>
           <p>{{ task.description }}</p>
           <button v-if="task.description" type="button" class="ai-btn" style="margin-top:8px" @click="aiOptimizeDesc" :disabled="aiOptimizing">
-            {{ aiOptimizing ? '优化中...' : '🤖 AI 优化描述' }}
+            <Sparkles :size="15" />{{ aiOptimizing ? '优化中...' : 'AI 优化描述' }}
           </button>
           <p v-if="optimizedDesc" style="margin-top:8px;padding:8px;background:#f0f9ff;border-radius:6px;border:1px solid #bae6fd">
             <strong>AI 建议：</strong>{{ optimizedDesc }}
           </p>
+          <button v-if="optimizedDesc && isCreatorOrAdmin && !optimizedDesc.startsWith('优化失败')" type="button" class="primary" style="margin-top:8px" @click="applyOptimizedDescription">应用并保存</button>
         </div>
         <div>
           <span class="muted">团队：</span>
@@ -132,6 +198,9 @@ onMounted(loadDetail)
         <div>
           <span class="muted">整体状态：</span>
           <span :class="['tag', task.status === 'completed' ? 'blue' : task.status === 'cancelled' || task.status === 'all_rejected' ? 'danger' : 'warning']">{{ statusLabel(task.status) }}</span>
+        </div>
+        <div v-if="task.pendingReminders?.length">
+          <span class="muted">下次提醒：</span><span>{{ formatTime(task.pendingReminders[0].remindAt) }}</span>
         </div>
       </div>
 
@@ -187,5 +256,20 @@ onMounted(loadDetail)
         <button @click="handleDelete">删除任务</button>
       </div>
     </section>
+
+    <div v-if="editOpen" class="modal-backdrop" @click.self="editOpen = false">
+      <section class="modal-panel" style="max-width:560px">
+        <div class="modal-head"><h2>编辑团队任务</h2><button class="modal-close" aria-label="关闭" @click="editOpen = false">×</button></div>
+        <form @submit.prevent="saveEdit">
+          <label>标题<input v-model="editForm.title" maxlength="200" /></label>
+          <label>说明<textarea v-model="editForm.description" rows="5" placeholder="补充目标、交付物或注意事项"></textarea></label>
+          <label>分组<select v-model="editForm.groupId"><option v-for="group in taskGroups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
+          <label>开始时间<input v-model="editForm.startTime" type="datetime-local" /></label>
+          <label>截止时间<input v-model="editForm.deadlineTime" type="datetime-local" /></label>
+          <label>提醒时间<input v-model="editForm.remindAt" type="datetime-local" /><small class="muted">清空后保存会取消所有执行人的未发送提醒。</small></label>
+          <div class="form-actions"><button type="button" @click="editOpen = false">取消</button><button class="primary">保存</button></div>
+        </form>
+      </section>
+    </div>
   </section>
 </template>

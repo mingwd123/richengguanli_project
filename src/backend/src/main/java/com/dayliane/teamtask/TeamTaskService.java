@@ -2,6 +2,7 @@ package com.dayliane.teamtask;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.PermissionService;
+import com.dayliane.notification.NotificationService;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -21,10 +22,12 @@ public class TeamTaskService {
 
     private final JdbcTemplate jdbc;
     private final PermissionService permissionService;
+    private final NotificationService notificationService;
 
-    public TeamTaskService(JdbcTemplate jdbc, PermissionService permissionService) {
+    public TeamTaskService(JdbcTemplate jdbc, PermissionService permissionService, NotificationService notificationService) {
         this.jdbc = jdbc;
         this.permissionService = permissionService;
+        this.notificationService = notificationService;
     }
 
     // ===== Public API Methods =====
@@ -62,44 +65,88 @@ public class TeamTaskService {
             long assigneeUserId = number(v);
             jdbc.update("insert into team_task_assignee (task_id,user_id,assign_round,is_active,status,assigned_by,assigned_at) values (?,?,1,true,'pending',?,utc_timestamp())", taskId, assigneeUserId, userId);
             recordEvent(taskId, userId, "assigned", "分配给 " + requireUserEntity(assigneeUserId).get("nickname"));
-            jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)", assigneeUserId, "task_assigned", "New team task", "You have been assigned: " + title, "team_task", taskId);
+            notificationService.createNotification(assigneeUserId, "task_assigned", "收到新的团队任务", "你被分配了任务：" + title, "team_task", taskId, null);
             createTeamTaskReminders(assigneeUserId, taskId, req);
         }
         return teamTaskSummary(taskId, userId);
     }
 
     public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus, String keyword, String dateFrom, String dateTo) {
+        return listMyTeamTasks(userId, page, size, assignStatus, keyword, dateFrom, dateTo, "manual");
+    }
+
+    public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus, String keyword, String dateFrom, String dateTo, String sort) {
         StringBuilder sql = new StringBuilder("select t.id from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.deleted_at is null");
         List<Object> params = new ArrayList<>(List.of(userId, userId));
         if (!blank(assignStatus)) { sql.append(" and a.status=?"); params.add(assignStatus); }
         if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
         if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
         if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by t.deadline_time asc");
+        sql.append(" order by ").append("completed".equals(assignStatus) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, false));
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
+        return pageResult(rows, page, size);
+    }
+
+    public Map<String, Object> listCreatedTeamTasks(long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo) {
+        return listCreatedTeamTasks(userId, page, size, status, keyword, dateFrom, dateTo, "manual");
+    }
+
+    public Map<String, Object> listCreatedTeamTasks(long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo, String sort) {
+        StringBuilder sql = new StringBuilder("select t.id from team_task t join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where t.creator_id=? and t.deleted_at is null");
+        List<Object> params = new ArrayList<>(List.of(userId, userId));
+        if (!blank(status)) { sql.append(" and t.status=?"); params.add(status); }
+        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
+        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true));
         List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
         return pageResult(rows, page, size);
     }
 
     public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo) {
+        return listTeamTasks(teamId, userId, page, size, status, keyword, dateFrom, dateTo, "manual");
+    }
+
+    public Map<String, Object> listTeamTasks(long teamId, long userId, int page, int size, String status, String keyword, String dateFrom, String dateTo, String sort) {
         permissionService.requireActiveMember(teamId, userId);
-        StringBuilder sql = new StringBuilder("select id from team_task where team_id=? and deleted_at is null");
+        StringBuilder sql = new StringBuilder("select t.id from team_task t where t.team_id=? and t.deleted_at is null");
         List<Object> params = new ArrayList<>();
         params.add(teamId);
-        if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
-        if (!blank(keyword)) { sql.append(" and title like ?"); params.add("%" + keyword + "%"); }
-        if (!blank(dateFrom)) { sql.append(" and coalesce(deadline_time,start_time,created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and coalesce(deadline_time,start_time,created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
-        sql.append(" order by group_id asc, sort_order asc, coalesce(deadline_time,start_time,created_at) asc, id asc");
+        if (!blank(status)) { sql.append(" and t.status=?"); params.add(status); }
+        if (!blank(keyword)) { sql.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
+        if (!blank(dateFrom)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) >= ?"); params.add(dateFrom + " 00:00:00"); }
+        if (!blank(dateTo)) { sql.append(" and coalesce(t.deadline_time,t.start_time,t.created_at) <= ?"); params.add(dateTo + " 23:59:59"); }
+        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, true));
         List<Map<String, Object>> rows = jdbc.query(sql.toString(), (rs, i) -> teamTaskSummary(rs.getLong("id"), userId), params.toArray());
         return pageResult(rows, page, size);
     }
 
+    private static String teamTaskOrder(String sort, boolean groupedManualOrder) {
+        return switch (sort == null ? "manual" : sort) {
+            case "manual" -> groupedManualOrder
+                    ? "t.group_id asc, t.sort_order asc, coalesce(t.deadline_time,t.start_time,t.created_at) asc, t.id asc"
+                    : "coalesce(t.deadline_time,t.start_time,t.created_at) asc, t.id asc";
+            case "time_asc" -> "coalesce(t.deadline_time,t.start_time,t.created_at) asc, t.id asc";
+            case "time_desc" -> "coalesce(t.deadline_time,t.start_time,t.created_at) desc, t.id desc";
+            case "created_desc" -> "t.created_at desc, t.id desc";
+            case "title_asc" -> "t.title asc, t.id asc";
+            default -> throw new BusinessException(400, "sort is invalid");
+        };
+    }
+
     public Map<String, Object> teamTaskDetail(long taskId, long userId) {
         Map<String, Object> task = requireTeamTask(taskId);
-        permissionService.requireActiveMember(longValue(task.get("teamId")), userId);
+        long teamId = longValue(task.get("teamId"));
+        permissionService.requireActiveMember(teamId, userId);
+        Map<String, Object> creator = userView(longValue(task.get("creatorId")));
+        task.put("teamName", requireTeam(teamId).get("name"));
         task.put("assignees", teamTaskAssignees(taskId));
         task.put("events", teamTaskEvents(taskId));
-        task.put("creator", userView(longValue(task.get("creatorId"))));
+        task.put("creator", creator);
+        task.put("creatorName", creator.get("nickname"));
+        task.put("canManage", longValue(task.get("creatorId")) == userId || permissionService.canManageTeam(teamId, userId));
+        task.put("pendingReminders", jdbc.query("select id,user_id userId,remind_at remindAt,status from reminder where target_type='team_task' and target_id=? and status='pending' order by remind_at,user_id", (rs, i) -> Map.of(
+                "id", rs.getLong("id"), "userId", rs.getLong("userId"), "remindAt", iso(rs.getTimestamp("remindAt")), "status", rs.getString("status")), taskId));
         return task;
     }
 
@@ -128,10 +175,26 @@ public class TeamTaskService {
     public Map<String, Object> updateTeamTask(long taskId, long userId, Map<String, Object> req) {
         requireTeamTaskManager(taskId, userId);
         Map<String, Object> task = requireTeamTask(taskId);
+        boolean hasTitle = req.containsKey("title");
+        String title = hasTitle ? text(req, "title").trim() : null;
+        if (hasTitle && title.isBlank()) throw new BusinessException(400, "title is required");
+        boolean hasDescription = req.containsKey("description");
+        String description = hasDescription ? text(req, "description") : null;
+        boolean hasStartTime = req.containsKey("startTime");
+        boolean hasDeadlineTime = req.containsKey("deadlineTime");
+        Timestamp startTime = parseEditableTime(req.get("startTime"), "startTime");
+        Timestamp deadlineTime = parseEditableTime(req.get("deadlineTime"), "deadlineTime");
         Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolveTeamTaskGroup(longValue(task.get("teamId")), req) : null;
         Integer sortOrder = group == null ? null : nextTeamTaskSortOrder(longValue(task.get("teamId")), longValue(group.get("id")));
-        jdbc.update("update team_task set title=coalesce(?,title), description=coalesce(?,description), group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), updated_by=? where id=?",
-                nullableText(req.get("title")), nullableText(req.get("description")), group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, userId, taskId);
+        jdbc.update("update team_task set title=case when ? then ? else title end,description=case when ? then ? else description end,group_id=coalesce(?,group_id),group_name=coalesce(?,group_name),sort_order=coalesce(?,sort_order),start_time=case when ? then ? else start_time end,deadline_time=case when ? then ? else deadline_time end,time_updated_at=case when ? then utc_timestamp() else time_updated_at end,updated_by=? where id=? and deleted_at is null",
+                hasTitle, title, hasDescription, description, group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder,
+                hasStartTime, startTime, hasDeadlineTime, deadlineTime, hasStartTime || hasDeadlineTime, userId, taskId);
+        if (req.containsKey("remindAt") || req.containsKey("remindAts")) {
+            cancelPendingReminders("team_task", taskId, null);
+            List<Long> assigneeIds = jdbc.queryForList("select user_id from team_task_assignee where task_id=? and is_active=true and status in ('pending','accepted')", Long.class, taskId);
+            for (Long assigneeId : assigneeIds) createTeamTaskReminders(assigneeId, taskId, req);
+        }
+        recordEvent(taskId, userId, "updated", "更新了任务信息");
         return teamTaskDetail(taskId, userId);
     }
 
@@ -146,16 +209,24 @@ public class TeamTaskService {
         return teamTaskDetail(taskId, userId);
     }
 
+    @Transactional
     public Map<String, Object> updateTeamTaskTime(long taskId, long userId, Map<String, Object> req) {
         requireTeamTaskManager(taskId, userId);
-        jdbc.update("update team_task set start_time=coalesce(?,start_time), deadline_time=coalesce(?,deadline_time), time_updated_at=utc_timestamp(), updated_by=? where id=?",
-                parseOptional(req.get("startTime")), parseOptional(req.get("deadlineTime")), userId, taskId);
+        boolean hasStartTime = req.containsKey("startTime");
+        boolean hasDeadlineTime = req.containsKey("deadlineTime");
+        if (!hasStartTime && !hasDeadlineTime) throw new BusinessException(400, "startTime or deadlineTime is required");
+        jdbc.update("update team_task set start_time=case when ? then ? else start_time end,deadline_time=case when ? then ? else deadline_time end,time_updated_at=utc_timestamp(),updated_by=? where id=? and deleted_at is null",
+                hasStartTime, parseEditableTime(req.get("startTime"), "startTime"), hasDeadlineTime, parseEditableTime(req.get("deadlineTime"), "deadlineTime"), userId, taskId);
+        recordEvent(taskId, userId, "time_updated", "更新了任务时间");
         return teamTaskDetail(taskId, userId);
     }
 
+    @Transactional
     public void deleteTeamTask(long taskId, long userId) {
         requireTeamTaskManager(taskId, userId);
         jdbc.update("update team_task set deleted_at=utc_timestamp(), deleted_by=? where id=?", userId, taskId);
+        cancelPendingReminders("team_task", taskId, null);
+        recordEvent(taskId, userId, "deleted", "删除了任务");
     }
 
     @Transactional
@@ -195,8 +266,8 @@ public class TeamTaskService {
         jdbc.update("update team_task_assignee set is_active=false where id=?", old.get("id"));
         jdbc.update("insert into team_task_assignee (task_id,user_id,assign_round,is_active,status,reassigned_from_user_id,assigned_by,assigned_at) values (?,?,?,true,'pending',?,?,utc_timestamp())",
                 taskId, newUserId, ((Number) old.get("assignRound")).intValue() + 1, originalUserId, userId);
-        jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
-                newUserId, "task_assigned", "Task reassigned", "You have been assigned: " + task.get("title"), "team_task", taskId);
+        notificationService.createNotification(newUserId, "task_assigned", "团队任务已重新分配",
+                "你被分配了任务：" + task.get("title"), "team_task", taskId, null);
         recordEvent(taskId, userId, "reassigned", "将任务从 " + requireUserEntity(originalUserId).get("nickname") + " 重新分配给 " + requireUserEntity(newUserId).get("nickname"));
         createReassignedReminder(newUserId, taskId, task);
         recalculateTeamTaskStatus(taskId);
@@ -282,10 +353,24 @@ public class TeamTaskService {
         long groupId = requiredId(req, "groupId");
         requireTeamTaskGroup(teamId, groupId);
         List<Long> ids = idList(req, "taskIds");
-        validateCompleteIds(ids, jdbc.queryForList("select id from team_task where team_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, teamId, groupId), "taskIds");
+        List<Long> all = jdbc.queryForList("select id from team_task where team_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, teamId, groupId);
+        reorderSubset(all, ids, "taskIds");
         for (Long taskId : ids) requireTeamTaskManager(taskId, userId);
-        for (int i = 0; i < ids.size(); i++) jdbc.update("update team_task set sort_order=?, updated_by=? where id=? and team_id=? and group_id=? and deleted_at is null", (i + 1) * 10, userId, ids.get(i), teamId, groupId);
-        return Map.of("groupId", groupId, "taskIds", ids);
+        for (int i = 0; i < all.size(); i++) jdbc.update("update team_task set sort_order=?, updated_by=? where id=? and team_id=? and group_id=? and deleted_at is null", (i + 1) * 10, userId, all.get(i), teamId, groupId);
+        return Map.of("groupId", groupId, "taskIds", all);
+    }
+
+    @Transactional
+    public Map<String, Object> sortCompletedTeamTasks(long teamId, long userId, Map<String, Object> req) {
+        permissionService.requireTeamManager(teamId, userId);
+        List<Long> ids = idList(req, "taskIds");
+        List<Long> all = jdbc.queryForList("select id from team_task where team_id=? and status='completed' and deleted_at is null order by sort_order,id", Long.class, teamId);
+        reorderSubset(all, ids, "taskIds");
+        for (int i = 0; i < all.size(); i++) {
+            jdbc.update("update team_task set sort_order=?,updated_by=? where id=? and team_id=? and status='completed' and deleted_at is null",
+                    (i + 1) * 10, userId, all.get(i), teamId);
+        }
+        return Map.of("taskIds", all);
     }
 
     // ===== Private Helpers =====
@@ -377,6 +462,9 @@ public class TeamTaskService {
         Map<String, Object> task = requireTeamTask(taskId);
         task.put("teamName", requireTeam(longValue(task.get("teamId"))).get("name"));
         task.put("assigneeCount", count("select count(*) from team_task_assignee where task_id=? and is_active=true", taskId));
+        task.put("assignees", teamTaskAssignees(taskId));
+        List<Timestamp> reminders = jdbc.query("select min(remind_at) remindAt from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", (rs, i) -> rs.getTimestamp("remindAt"), taskId, userId);
+        task.put("remindAt", reminders.isEmpty() ? "" : iso(reminders.get(0)));
         try {
             Map<String, Object> a = requireMyActiveAssignee(taskId, userId);
             task.put("assigneeId", a.get("id"));
@@ -388,15 +476,18 @@ public class TeamTaskService {
     }
 
     private List<Map<String, Object>> teamTaskAssignees(long taskId) {
-        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,u.nickname from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and a.is_active=true order by a.id", (rs, i) -> {
+        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,u.nickname,u.avatar_url avatarUrl from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and a.is_active=true order by a.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
+            m.put("assigneeId", rs.getLong("id"));
             m.put("userId", rs.getLong("userId"));
             m.put("assignRound", rs.getInt("assignRound"));
             m.put("isActive", rs.getBoolean("isActive"));
+            m.put("isCurrent", rs.getBoolean("isActive"));
             m.put("status", rs.getString("status"));
             m.put("assignStatus", rs.getString("status"));
             m.put("nickname", rs.getString("nickname"));
+            m.put("avatarUrl", rs.getString("avatarUrl"));
             return m;
         }, taskId);
     }
@@ -482,17 +573,26 @@ public class TeamTaskService {
         if (creatorId == operatorId) return;
         String actorName = String.valueOf(requireUserEntity(operatorId).get("nickname"));
         String action = switch (next) { case "accepted" -> "accepted"; case "rejected" -> "rejected"; case "completed" -> "completed"; default -> "updated"; };
-        jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
-                creatorId, "task_" + action, "Task " + action, actorName + " " + action + ": " + task.get("title"), "team_task", task.get("id"));
+        notificationService.createNotification(creatorId, "task_" + action, "团队任务状态更新",
+                actorName + actionLabel(next) + "：" + task.get("title"), "team_task", longValue(task.get("id")), null);
     }
 
     private void notifyAssignees(long taskId, long operatorId, String type, String title, String content) {
         for (Map<String, Object> assignee : teamTaskAssignees(taskId)) {
             long assigneeUserId = longValue(assignee.get("userId"));
             if (assigneeUserId == operatorId) continue;
-            jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,is_read) values (?,?,?,?,?,?,false)",
-                    assigneeUserId, type, title, content, "team_task", taskId);
+            notificationService.createNotification(assigneeUserId, type, title, content, "team_task", taskId, null);
         }
+    }
+
+    private static void reorderSubset(List<Long> all, List<Long> requested, String field) {
+        if (requested.isEmpty() || new HashSet<>(requested).size() != requested.size() || !new HashSet<>(all).containsAll(requested)) {
+            throw new BusinessException(400, field + " contains invalid ids");
+        }
+        Set<Long> selected = new HashSet<>(requested);
+        List<Integer> positions = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) if (selected.contains(all.get(i))) positions.add(i);
+        for (int i = 0; i < positions.size(); i++) all.set(positions.get(i), requested.get(i));
     }
 
     private void createReassignedReminder(long userId, long taskId, Map<String, Object> task) {
@@ -581,6 +681,13 @@ public class TeamTaskService {
     private static String nullableText(Object v) { if (v == null) return null; String s = String.valueOf(v); return s.isBlank() ? null : s; }
 
     private static Timestamp parseOptional(Object v) { return v == null ? null : parseTime(String.valueOf(v)); }
+
+    private static Timestamp parseEditableTime(Object value, String field) {
+        if (value == null || String.valueOf(value).isBlank()) return null;
+        Timestamp parsed = parseTime(String.valueOf(value));
+        if (parsed == null) throw new BusinessException(400, field + " is invalid");
+        return parsed;
+    }
 
     private static Timestamp parseTime(String value) {
         if (value == null || value.isBlank()) return null;

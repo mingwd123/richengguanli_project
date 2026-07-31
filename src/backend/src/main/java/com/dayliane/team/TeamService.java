@@ -48,7 +48,16 @@ public class TeamService {
     }
 
     public Map<String, Object> listTeams(long userId, int page, int size) {
-        List<Map<String, Object>> rows = jdbc.query("select t.id from team t join team_member m on m.team_id=t.id where m.user_id=? and m.status='active' and t.deleted_at is null order by t.created_at desc", (rs, i) -> teamView(rs.getLong("id"), userId), userId);
+        return listTeams(userId, page, size, "created_desc");
+    }
+
+    public Map<String, Object> listTeams(long userId, int page, int size, String sort) {
+        String order = switch (sort == null ? "created_desc" : sort) {
+            case "created_desc" -> "t.created_at desc, t.id desc";
+            case "name_asc" -> "t.name asc, t.id asc";
+            default -> throw new BusinessException(400, "sort is invalid");
+        };
+        List<Map<String, Object>> rows = jdbc.query("select t.id from team t join team_member m on m.team_id=t.id where m.user_id=? and m.status='active' and t.deleted_at is null order by " + order, (rs, i) -> teamView(rs.getLong("id"), userId), userId);
         return pageResult(rows, page, size);
     }
 
@@ -77,7 +86,7 @@ public class TeamService {
     }
 
     public List<Map<String, Object>> activeMembers(long teamId) {
-        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,u.nickname,u.phone from team_member m join `user` u on u.id=m.user_id where m.team_id=? and m.status='active' order by m.id", (rs, i) -> {
+        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,u.nickname,u.phone,u.avatar_url avatarUrl from team_member m join `user` u on u.id=m.user_id where m.team_id=? and m.status='active' order by m.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("teamId", rs.getLong("teamId"));
@@ -86,6 +95,7 @@ public class TeamService {
             m.put("status", rs.getString("status"));
             m.put("joinedAt", iso(rs.getTimestamp("joinedAt")));
             m.put("nickname", rs.getString("nickname"));
+            m.put("avatarUrl", rs.getString("avatarUrl"));
             m.put("phone", rs.getString("phone"));
             return m;
         }, teamId);

@@ -2,91 +2,33 @@ package com.dayliane.home;
 
 import com.dayliane.auth.AuthService;
 import com.dayliane.common.ApiResponse;
-import com.dayliane.notification.NotificationService;
-import com.dayliane.schedule.ScheduleService;
-import com.dayliane.teamtask.TeamTaskService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.time.LocalDate;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/home")
 public class HomeController {
-    private final ScheduleService scheduleService;
-    private final TeamTaskService teamTaskService;
-    private final NotificationService notificationService;
+    private final HomeService homeService;
     private final AuthService authService;
 
-    public HomeController(ScheduleService scheduleService, TeamTaskService teamTaskService, NotificationService notificationService, AuthService authService) {
-        this.scheduleService = scheduleService;
-        this.teamTaskService = teamTaskService;
-        this.notificationService = notificationService;
+    public HomeController(HomeService homeService, AuthService authService) {
+        this.homeService = homeService;
         this.authService = authService;
     }
 
-    @SuppressWarnings("unchecked")
     @GetMapping("/today")
     public ApiResponse<Map<String, Object>> today(HttpServletRequest request) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        LocalDate today = LocalDate.now();
-        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, null, null, null, null, null).get("list");
-        List<Map<String, Object>> teamTasks = (List<Map<String, Object>>) teamTaskService.listMyTeamTasks(userId, 1, 100, null, null, null, null).get("list");
-        List<Map<String, Object>> todaySchedules = schedules.stream().filter(s -> sameDate(primaryTime(s), today)).collect(Collectors.toList());
-        List<Map<String, Object>> todayTeamTasks = teamTasks.stream().filter(t -> sameDate(primaryTime(t), today)).collect(Collectors.toList());
-        return ApiResponse.success(Map.of(
-                "personalSchedules", todaySchedules,
-                "teamTasks", todayTeamTasks,
-                "unreadNotificationCount", notificationService.unreadCount(userId),
-                "groups", buildGroups(todaySchedules, todayTeamTasks)
-        ));
+        return ApiResponse.success(homeService.today(userId));
     }
 
-    @SuppressWarnings("unchecked")
     @GetMapping("/upcoming")
     public ApiResponse<Map<String, Object>> upcoming(HttpServletRequest request) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        List<Map<String, Object>> schedules = (List<Map<String, Object>>) scheduleService.listSchedules(userId, 1, 100, "pending", null, null, null, null).get("list");
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (Map<String, Object> s : schedules) {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("type", "schedule");
-            row.put("id", s.get("id"));
-            row.put("title", s.get("title"));
-            row.put("deadlineTime", primaryTime(s));
-            row.put("groupName", s.get("groupName"));
-            out.add(row);
-        }
-        out.sort(Comparator.comparing(x -> String.valueOf(x.get("deadlineTime"))));
-        return ApiResponse.success(Map.of("list", out.stream().limit(20).collect(Collectors.toList())));
-    }
-
-    private static List<Map<String, Object>> buildGroups(List<Map<String, Object>> schedules, List<Map<String, Object>> teamTasks) {
-        Map<String, Integer> counts = new LinkedHashMap<>();
-        for (Map<String, Object> schedule : schedules) {
-            String groupName = String.valueOf(schedule.getOrDefault("groupName", "未分组"));
-            if (!"completed".equals(schedule.get("status"))) counts.merge(groupName.isBlank() ? "未分组" : groupName, 1, Integer::sum);
-        }
-        for (Map<String, Object> task : teamTasks) {
-            if (!"completed".equals(task.get("status"))) counts.merge("团队任务", 1, Integer::sum);
-        }
-        return counts.entrySet().stream()
-                .map(e -> Map.<String, Object>of("name", e.getKey(), "items", e.getValue()))
-                .collect(Collectors.toList());
-    }
-
-    private static String primaryTime(Map<String, Object> item) {
-        String deadline = String.valueOf(item.getOrDefault("deadlineTime", ""));
-        if (!deadline.isBlank()) return deadline;
-        String end = String.valueOf(item.getOrDefault("endTime", ""));
-        return end.isBlank() ? String.valueOf(item.getOrDefault("startTime", "")) : end;
-    }
-
-    private static boolean sameDate(String iso, LocalDate date) {
-        return iso != null && iso.startsWith(date.toString());
+        return ApiResponse.success(homeService.upcoming(userId));
     }
 }

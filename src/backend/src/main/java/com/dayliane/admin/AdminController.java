@@ -29,12 +29,19 @@ public class AdminController {
         return ApiResponse.success(adminService.adminView(adminId));
     }
 
+    @GetMapping("/dashboard/stats")
+    public ApiResponse<Map<String, Object>> dashboardStats(HttpServletRequest request) {
+        authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.dashboardStats());
+    }
+
     @GetMapping("/users")
     public ApiResponse<Map<String, Object>> users(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                   @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                  @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                  @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                  @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("users", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("users", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @PutMapping("/users/{id}/status")
@@ -44,9 +51,11 @@ public class AdminController {
     }
 
     @GetMapping("/admin-users")
-    public ApiResponse<Map<String, Object>> adminUsers(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size) {
-        authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("adminUsers", page, size));
+    public ApiResponse<Map<String, Object>> adminUsers(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
+                                                        @RequestParam(required = false) String sort) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        adminService.requireSuperAdmin(adminId);
+        return ApiResponse.success(adminService.adminList("adminUsers", page, size, null, null, null, null, sort));
     }
 
     @PostMapping("/admin-users")
@@ -64,41 +73,46 @@ public class AdminController {
     @GetMapping("/teams")
     public ApiResponse<Map<String, Object>> teams(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                   @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                  @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                  @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                  @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("teams", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("teams", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/schedules")
     public ApiResponse<Map<String, Object>> schedules(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                       @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                      @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("schedules", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("schedules", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/team-tasks")
     public ApiResponse<Map<String, Object>> teamTasks(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                       @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                      @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("teamTasks", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("teamTasks", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/notifications")
     public ApiResponse<Map<String, Object>> notifications(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                           @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                          @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                          @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                          @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("notifications", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("notifications", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/reminders")
     public ApiResponse<Map<String, Object>> reminders(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
                                                       @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
-                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo) {
+                                                      @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
+                                                      @RequestParam(required = false) String sort) {
         authService.requireAdmin(request.getHeader("Authorization"));
-        return ApiResponse.success(adminService.adminList("reminders", page, size, keyword, status, dateFrom, dateTo));
+        return ApiResponse.success(adminService.adminList("reminders", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/users/{id}")

@@ -18,7 +18,10 @@ function goToSettings() {
 <template>
   <section class="settings-card">
     <div class="profile-head">
-      <div class="avatar">{{ store.profile?.nickname?.slice(0, 1) || 'U' }}</div>
+      <div class="avatar">
+        <img v-if="store.profile?.avatarUrl" :src="store.profile.avatarUrl" alt="" />
+        <span v-else>{{ store.profile?.nickname?.slice(0, 1) || 'U' }}</span>
+      </div>
       <div>
         <h2>{{ store.profile?.nickname || '用户' }}</h2>
         <p>{{ store.profile?.phone }}</p>
@@ -47,6 +50,10 @@ function goToSettings() {
 
     <article @click="goToSettings" style="cursor: pointer; color: #2f80ed;">
       个人设置 ›
+    </article>
+
+    <article @click="router.push('/profile/notifications')" style="cursor: pointer; color: #2f80ed;">
+      通知设置 ›
     </article>
 
     <article @click="handleLogout" style="cursor: pointer; color: #e11d48;">

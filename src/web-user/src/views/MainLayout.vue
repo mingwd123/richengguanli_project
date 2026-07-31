@@ -1,13 +1,42 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import SideNav from '../components/SideNav.vue'
 import { Bell, Moon, Plus, RefreshCw, Sun, UserRound } from 'lucide-vue-next'
+import { getDisplayTimezone } from '../utils/helpers'
 
 const route = useRoute()
 const router = useRouter()
 const store = useAppStore()
+let notificationTimer: ReturnType<typeof setInterval> | undefined
+
+function stopNotificationPolling() {
+  if (notificationTimer) clearInterval(notificationTimer)
+  notificationTimer = undefined
+}
+
+function startNotificationPolling() {
+  stopNotificationPolling()
+  if (!store.loggedIn) return
+  notificationTimer = setInterval(() => store.pollNotifications(), 45_000)
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    store.pollNotifications()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  startNotificationPolling()
+})
+
+onUnmounted(() => {
+  stopNotificationPolling()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
 
 const routeMeta = computed(() => {
   const map: Record<string, { title: string; description: string }> = {
@@ -17,6 +46,7 @@ const routeMeta = computed(() => {
     '/teams': { title: '团队', description: '查看成员、权限和协作空间' },
     '/tasks': { title: '团队任务', description: '跟进指派、截止时间与执行状态' },
     '/notifications': { title: '通知', description: '集中处理提醒和团队动态' },
+    '/reminders': { title: '提醒记录', description: '查看待发送与历史提醒' },
     '/profile': { title: '个人中心', description: '管理偏好、模块和账号信息' },
     '/profile/settings': { title: '个人设置', description: '更新资料、安全与时区' },
   }
@@ -28,7 +58,7 @@ const routeMeta = computed(() => {
 })
 
 const dateLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
-  month: 'long', day: 'numeric', weekday: 'long'
+  timeZone: store.profile?.timezone || getDisplayTimezone(), month: 'long', day: 'numeric', weekday: 'long'
 }).format(new Date()))
 
 function openCreateSchedule() {

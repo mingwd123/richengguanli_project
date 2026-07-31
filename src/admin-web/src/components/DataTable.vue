@@ -1,6 +1,10 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { ArrowLeft, ArrowRight, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { useAdminStore } from '../stores/admin'
+
+const store = useAdminStore()
+const sortableKeys = new Set(['id', 'createdAt', 'status', 'title', 'deadlineTime', 'remindAt', 'phone', 'nickname', 'name', 'username', 'role'])
 
 const props = defineProps({
   columns: { type: Array, required: true },
@@ -66,6 +70,13 @@ function formatValue(value) {
   if (value === false) return '否'
   return value ?? '-'
 }
+
+function sortBy(column) {
+  if (!sortableKeys.has(column.key)) return
+  if (store.sortKey === column.key) store.sortOrder = store.sortOrder === 'asc' ? 'desc' : 'asc'
+  else { store.sortKey = column.key; store.sortOrder = 'asc' }
+  store.fetchList({ page: 1 })
+}
 </script>
 
 <template>
@@ -92,7 +103,12 @@ function formatValue(value) {
 
     <div class="data-table">
       <div class="table-row table-title" :style="gridStyle">
-        <strong v-for="col in columns" :key="col.key">{{ col.label }}</strong>
+        <strong v-for="col in columns" :key="col.key">
+          <button v-if="sortableKeys.has(col.key)" class="table-sort" @click="sortBy(col)">
+            {{ col.label }}<span v-if="store.sortKey === col.key">{{ store.sortOrder === 'asc' ? '↑' : '↓' }}</span>
+          </button>
+          <template v-else>{{ col.label }}</template>
+        </strong>
         <strong v-if="actions">操作</strong>
       </div>
       <div v-if="loading" class="loading">加载中...</div>

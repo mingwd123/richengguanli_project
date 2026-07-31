@@ -3,6 +3,7 @@ export interface UserProfile {
   id: number
   phone: string
   nickname: string
+  avatarUrl: string
   timezone: string
   createdAt: string
 }
@@ -24,6 +25,8 @@ export interface Schedule {
   deadlineTime: string
   status: ScheduleStatus
   reminderCount: number
+  pendingReminders: Reminder[]
+  remindAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -57,6 +60,7 @@ export interface TeamMember {
   id: number
   userId: number
   nickname: string
+  avatarUrl?: string
   phone: string
   role: TeamRole
   status: MemberStatus
@@ -71,6 +75,7 @@ export interface TeamTaskAssignee {
   assigneeId: number
   userId: number
   nickname: string
+  avatarUrl?: string
   assignStatus: AssignStatus
   assignRound: number
   isCurrent: boolean
@@ -95,12 +100,14 @@ export interface TeamTask {
   sortOrder: number
   creatorId: number
   creatorName: string
+  canManage: boolean
   deadlineTime: string
   startTime: string
   endTime: string
   status: TeamTaskStatus
   assignees: TeamTaskAssignee[]
   events: TeamTaskEvent[]
+  pendingReminders: Reminder[]
   createdAt: string
   updatedAt: string
 }
@@ -118,9 +125,21 @@ export interface MyTask {
   deadlineTime: string
   startTime: string
   status: TeamTaskStatus
-  assignStatus: AssignStatus
-  assigneeId: number
-  assignRound: number
+  description?: string
+  assignStatus?: AssignStatus
+  assignees?: TeamTaskAssignee[]
+  assigneeCount?: number
+  remindAt?: string
+  createdAt: string
+  assigneeId?: number
+  assignRound?: number
+}
+
+export interface NotificationPreference {
+  browserEnabled: boolean
+  taskAssignedEnabled: boolean
+  taskStatusEnabled: boolean
+  reminderEnabled: boolean
 }
 
 /* ========== 通知 ========== */
@@ -139,12 +158,38 @@ export interface Notification {
   createdAt: string
 }
 
+export type ReminderStatus = 'pending' | 'sent' | 'cancelled' | 'failed'
+
+export interface Reminder {
+  id: number
+  userId: number
+  targetType: 'schedule' | 'team_task'
+  targetId: number
+  targetTitle: string
+  remindAt: string
+  status: ReminderStatus
+  sentAt: string
+  errorMessage: string
+  createdAt: string
+}
+
 /* ========== 首页概览 ========== */
 export interface TodayOverview {
+  date?: string
+  timezone?: string
   personalSchedules: Schedule[]
   teamTasks: MyTask[]
   unreadNotificationCount: number
   groups: { name: string; items: number }[]
+}
+
+export interface UpcomingOverview {
+  timezone: string
+  dateFrom: string
+  dateTo: string
+  personalSchedules: Schedule[]
+  teamTasks: MyTask[]
+  list: Array<(Schedule | MyTask) & { sourceType: 'schedule' | 'team_task' }>
 }
 
 /* ========== 日历 ========== */
@@ -187,12 +232,14 @@ export interface RegisterForm {
 
 export interface ScheduleForm {
   title: string
+  description: string
   groupId: string
   groupName: string
   timeType: TimeType
   startTime: string
   endTime: string
   deadlineTime: string
+  remindAt: string
 }
 
 export interface GroupForm {
@@ -207,8 +254,10 @@ export interface TaskForm {
   teamId: string
   groupId: string
   title: string
+  description: string
   deadlineTime: string
   startTime: string
+  remindAt: string
   assigneeUserIds: number[]
 }
 

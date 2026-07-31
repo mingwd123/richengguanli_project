@@ -17,6 +17,8 @@ const columns = [
 ]
 
 onMounted(async () => {
+  if (!store.profile) await store.loadProfile()
+  if (!store.isSuperAdmin) return
   store.activeResource = 'adminUsers'
   store.resetFilters()
   await store.fetchList()
@@ -55,7 +57,7 @@ function closeDetail() {
 </script>
 
 <template>
-  <div class="resource-page">
+  <div v-if="store.isSuperAdmin" class="resource-page">
     <header class="topbar">
       <div>
         <h1>管理员账号</h1>
@@ -75,7 +77,10 @@ function closeDetail() {
       <form class="create-form" @submit.prevent="store.createAdminUser">
         <input v-model="store.adminCreateForm.username" placeholder="管理员账号" autocomplete="off" />
         <input v-model="store.adminCreateForm.password" placeholder="密码" type="password" autocomplete="new-password" />
-        <input v-model="store.adminCreateForm.role" placeholder="角色" />
+        <select v-model="store.adminCreateForm.role" aria-label="管理员角色">
+          <option value="admin">普通管理员</option>
+          <option value="super_admin">超级管理员</option>
+        </select>
         <button class="primary" :disabled="store.loading">创建</button>
       </form>
     </section>

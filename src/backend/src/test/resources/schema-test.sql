@@ -3,6 +3,7 @@ DROP TABLE IF EXISTS ai_usage_log;
 DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
+DROP TABLE IF EXISTS notification_preference;
 DROP TABLE IF EXISTS reminder;
 DROP TABLE IF EXISTS team_task_assignee;
 DROP TABLE IF EXISTS team_task;
@@ -161,6 +162,16 @@ CREATE TABLE notification (
   read_at DATETIME,
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE notification_preference (
+  user_id BIGINT NOT NULL PRIMARY KEY,
+  browser_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  task_assigned_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  task_status_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  reminder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE admin_user (

@@ -37,9 +37,10 @@ public class ScheduleController {
                                                   @RequestParam(name = "group_name", required = false) String groupName,
                                                   @RequestParam(required = false) String keyword,
                                                   @RequestParam(required = false) String dateFrom,
-                                                  @RequestParam(required = false) String dateTo) {
+                                                  @RequestParam(required = false) String dateTo,
+                                                  @RequestParam(defaultValue = "manual") String sort) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo));
+        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/{id}")
@@ -52,6 +53,12 @@ public class ScheduleController {
     public ApiResponse<Map<String, Object>> sort(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         return ApiResponse.success(scheduleService.sortSchedules(userId, req));
+    }
+
+    @PutMapping("/completed/sort")
+    public ApiResponse<Map<String, Object>> sortCompleted(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.sortCompletedSchedules(userId, req));
     }
 
     @PutMapping("/{id}/move-group")

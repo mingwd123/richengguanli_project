@@ -21,6 +21,8 @@ import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.DateTimeException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -55,6 +57,8 @@ public class AuthService {
         if (count("select count(*) from `user` where phone = ?", phone) > 0) {
             throw new BusinessException(409, "phone already registered");
         }
+        String selectedTimezone = blank(timezone) ? "Asia/Shanghai" : timezone;
+        try { ZoneId.of(selectedTimezone); } catch (DateTimeException ex) { throw new BusinessException(400, "timezone is invalid"); }
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
@@ -64,7 +68,7 @@ public class AuthService {
             ps.setString(2, passwordEncoder.encode(password));
             ps.setString(3, blank(nickname) ? "User" : nickname);
             ps.setString(4, "");
-            ps.setString(5, blank(timezone) ? "Asia/Shanghai" : timezone);
+            ps.setString(5, selectedTimezone);
             return ps;
         }, keyHolder);
         long userId = Objects.requireNonNull(keyHolder.getKey()).longValue();
@@ -120,6 +124,9 @@ public class AuthService {
         if (userId == null) {
             throw new BusinessException(401, "refresh token is invalid");
         }
+        if (count("select count(*) from `user` where id=? and status='active' and deleted_at is null", userId) == 0) {
+            throw new BusinessException(401, "refresh token is invalid");
+        }
         String jti = jwtService.getJti(refreshToken);
         if (jti == null || !refreshTokenStore.isValid(jti, userId)) {
             throw new BusinessException(401, "refresh token is invalid");
@@ -136,13 +143,27 @@ public class AuthService {
     }
 
     public void logout(String authorization) {
+        logout(authorization, null);
+    }
+
+    public void logout(String authorization, String refreshToken) {
         if (authorization == null || !authorization.startsWith("Bearer ")) {
-            return;
+            invalidateRefreshToken(refreshToken);
+        } else {
+            String token = authorization.substring(7);
+            String jti = jwtService.getJti(token);
+            if (jti != null) {
+                refreshTokenStore.invalidateAccessToken(jti);
+            }
+            invalidateRefreshToken(refreshToken);
         }
-        String token = authorization.substring(7);
-        String jti = jwtService.getJti(token);
-        if (jti != null) {
-            refreshTokenStore.invalidateAccessToken(jti);
+    }
+
+    private void invalidateRefreshToken(String refreshToken) {
+        if (refreshToken == null || refreshToken.isBlank()) return;
+        String refreshJti = jwtService.getJti(refreshToken);
+        if (refreshJti != null) {
+            refreshTokenStore.invalidate(refreshJti);
         }
     }
 
@@ -155,14 +176,22 @@ public class AuthService {
         if (jti != null && refreshTokenStore.isAccessTokenInvalidated(jti)) {
             throw new BusinessException(401, "unauthorized");
         }
-        return jwtService.verifyAccessToken(token);
+        long userId = jwtService.verifyAccessToken(token);
+        if (count("select count(*) from `user` where id=? and status='active' and deleted_at is null", userId) == 0) {
+            throw new BusinessException(401, "unauthorized");
+        }
+        return userId;
     }
 
     public long requireAdmin(String authorization) {
         if (authorization == null || !authorization.startsWith("Bearer ")) {
             throw new BusinessException(401, "unauthorized");
         }
-        return jwtService.verifyAdminAccessToken(authorization.substring(7));
+        long adminId = jwtService.verifyAdminAccessToken(authorization.substring(7));
+        if (count("select count(*) from admin_user where id=? and status='active'", adminId) == 0) {
+            throw new BusinessException(401, "unauthorized");
+        }
+        return adminId;
     }
 
     public String issueAccessToken(long userId) {

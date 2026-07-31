@@ -24,8 +24,10 @@ const routes = [
       { path: 'tasks/:id/assignees/:userId/status', name: 'TeamTaskAssigneeStatus', component: () => import('../views/TeamTaskAssigneeStatusPage.vue'), props: true },
       { path: 'tasks/:id/assignees/:userId/reassign', name: 'TeamTaskReassign', component: () => import('../views/TeamTaskReassignPage.vue'), props: true },
       { path: 'notifications', name: 'Notifications', component: () => import('../views/NotificationsPage.vue') },
+      { path: 'reminders', name: 'Reminders', component: () => import('../views/RemindersPage.vue') },
       { path: 'profile', name: 'Profile', component: () => import('../views/ProfilePage.vue') },
       { path: 'profile/settings', name: 'ProfileSettings', component: () => import('../views/ProfileSettingsPage.vue') },
+      { path: 'profile/notifications', name: 'NotificationSettings', component: () => import('../views/NotificationSettingsPage.vue') },
     ]
   }
 ]

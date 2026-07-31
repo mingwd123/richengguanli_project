@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, countdown, urgency, groupByTaskState } from '../utils/helpers'
+import CountdownPill from '../components/CountdownPill.vue'
+import { formatTime, countdown, urgency, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
 import type { TimelineItem } from '../types'
 import {
   ArrowRight,
@@ -27,7 +28,7 @@ const collapsedTeamModules = ref<string[]>([])
 const TIMELINE_LIMIT = 12
 
 const greeting = computed(() => {
-  const hour = new Date().getHours()
+  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: store.profile?.timezone || getDisplayTimezone(), hour: 'numeric', hourCycle: 'h23' }).format(new Date()))
   if (hour < 6) return '夜深了'
   if (hour < 11) return '早上好'
   if (hour < 14) return '中午好'
@@ -36,7 +37,7 @@ const greeting = computed(() => {
 })
 
 const todayLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
-  month: 'long', day: 'numeric', weekday: 'long'
+  timeZone: store.profile?.timezone || getDisplayTimezone(), month: 'long', day: 'numeric', weekday: 'long'
 }).format(new Date()))
 
 function toggleModule(name: string) {
@@ -52,12 +53,12 @@ function toggleTeamModule(name: string) {
 }
 
 const scheduleModules = computed(() => groupByTaskState(
-  store.schedules.filter(schedule => !['completed', 'cancelled'].includes(schedule.status)),
+  store.today.personalSchedules.filter(schedule => !['completed', 'cancelled'].includes(schedule.status)),
   schedule => schedule.groupName || '未分组'
 ))
 
 const teamTaskModules = computed(() => groupByTaskState(
-  store.myTasks.filter(task => !['completed', 'cancelled', 'all_rejected'].includes(task.status) && !['completed', 'rejected'].includes(task.assignStatus)),
+  store.today.teamTasks.filter(task => !['completed', 'cancelled', 'all_rejected'].includes(task.status) && !['completed', 'rejected'].includes(task.assignStatus || '')),
   task => task.teamName || '团队任务'
 ))
 
@@ -107,9 +108,10 @@ type TimelineEntryView = TimelineItem & {
 }
 
 function normalizeTimelineEntry(item: TimelineItem, now: number): TimelineEntryView | null {
-  const isDuration = item.kind === 'duration_task' && item.startTime && item.endTime
+  const durationEnd = item.endTime || item.deadlineTime
+  const isDuration = item.kind === 'duration_task' && item.startTime && durationEnd
   const startTs = new Date(isDuration ? item.startTime! : item.sortAt).getTime()
-  const endTs = isDuration ? new Date(item.endTime!).getTime() : startTs
+  const endTs = isDuration ? new Date(durationEnd!).getTime() : startTs
   const sortTs = isDuration ? startTs : new Date(item.sortAt).getTime()
   if (Number.isNaN(sortTs) || Number.isNaN(endTs)) return null
   const dateTs = isDuration ? startTs : sortTs
@@ -135,12 +137,16 @@ function normalizeTimelineEntry(item: TimelineItem, now: number): TimelineEntryV
 }
 
 function formatMonthDay(value: number | string) {
-  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(new Date(value))
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: store.profile?.timezone || getDisplayTimezone(), month: '2-digit', day: '2-digit' }).format(new Date(value))
 }
 
 function formatClock(value: number | string) {
-  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: store.profile?.timezone || getDisplayTimezone(), hour: '2-digit', minute: '2-digit' }).format(new Date(value))
 }
+
+const upcomingWeekItems = computed(() => store.upcomingSeven.list.slice(0, 8))
+function upcomingSource(item: any) { return item.sourceType === 'schedule' ? (item.groupName || '个人日程') : (item.teamName || '团队任务') }
+function upcomingTime(item: any) { return item.deadlineTime || item.endTime || item.startTime || '' }
 
 function labelForTimelineKind(kind: string) {
   if (kind === 'duration_task') return '时间段任务'
@@ -233,6 +239,20 @@ function openCreateSchedule() {
       <ArrowRight v-if="!aiPlan && !aiLoadingPlan" class="ai-plan-arrow" :size="18" />
     </section>
 
+    <section class="upcoming-week">
+      <div class="section-head">
+        <div class="section-title"><span class="section-icon time"><CalendarDays :size="18" /></span><div><h2>未来七天</h2><p>{{ store.upcomingSeven.dateFrom }} 至 {{ store.upcomingSeven.dateTo }}</p></div></div>
+        <button class="plain-button section-more" @click="router.push('/calendar')">日历 <ArrowRight :size="15" /></button>
+      </div>
+      <div class="upcoming-week-list">
+        <button v-for="item in upcomingWeekItems" :key="`${item.sourceType}-${item.id}`" @click="item.sourceType === 'schedule' ? goSchedule(item.id) : goTask(item.id)">
+          <span><strong>{{ item.title }}</strong><small>{{ upcomingSource(item) }}</small></span>
+          <time>{{ formatTime(upcomingTime(item)) }}</time>
+        </button>
+        <div v-if="!upcomingWeekItems.length" class="compact-empty"><CalendarDays :size="22" /><span>未来七天暂无安排</span></div>
+      </div>
+    </section>
+
     <div class="home-content">
       <section class="group-panel">
         <div class="section-head">
@@ -264,7 +284,7 @@ function openCreateSchedule() {
                 <strong>{{ schedule.title }}</strong>
                 <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
               </div>
-              <span :class="['tag', urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime)]">{{ countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</span>
+              <CountdownPill :time="schedule.deadlineTime || schedule.endTime || schedule.startTime" :created-at="schedule.createdAt" :start-time="schedule.startTime" :end-time="schedule.endTime" :deadline-time="schedule.deadlineTime" :remind-at="schedule.remindAt" />
             </article>
             <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项日程</p>
           </template>
@@ -293,7 +313,7 @@ function openCreateSchedule() {
                 <strong>{{ task.title }}</strong>
                 <small>{{ task.groupName || '团队任务' }} · {{ formatTime(task.deadlineTime || task.startTime) }}</small>
               </div>
-              <span :class="['tag', urgency(task.deadlineTime || task.startTime)]">{{ countdown(task.deadlineTime || task.startTime) }}</span>
+              <CountdownPill :time="task.deadlineTime || task.startTime" :created-at="task.createdAt" :start-time="task.startTime" :deadline-time="task.deadlineTime" :remind-at="task.remindAt" />
             </article>
             <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项团队任务</p>
           </template>

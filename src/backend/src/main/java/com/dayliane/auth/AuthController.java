@@ -33,8 +33,9 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ApiResponse<Map<String, Object>> logout(HttpServletRequest request) {
-        authService.logout(request.getHeader("Authorization"));
+    public ApiResponse<Map<String, Object>> logout(HttpServletRequest request,
+                                                    @RequestBody(required = false) Map<String, Object> req) {
+        authService.logout(request.getHeader("Authorization"), req == null ? null : text(req, "refreshToken"));
         return ApiResponse.success(Map.of("ok", true));
     }
 

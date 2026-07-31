@@ -739,3 +739,11 @@ code { background: var(--admin-surface-muted) !important; color: var(--admin-pri
   .admin-login-copy { display: none; }
   .login-panel { padding: 22px 18px; }
 }
+.table-sort { min-height: 28px; padding: 0; border: 0; background: transparent; color: inherit; font-weight: inherit; box-shadow: none; }
+.table-sort:hover { color: var(--admin-primary, #0f766e); box-shadow: none; transform: none; }
+.dashboard-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin: 18px 0 24px; }
+.dashboard-metrics article { display: grid; gap: 4px; padding: 14px; border: 1px solid var(--border-color, #e5e7eb); background: var(--panel-bg, #fff); }
+.dashboard-metrics article span, .dashboard-metrics article small { color: #64748b; font-size: 12px; }
+.dashboard-metrics article strong { font-size: 26px; }
+@media (max-width: 1000px) { .dashboard-metrics { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 600px) { .dashboard-metrics { grid-template-columns: repeat(2, 1fr); } }

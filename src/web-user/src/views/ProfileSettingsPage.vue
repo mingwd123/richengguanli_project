@@ -19,6 +19,13 @@ function goBack() {
         昵称
         <input v-model="store.profileForm.nickname" />
       </label>
+      <label>
+        头像 URL
+        <input v-model="store.profileForm.avatarUrl" type="url" placeholder="https://example.com/avatar.jpg" />
+      </label>
+      <div v-if="store.profileForm.avatarUrl" class="avatar-preview">
+        <img :src="store.profileForm.avatarUrl" alt="头像预览" />
+      </div>
       <div class="form-actions">
         <button type="button" @click="goBack">返回</button>
         <button class="primary">保存</button>

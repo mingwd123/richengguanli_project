@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import ContextMenu from '../components/ContextMenu.vue'
-import { formatTime, primaryTime, timeTypeLabel, statusLabel, countdown, isOverdue } from '../utils/helpers'
+import PaginationBar from '../components/PaginationBar.vue'
+import CountdownPill from '../components/CountdownPill.vue'
+import { MoreHorizontal } from 'lucide-vue-next'
+import { primaryTime, timeTypeLabel, statusLabel, isOverdue } from '../utils/helpers'
 import type { Schedule } from '../types'
 
 const router = useRouter()
@@ -12,12 +15,12 @@ const collapsedGroups = ref<string[]>([])
 const aiParsing = ref(false)
 const aiParseError = ref('')
 const showDraftConfirm = ref(false)
-const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; description: string }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', description: '' })
+const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; remindAt: string; description: string }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', description: '' })
 const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; group?: any; schedule?: Schedule } | null>(null)
-const filterKeyword = ref('')
-const filterStatus = ref('')
-const filterDateFrom = ref('')
-const filterDateTo = ref('')
+const filterKeyword = ref(store.schedulePage.keyword || '')
+const filterStatus = ref(store.schedulePage.status || '')
+const filterDateFrom = ref(store.schedulePage.dateFrom || '')
+const filterDateTo = ref(store.schedulePage.dateTo || '')
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
 
@@ -75,6 +78,7 @@ async function aiParseSchedule() {
       startTime: draft.startTime ? toDatetimeLocal(draft.startTime) : '',
       endTime: draft.endTime ? toDatetimeLocal(draft.endTime) : '',
       deadlineTime: draft.deadlineTime ? toDatetimeLocal(draft.deadlineTime) : '',
+      remindAt: draft.remindAt ? toDatetimeLocal(draft.remindAt) : store.scheduleForm.remindAt,
       description: draft.description || ''
     }
     showDraftConfirm.value = true
@@ -91,7 +95,8 @@ async function confirmAiDraft() {
   store.scheduleForm.startTime = draft.startTime
   store.scheduleForm.endTime = draft.endTime
   store.scheduleForm.deadlineTime = draft.deadlineTime
-  if (draft.description) store.scheduleForm.description = draft.description
+  store.scheduleForm.description = draft.description
+  store.scheduleForm.remindAt = draft.remindAt
   showDraftConfirm.value = false
   await store.createSchedule()
 }
@@ -101,20 +106,22 @@ function cancelAiDraft() {
 }
 
 const filteredSchedules = computed(() => {
-  return store.schedules.filter(schedule => {
-    if (filterKeyword.value && !schedule.title.toLowerCase().includes(filterKeyword.value.toLowerCase()) && !(schedule.groupName || '').toLowerCase().includes(filterKeyword.value.toLowerCase())) return false
-    if (filterStatus.value && schedule.status !== filterStatus.value) return false
-    if (filterDateFrom.value) {
-      const time = primaryTime(schedule)
-      if (time && new Date(time) < new Date(filterDateFrom.value + 'T00:00:00')) return false
-    }
-    if (filterDateTo.value) {
-      const time = primaryTime(schedule)
-      if (time && new Date(time) > new Date(filterDateTo.value + 'T23:59:59')) return false
-    }
-    return true
-  })
+  return store.schedules
 })
+
+let filterTimer: ReturnType<typeof setTimeout> | undefined
+watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo], () => {
+  clearTimeout(filterTimer)
+  filterTimer = setTimeout(() => store.loadSchedules({
+    page: 1,
+    keyword: filterKeyword.value,
+    status: filterStatus.value,
+    dateFrom: filterDateFrom.value,
+    dateTo: filterDateTo.value
+  }), 250)
+})
+watch(() => store.schedulePage.sort, () => store.loadSchedules({ page: 1 }))
+onUnmounted(() => clearTimeout(filterTimer))
 
 const scheduleGroups = computed(() => {
   const completed = filteredSchedules.value.filter(schedule => schedule.status === 'completed')
@@ -123,7 +130,7 @@ const scheduleGroups = computed(() => {
     id: group.id,
     name: group.name,
     sortOrder: group.sortOrder,
-    items: active.filter(schedule => schedule.groupId === group.id).sort((a, b) => a.sortOrder - b.sortOrder)
+    items: active.filter(schedule => schedule.groupId === group.id).sort((a, b) => Number(isOverdue(b)) - Number(isOverdue(a)) || a.sortOrder - b.sortOrder)
   }))
   const groupedIds = new Set(store.taskGroups.map(group => group.id))
   const ungrouped = active.filter(schedule => !groupedIds.has(schedule.groupId || 0))
@@ -166,9 +173,10 @@ function moveScheduleOrder(groupId: number, items: Schedule[], scheduleId: numbe
   const ids = items.map(item => item.id)
   const index = ids.indexOf(scheduleId)
   const target = index + direction
-  if (groupId <= 0 || target < 0 || target >= ids.length) return
+  if (groupId === 0 || target < 0 || target >= ids.length) return
   ;[ids[index], ids[target]] = [ids[target], ids[index]]
-  store.sortSchedules(groupId, ids)
+  if (groupId === -1) store.sortCompletedSchedules(ids)
+  else store.sortSchedules(groupId, ids)
 }
 async function createScheduleWithShortcut() {
   const match = store.scheduleForm.title.trim().match(/^\/([^\s/]+)\s+(.+)$/)
@@ -186,8 +194,17 @@ function openGroupMenu(event: MouseEvent, group: any) {
   if (group.id <= 0) return
   contextMenu.value = { x: event.clientX, y: event.clientY, type: 'group', group }
 }
+function openGroupButtonMenu(event: MouseEvent, group: any) {
+  if (group.id <= 0) return
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  contextMenu.value = { x: Math.max(8, rect.right - 148), y: rect.bottom + 4, type: 'group', group }
+}
 function openScheduleMenu(event: MouseEvent, group: any, schedule: Schedule) {
   contextMenu.value = { x: event.clientX, y: event.clientY, type: 'schedule', group, schedule }
+}
+function openScheduleButtonMenu(event: MouseEvent, group: any, schedule: Schedule) {
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  contextMenu.value = { x: Math.max(8, rect.right - 148), y: rect.bottom + 4, type: 'schedule', group, schedule }
 }
 function selectContextAction(action: string) {
   const menu = contextMenu.value
@@ -204,6 +221,7 @@ function selectContextAction(action: string) {
     if (action === 'complete') handleAction(menu.schedule, 'complete')
     if (action === 'uncomplete') handleAction(menu.schedule, 'uncomplete')
     if (action === 'cancel') handleAction(menu.schedule, 'cancel')
+    if (action === 'restore') handleAction(menu.schedule, 'restore')
     if (action === 'delete') handleDelete(menu.schedule.id)
     if (action === 'edit-time') editScheduleTime(menu.schedule)
     if (action === 'remove-time') removeScheduleDeadline(menu.schedule)
@@ -223,7 +241,18 @@ function dropGroup(targetGroupId: number) {
 function dropSchedule(group: any, targetId?: number) {
   const drag = draggingSchedule.value
   draggingSchedule.value = null
-  if (!drag || group.id <= 0) return
+  if (!drag || group.id === 0) return
+  if (group.id === -1) {
+    const item = filteredSchedules.value.find(schedule => schedule.id === drag.id)
+    if (!item || item.status !== 'completed') return
+    const ids = group.items.map((schedule: Schedule) => schedule.id)
+    const from = ids.indexOf(drag.id)
+    const to = targetId ? ids.indexOf(targetId) : ids.length - 1
+    if (from < 0 || to < 0 || from === to) return
+    ids.splice(to, 0, ids.splice(from, 1)[0])
+    store.sortCompletedSchedules(ids)
+    return
+  }
   if (drag.fromGroupId !== group.id) {
     store.moveScheduleGroup(drag.id, group.id)
     return
@@ -285,6 +314,7 @@ const contextItems = computed(() => {
     { label: '完成', action: 'complete', disabled: schedule.status !== 'pending' },
     { label: '恢复', action: 'uncomplete', disabled: schedule.status !== 'completed' },
     { label: '取消', action: 'cancel', disabled: schedule.status !== 'pending' },
+    { label: '恢复已取消', action: 'restore', disabled: schedule.status !== 'cancelled' },
     { separator: true as any, label: '' },
     { label: '修改截止时间', action: 'edit-time', disabled: schedule.status !== 'pending' },
     { label: '移除时间', action: 'remove-time', disabled: schedule.status !== 'pending' },
@@ -302,6 +332,9 @@ const contextItems = computed(() => {
       <select v-model="filterStatus"><option value="">全部状态</option><option value="pending">待处理</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select>
       <input v-model="filterDateFrom" type="date" title="开始日期" />
       <input v-model="filterDateTo" type="date" title="截止日期" />
+      <select v-model="store.schedulePage.sort" aria-label="日程排序">
+        <option value="manual">模块顺序</option><option value="time_asc">时间升序</option><option value="time_desc">时间降序</option><option value="created_desc">最近创建</option><option value="title_asc">标题排序</option>
+      </select>
       <button v-if="filterKeyword || filterStatus || filterDateFrom || filterDateTo" class="plain-button" @click="filterKeyword='';filterStatus='';filterDateFrom='';filterDateTo=''" style="color:#e11d48">清除</button>
       <button class="primary" @click="store.openScheduleModal()">新建日程</button>
     </div>
@@ -326,6 +359,7 @@ const contextItems = computed(() => {
           <div class="group-actions" @click.stop>
             <em>{{ group.items.filter(item => item.status === 'pending').length }}</em>
             <template v-if="group.id > 0">
+              <button class="icon-button row-menu-button mobile-only" title="更多分组操作" aria-label="更多分组操作" @click="openGroupButtonMenu($event, group)"><MoreHorizontal :size="18" /></button>
               <button title="上移" @click="moveGroup(group.id, -1)">上移</button>
               <button title="下移" @click="moveGroup(group.id, 1)">下移</button>
               <button @click="renameGroup(group.id, group.name)">重命名</button>
@@ -348,27 +382,46 @@ const contextItems = computed(() => {
           >
             <div><strong>{{ s.title }}</strong><small>{{ s.groupName }} - {{ timeTypeLabel(s.timeType) }}</small></div>
             <span :class="['tag', s.status === 'completed' ? 'blue' : s.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(s.status) }}</span>
-            <span :class="{ 'overdue-text': isOverdue(s) }">{{ isOverdue(s) ? countdown(primaryTime(s)) : formatTime(primaryTime(s)) }}</span>
+            <CountdownPill
+              v-if="s.status === 'pending'"
+              :time="primaryTime(s)"
+              :created-at="s.createdAt"
+              :start-time="s.startTime"
+              :end-time="s.endTime"
+              :deadline-time="s.deadlineTime"
+              :remind-at="s.remindAt"
+            />
+            <span v-else class="muted">{{ statusLabel(s.status) }}</span>
             <div class="top-actions" @click.stop>
+              <button class="icon-button row-menu-button mobile-only" title="更多操作" aria-label="更多操作" @click="openScheduleButtonMenu($event, group, s)"><MoreHorizontal :size="18" /></button>
               <select v-if="s.status !== 'completed'" :value="s.groupId || ''" aria-label="移动日程至分组" @click.stop @change="moveSchedule(s, $event)">
                 <option value="" disabled>移动至</option><option v-for="target in store.taskGroups" :key="target.id" :value="target.id">{{ target.name }}</option>
               </select>
-              <button v-if="group.id > 0" :disabled="index === 0" @click="moveScheduleOrder(group.id, group.items, s.id, -1)">上移</button>
-              <button v-if="group.id > 0" :disabled="index === group.items.length - 1" @click="moveScheduleOrder(group.id, group.items, s.id, 1)">下移</button>
+              <button v-if="group.id !== 0" :disabled="index === 0" @click="moveScheduleOrder(group.id, group.items, s.id, -1)">上移</button>
+              <button v-if="group.id !== 0" :disabled="index === group.items.length - 1" @click="moveScheduleOrder(group.id, group.items, s.id, 1)">下移</button>
               <button v-if="s.status === 'pending'" @click="handleAction(s, 'complete')">完成</button>
               <button v-if="s.status === 'completed'" @click="handleAction(s, 'uncomplete')">恢复</button>
-              <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button><button @click="handleDelete(s.id)">删除</button>
+              <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button><button v-if="s.status === 'cancelled'" @click="handleAction(s, 'restore')">恢复</button><button @click="handleDelete(s.id)">删除</button>
             </div>
           </article>
         </div>
       </section>
       <p v-if="!store.schedules.length" class="hint" style="text-align:center;padding:40px 0">暂无日程</p>
+      <PaginationBar
+        :page="store.schedulePage.page"
+        :size="store.schedulePage.size"
+        :total="store.schedulePage.total"
+        :loading="store.schedulePage.loading"
+        @change="store.loadSchedules({ page: $event })"
+        @resize="store.loadSchedules({ page: 1, size: $event })"
+      />
     </section>
 
     <div v-if="store.scheduleModalOpen" class="modal-backdrop" @click.self="store.closeScheduleModal()">
       <section class="modal-panel"><div class="modal-head"><h2>新建日程</h2><button class="modal-close" @click="store.closeScheduleModal()">✕</button></div>
         <form @submit.prevent="createScheduleWithShortcut()">
           <label>标题<input v-model="store.scheduleForm.title" placeholder="可输入 /分组名 日程标题 快捷创建分组" /></label>
+          <label>描述<textarea v-model="store.scheduleForm.description" rows="3" placeholder="补充地点或准备事项"></textarea></label>
           <div class="ai-row">
             <button type="button" class="ai-btn" @click="aiParseSchedule" :disabled="aiParsing">{{ aiParsing ? '解析中...' : 'AI 解析' }}</button>
             <span v-if="aiParseError" class="muted" style="color:#e53e3e;font-size:12px">{{ aiParseError }}</span>
@@ -378,6 +431,7 @@ const contextItems = computed(() => {
           <label v-if="store.scheduleForm.timeType === 'point_event'">发生时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label>
           <label v-if="store.scheduleForm.timeType === 'deadline_task'">截止时间<input v-model="store.scheduleForm.deadlineTime" type="datetime-local" /></label>
           <template v-if="store.scheduleForm.timeType === 'duration_task'"><label>开始时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label><label>结束时间<input v-model="store.scheduleForm.endTime" type="datetime-local" /></label></template>
+          <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" /></label>
           <div class="form-actions"><button type="button" @click="store.closeScheduleModal()">取消</button><button class="primary" :disabled="store.loading">保存</button></div>
         </form>
       </section>
@@ -395,6 +449,7 @@ const contextItems = computed(() => {
           <label v-if="aiDraft.timeType === 'point_event'">发生时间<input v-model="aiDraft.startTime" type="datetime-local" /></label>
           <label v-if="aiDraft.timeType === 'deadline_task'">截止时间<input v-model="aiDraft.deadlineTime" type="datetime-local" /></label>
           <template v-if="aiDraft.timeType === 'duration_task'"><label>开始时间<input v-model="aiDraft.startTime" type="datetime-local" /></label><label>结束时间<input v-model="aiDraft.endTime" type="datetime-local" /></label></template>
+          <label>提醒时间<input v-model="aiDraft.remindAt" type="datetime-local" /></label>
           <div class="form-actions">
             <button type="button" @click="cancelAiDraft">取消</button>
             <button class="primary">确认保存</button>

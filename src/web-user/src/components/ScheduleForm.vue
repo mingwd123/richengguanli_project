@@ -11,6 +11,7 @@ const store = useAppStore()
       {{ labels.title }}
       <input v-model="store.scheduleForm.title" />
     </label>
+    <label>描述<textarea v-model="store.scheduleForm.description" rows="3"></textarea></label>
     <label>
       {{ labels.module }}
       <select v-model="store.scheduleForm.groupId">
@@ -39,6 +40,7 @@ const store = useAppStore()
       {{ labels.startTime }}
       <input v-model="store.scheduleForm.startTime" type="datetime-local" />
     </label>
+    <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" /></label>
     <label v-if="store.scheduleForm.timeType === 'duration_task'">
       {{ labels.endTime }}
       <input v-model="store.scheduleForm.endTime" type="datetime-local" />

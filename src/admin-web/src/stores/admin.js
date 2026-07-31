@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { apiRequest } from '../api/http'
 
 const TOKEN_KEY = 'dayliane_admin_token'
+const ROLE_KEY = 'dayliane_admin_role'
 const THEME_KEY = 'dayliane_admin_theme'
 
 export const useAdminStore = defineStore('admin', () => {
@@ -13,6 +14,7 @@ export const useAdminStore = defineStore('admin', () => {
   const detailLoading = ref(false)
   const toast = ref('')
   const profile = ref(null)
+  const isSuperAdmin = computed(() => profile.value?.role === 'super_admin')
   const page = ref({ list: [], total: 0, page: 1, size: 20 })
   const currentDetail = ref(null)
   const loginForm = reactive({ username: 'admin', password: 'Admin12345' })
@@ -20,12 +22,15 @@ export const useAdminStore = defineStore('admin', () => {
   const aiConfig = ref(null)
   const aiConfigLoading = ref(false)
   const aiTestResult = ref('')
+  const dashboardStats = ref({ users: 0, activeUsers: 0, teams: 0, pendingSchedules: 0, activeTeamTasks: 0, pendingReminders: 0, unreadNotifications: 0, aiCallsToday: 0 })
 
   // Search/filter state
   const searchKeyword = ref('')
   const filterStatus = ref('')
   const filterDateFrom = ref('')
   const filterDateTo = ref('')
+  const sortKey = ref('createdAt')
+  const sortOrder = ref('desc')
 
   const resources = [
     { id: 'users', label: '用户管理', endpoint: '/admin/users', columns: ['id', 'phone', 'nickname', 'timezone', 'status', 'createdAt'] },
@@ -67,6 +72,7 @@ export const useAdminStore = defineStore('admin', () => {
   function logout() {
     token.value = ''
     localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(ROLE_KEY)
     profile.value = null
     page.value = { list: [], total: 0, page: 1, size: 20 }
     currentDetail.value = null
@@ -87,6 +93,7 @@ export const useAdminStore = defineStore('admin', () => {
   async function loadProfile() {
     if (!token.value) return
     profile.value = await request('/admin/profile')
+    localStorage.setItem(ROLE_KEY, profile.value?.role || '')
   }
 
   async function fetchList(params = {}) {
@@ -101,6 +108,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (params.status || filterStatus.value) queryParams.set('status', params.status || filterStatus.value)
       if (params.dateFrom || filterDateFrom.value) queryParams.set('dateFrom', params.dateFrom || filterDateFrom.value)
       if (params.dateTo || filterDateTo.value) queryParams.set('dateTo', params.dateTo || filterDateTo.value)
+      queryParams.set('sort', `${params.sortKey || sortKey.value},${params.sortOrder || sortOrder.value}`)
       page.value = await request(`${resource.endpoint}?${queryParams.toString()}`)
     } catch (error) {
       notify(error.message)
@@ -212,6 +220,11 @@ export const useAdminStore = defineStore('admin', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  async function fetchDashboardStats() {
+    try { dashboardStats.value = await request('/admin/dashboard/stats') }
+    catch (error) { notify(error.message) }
   }
 
   async function setUserStatus(user, status) {
@@ -343,6 +356,8 @@ export const useAdminStore = defineStore('admin', () => {
     filterStatus.value = ''
     filterDateFrom.value = ''
     filterDateTo.value = ''
+    sortKey.value = 'createdAt'
+    sortOrder.value = 'desc'
   }
 
   function notify(message) {
@@ -358,16 +373,16 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   return {
-    token, theme, activeResource, loading, detailLoading, toast, profile, page, currentDetail,
+    token, theme, activeResource, loading, detailLoading, toast, profile, isSuperAdmin, page, currentDetail,
     loginForm, adminCreateForm, resources, currentResource, stats,
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
-    aiConfig, aiConfigLoading, aiTestResult,
+    aiConfig, aiConfigLoading, aiTestResult, dashboardStats, sortKey, sortOrder,
     login, logout, loadProfile, fetchList, fetchDetail,
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,
     createAdminUser, adminSetScheduleStatus, adminTeamTaskAction,
     resetFilters, notify, formatValue, toggleTheme,
-    fetchAiConfig, updateAiConfig, updateAiEnabled, fetchAiUsageLogs, testAi,
+    fetchAiConfig, updateAiConfig, updateAiEnabled, fetchAiUsageLogs, testAi, fetchDashboardStats,
   }
 })

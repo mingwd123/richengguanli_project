@@ -3,13 +3,14 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { formatTime, statusLabel } from '../utils/helpers'
-import type { Team, TeamMember } from '../types'
+import type { Team, TeamMember, MyTask } from '../types'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
 const store = useAppStore()
 
 const members = ref<TeamMember[]>([])
+const tasks = ref<MyTask[]>([])
 const loading = ref(false)
 const newInviteCode = ref('')
 
@@ -19,8 +20,12 @@ const isOwnerOrAdmin = computed(() => team.value?.myRole === 'owner' || team.val
 async function loadMembers() {
   loading.value = true
   try {
-    const data = await store.request<{ list: TeamMember[] }>(`/teams/${props.id}/members`)
-    members.value = data.list || []
+    const [memberData, taskData] = await Promise.all([
+      store.request<{ list: TeamMember[] }>(`/teams/${props.id}/members`),
+      store.request<{ list: MyTask[] }>(`/teams/${props.id}/tasks?size=100`),
+    ])
+    members.value = memberData.list || []
+    tasks.value = taskData.list || []
   } catch (e: any) {
     store.notify(e.message || '加载成员列表失败')
   } finally {
@@ -45,6 +50,8 @@ async function handleRegenerateCode() {
 function goBack() {
   router.push('/teams')
 }
+
+function goTask(id: number) { router.push(`/tasks/${id}`) }
 
 onMounted(loadMembers)
 </script>
@@ -86,6 +93,16 @@ onMounted(loadMembers)
             <span>{{ team.activeTaskCount }}</span>
           </div>
         </div>
+      </section>
+
+      <section class="table-card" style="margin-top:16px">
+        <div class="section-head"><h2>团队任务</h2><button @click="router.push('/tasks')">任务工作台</button></div>
+        <article v-for="task in tasks" :key="task.id" class="table-row" style="grid-template-columns:minmax(0,1fr) auto auto" @click="goTask(task.id)">
+          <div><strong>{{ task.title }}</strong><small>{{ task.groupName || '未分组' }} · {{ formatTime(task.deadlineTime || task.startTime) }}</small></div>
+          <span :class="['tag', task.status === 'completed' ? 'blue' : task.status === 'active' ? 'warning' : 'danger']">{{ statusLabel(task.status) }}</span>
+          <button @click.stop="goTask(task.id)">查看</button>
+        </article>
+        <p v-if="!tasks.length" class="hint" style="text-align:center;padding:24px 0">该团队暂无任务</p>
       </section>
 
       <!-- 成员列表 -->

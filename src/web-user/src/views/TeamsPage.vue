@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const router = useRouter()
 const store = useAppStore()
 const showJoinPanel = ref(false)
+
+watch(() => store.teamPage.sort, () => store.loadTeams({ page: 1 }))
 
 function goDetail(id: number) {
   router.push(`/teams/${id}`)
@@ -38,6 +41,13 @@ function handleJoin() {
         <button class="primary">创建</button>
       </form>
 
+      <div class="search-bar">
+        <select v-model="store.teamPage.sort" aria-label="团队排序">
+          <option value="created_desc">最近加入</option>
+          <option value="name_asc">名称排序</option>
+        </select>
+      </div>
+
       <!-- 加入团队入口（折叠面板） -->
       <div v-if="showJoinPanel" style="margin-top:12px;padding:14px;background:#f8fafc;border:1px solid #e5eaf2;border-radius:7px">
         <h3 style="margin-top:0">加入团队</h3>
@@ -57,6 +67,14 @@ function handleJoin() {
         <span>{{ team.activeTaskCount }} 任务</span>
       </article>
       <p v-if="!store.teams.length" class="hint" style="text-align:center;padding:40px 0">暂无团队，创建一个或加入已有团队</p>
+      <PaginationBar
+        :page="store.teamPage.page"
+        :size="store.teamPage.size"
+        :total="store.teamPage.total"
+        :loading="store.teamPage.loading"
+        @change="store.loadTeams({ page: $event })"
+        @resize="store.loadTeams({ page: 1, size: $event })"
+      />
     </section>
 
     <aside class="detail-panel">

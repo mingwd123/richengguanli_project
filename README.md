@@ -96,6 +96,7 @@ DB_USERNAME
 DB_PASSWORD
 DB_SSL_ENABLED
 JWT_SECRET
+REMINDER_SCAN_TOKEN
 AI_PROVIDER
 AI_MODEL
 AI_API_BASE_URL
@@ -105,25 +106,22 @@ AI_ENABLED
 
 AI 调用统一经过后端，前端不会保存或暴露 AI API Key。
 
+历史上使用过的 AI 服务密钥即使已从仓库移除，也应在服务商控制台完成轮换后再部署生产环境。
+
 ## 当前开发状态
 
 当前已完成：
 
-- 项目设计文档
-- Git 仓库和 GitHub 远程仓库关联
-- Spring Boot 后端项目骨架
-- Vue 用户网页端项目骨架
-- Vue 管理后台项目骨架
-- 多环境配置模板
+- Access Token + Refresh Token 登录、刷新、退出与禁用账号即时失效
+- 个人日程、持久化分组、日历、时区化今日/未来七天视图
+- 团队、成员权限、任务分配/接受/拒绝/完成/重分配和操作时间轴
+- 日程与团队任务提醒、提醒历史、通知偏好、站内通知和低频浏览器通知轮询
+- AI 日程草稿、任务拆解、今日建议、描述优化及隐私化调用日志
+- 用户端主要列表的服务端分页、筛选、逾期置顶、完成分组排序和移动端操作菜单
+- 管理后台资源列表、详情、统计概览、审计日志和超级管理员权限控制
+- 后端验收测试、两套前端自动化测试、用户端 TypeScript 检查及两个前端生产构建
 
-当前尚未实现：
-
-- 登录注册业务
-- 个人日程业务
-- 团队和任务业务
-- AI 服务接口
-- 通知调度功能
-- 管理后台业务页面
+后续版本范围：PWA/Android 原生推送、桌面端、支付和实时聊天等原生或商业化能力。
 
 ## 本地开发
 
@@ -175,13 +173,41 @@ npm run dev
 http://localhost:5174
 ```
 
+## 自动化检查
+
+```powershell
+cd src/backend
+mvn test
+
+cd ../web-user
+npm test
+npm run typecheck
+npm run build
+
+cd ../admin-web
+npm test
+npm run build
+```
+
+## Docker 部署
+
+在项目根目录根据 `.env.docker.example` 创建 `.env`，替换数据库密码、JWT 密钥和内部提醒扫描密钥，然后运行：
+
+```powershell
+docker compose up --build -d
+```
+
+启动后访问：
+
+- 用户端：`http://127.0.0.1:5173`
+- 管理端：`http://127.0.0.1:5174`
+- 后端健康检查：`http://127.0.0.1:8080/actuator/health`
+
+内部扫描接口必须携带请求头 `X-Internal-Token`，值为部署环境中的 `REMINDER_SCAN_TOKEN`。
+
 ## 后续规划
 
-1. 完成后端多环境配置和数据库连接
-2. 完成用户登录注册
-3. 完成个人日程管理
-4. 完成团队和团队任务管理
-5. 完成网页站内提醒
-6. 接入 AI 智能助手
-7. 完成管理后台
-8. 后续扩展 PWA、Android App 和推送通知
+1. PWA 与原生推送通知
+2. Android、iOS 与桌面客户端
+3. 文件附件、评论和周期任务
+4. 支付与实时聊天

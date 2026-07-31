@@ -12,7 +12,7 @@ const router = useRouter()
 const route = useRoute()
 const compactMedia = window.matchMedia('(max-width: 900px)')
 const isCollapse = ref(compactMedia.matches)
-const menuItems = [
+const allMenuItems = [
   { path: '/', label: '仪表盘', icon: House },
   { path: '/users', label: '用户管理', icon: User },
   { path: '/teams', label: '团队管理', icon: UserFilled },
@@ -25,6 +25,7 @@ const menuItems = [
   { path: '/ai-config', label: 'AI 配置', icon: Connection },
   { path: '/ai-logs', label: 'AI 调用记录', icon: DataAnalysis },
 ]
+const menuItems = computed(() => allMenuItems.filter(item => item.path !== '/admin-users' || store.isSuperAdmin))
 const routeMeta = computed(() => {
   const descriptions = {
     '/': '查看系统资源和管理入口',
@@ -40,7 +41,7 @@ const routeMeta = computed(() => {
     '/ai-logs': '审查 AI 功能调用明细',
   }
   return {
-    title: menuItems.find(item => item.path === route.path)?.label || '管理后台',
+    title: menuItems.value.find(item => item.path === route.path)?.label || '管理后台',
     description: descriptions[route.path] || 'Dayliane 管理控制台',
   }
 })
@@ -55,6 +56,7 @@ function handleMediaChange(event) { if (event.matches) isCollapse.value = true }
 onMounted(async () => {
   compactMedia.addEventListener('change', handleMediaChange)
   if (store.token && !store.profile) await store.loadProfile()
+  if (route.path === '/admin-users' && !store.isSuperAdmin) await router.replace('/')
 })
 onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
 </script>

@@ -32,9 +32,23 @@ public class TeamTaskController {
                                                 @RequestParam(required = false) String status,
                                                 @RequestParam(required = false) String keyword,
                                                 @RequestParam(required = false) String dateFrom,
-                                                @RequestParam(required = false) String dateTo) {
+                                                @RequestParam(required = false) String dateTo,
+                                                @RequestParam(defaultValue = "manual") String sort) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamTaskService.listMyTeamTasks(userId, page, size, status, keyword, dateFrom, dateTo));
+        return ApiResponse.success(teamTaskService.listMyTeamTasks(userId, page, size, status, keyword, dateFrom, dateTo, sort));
+    }
+
+    @GetMapping("/team-tasks/created")
+    public ApiResponse<Map<String, Object>> created(HttpServletRequest request,
+                                                     @RequestParam(defaultValue = "1") int page,
+                                                     @RequestParam(defaultValue = "20") int size,
+                                                     @RequestParam(required = false) String status,
+                                                     @RequestParam(required = false) String keyword,
+                                                     @RequestParam(required = false) String dateFrom,
+                                                     @RequestParam(required = false) String dateTo,
+                                                     @RequestParam(defaultValue = "manual") String sort) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.listCreatedTeamTasks(userId, page, size, status, keyword, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/teams/{teamId}/tasks")
@@ -44,9 +58,10 @@ public class TeamTaskController {
                                                        @RequestParam(required = false) String status,
                                                        @RequestParam(required = false) String keyword,
                                                        @RequestParam(required = false) String dateFrom,
-                                                       @RequestParam(required = false) String dateTo) {
+                                                       @RequestParam(required = false) String dateTo,
+                                                       @RequestParam(defaultValue = "manual") String sort) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamTaskService.listTeamTasks(teamId, userId, page, size, status, keyword, dateFrom, dateTo));
+        return ApiResponse.success(teamTaskService.listTeamTasks(teamId, userId, page, size, status, keyword, dateFrom, dateTo, sort));
     }
 
     @GetMapping("/teams/{teamId}/task-groups")
@@ -84,6 +99,12 @@ public class TeamTaskController {
     public ApiResponse<Map<String, Object>> sortTeamTasks(HttpServletRequest request, @PathVariable long teamId, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         return ApiResponse.success(teamTaskService.sortTeamTasks(teamId, userId, req));
+    }
+
+    @PutMapping("/teams/{teamId}/tasks/completed/sort")
+    public ApiResponse<Map<String, Object>> sortCompletedTeamTasks(HttpServletRequest request, @PathVariable long teamId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.sortCompletedTeamTasks(teamId, userId, req));
     }
 
     @GetMapping("/team-tasks/{id}")

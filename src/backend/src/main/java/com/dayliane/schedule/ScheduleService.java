@@ -58,6 +58,10 @@ public class ScheduleService {
     }
 
     public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName, String keyword, String dateFrom, String dateTo) {
+        return listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo, "manual");
+    }
+
+    public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName, String keyword, String dateFrom, String dateTo, String sort) {
         StringBuilder sql = new StringBuilder("select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt from schedule where user_id=:userId and deleted_at is null");
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
         if (!blank(status)) { sql.append(" and status=:status"); p.addValue("status", status); }
@@ -65,8 +69,21 @@ public class ScheduleService {
         if (!blank(keyword)) { sql.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
         if (!blank(dateFrom)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) >= :dateFrom"); p.addValue("dateFrom", dateFrom + " 00:00:00"); }
         if (!blank(dateTo)) { sql.append(" and coalesce(deadline_time,end_time,start_time,created_at) <= :dateTo"); p.addValue("dateTo", dateTo + " 23:59:59"); }
-        sql.append(" order by group_id asc, sort_order asc, coalesce(deadline_time,end_time,start_time,created_at) asc, id asc");
-        return pageResult(named.query(sql.toString(), p, scheduleMapper()), page, size);
+        sql.append(" order by ").append("completed".equals(status) && "manual".equals(sort) ? "sort_order asc,id asc" : scheduleOrder(sort));
+        List<Map<String, Object>> rows = named.query(sql.toString(), p, scheduleMapper());
+        rows.forEach(item -> addReminderSummary(item, userId));
+        return pageResult(rows, page, size);
+    }
+
+    private static String scheduleOrder(String sort) {
+        return switch (sort == null ? "manual" : sort) {
+            case "manual" -> "group_id asc, sort_order asc, coalesce(deadline_time,end_time,start_time,created_at) asc, id asc";
+            case "time_asc" -> "coalesce(deadline_time,end_time,start_time,created_at) asc, id asc";
+            case "time_desc" -> "coalesce(deadline_time,end_time,start_time,created_at) desc, id desc";
+            case "created_desc" -> "created_at desc, id desc";
+            case "title_asc" -> "title asc, id asc";
+            default -> throw new BusinessException(400, "sort is invalid");
+        };
     }
 
     public Map<String, Object> requireSchedule(long id, long userId) {
@@ -75,6 +92,9 @@ public class ScheduleService {
             int reminderCount = count("select count(*) from reminder where target_type='schedule' and target_id=? and status='pending'", id);
             item.put("hasReminder", reminderCount > 0);
             item.put("reminderCount", reminderCount);
+            item.put("pendingReminders", jdbc.query("select id,remind_at remindAt,status from reminder where user_id=? and target_type='schedule' and target_id=? and status='pending' order by remind_at", (rs, i) -> Map.of(
+                    "id", rs.getLong("id"), "remindAt", iso(rs.getTimestamp("remindAt")), "status", rs.getString("status")), userId, id));
+            addReminderSummary(item, userId);
             return item;
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "schedule not found");
@@ -112,9 +132,11 @@ public class ScheduleService {
         return requireSchedule(id, userId);
     }
 
+    @Transactional
     public void deleteSchedule(long id, long userId) {
         requireSchedule(id, userId);
         jdbc.update("update schedule set deleted_at=utc_timestamp(), deleted_by=? where id=?", userId, id);
+        cancelPendingReminders("schedule", id, userId);
     }
 
     @Transactional
@@ -142,9 +164,22 @@ public class ScheduleService {
         long groupId = requiredId(req, "groupId");
         requirePersonalTaskGroup(groupId, userId);
         List<Long> ids = idList(req, "scheduleIds");
-        validateCompleteIds(ids, jdbc.queryForList("select id from schedule where user_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, userId, groupId), "scheduleIds");
-        for (int i = 0; i < ids.size(); i++) jdbc.update("update schedule set sort_order=? where id=? and user_id=? and group_id=? and deleted_at is null", (i + 1) * 10, ids.get(i), userId, groupId);
-        return Map.of("groupId", groupId, "scheduleIds", ids);
+        List<Long> all = jdbc.queryForList("select id from schedule where user_id=? and group_id=? and deleted_at is null order by sort_order,id", Long.class, userId, groupId);
+        reorderSubset(all, ids, "scheduleIds");
+        for (int i = 0; i < all.size(); i++) jdbc.update("update schedule set sort_order=? where id=? and user_id=? and group_id=? and deleted_at is null", (i + 1) * 10, all.get(i), userId, groupId);
+        return Map.of("groupId", groupId, "scheduleIds", all);
+    }
+
+    @Transactional
+    public Map<String, Object> sortCompletedSchedules(long userId, Map<String, Object> req) {
+        List<Long> ids = idList(req, "scheduleIds");
+        List<Long> all = jdbc.queryForList("select id from schedule where user_id=? and status='completed' and deleted_at is null order by sort_order,id", Long.class, userId);
+        reorderSubset(all, ids, "scheduleIds");
+        for (int i = 0; i < all.size(); i++) {
+            jdbc.update("update schedule set sort_order=? where id=? and user_id=? and status='completed' and deleted_at is null",
+                    (i + 1) * 10, all.get(i), userId);
+        }
+        return Map.of("scheduleIds", all);
     }
 
     @Transactional
@@ -268,6 +303,21 @@ public class ScheduleService {
 
     private void validateCompleteIds(List<Long> ids, List<Long> expected, String field) {
         if (ids.size() != expected.size() || new HashSet<>(ids).size() != ids.size() || !new HashSet<>(ids).equals(new HashSet<>(expected))) throw new BusinessException(400, field + " must contain the complete set of valid ids");
+    }
+
+    private static void reorderSubset(List<Long> all, List<Long> requested, String field) {
+        if (requested.isEmpty() || new HashSet<>(requested).size() != requested.size() || !new HashSet<>(all).containsAll(requested)) {
+            throw new BusinessException(400, field + " contains invalid ids");
+        }
+        Set<Long> selected = new HashSet<>(requested);
+        List<Integer> positions = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) if (selected.contains(all.get(i))) positions.add(i);
+        for (int i = 0; i < positions.size(); i++) all.set(positions.get(i), requested.get(i));
+    }
+
+    private void addReminderSummary(Map<String, Object> item, long userId) {
+        List<Timestamp> rows = jdbc.query("select min(remind_at) remindAt from reminder where user_id=? and target_type='schedule' and target_id=? and status='pending'", (rs, i) -> rs.getTimestamp("remindAt"), userId, item.get("id"));
+        item.put("remindAt", rows.isEmpty() ? "" : iso(rows.get(0)));
     }
 
     private long requiredId(Map<String, Object> req, String key) {

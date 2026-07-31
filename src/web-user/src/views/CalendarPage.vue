@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, countdown, timeTypeLabel, primaryTime } from '../utils/helpers'
+import { formatTime, countdown, timeTypeLabel, primaryTime, currentDateParts, occursOnDate } from '../utils/helpers'
 
 const router = useRouter()
 const store = useAppStore()
@@ -11,8 +11,7 @@ const monthDays = computed(() => store.monthDays)
 
 function selectDate(day: number | '') {
   if (day === '') return
-  const month = new Date().getMonth() + 1
-  const year = new Date().getFullYear()
+  const { month, year } = currentDateParts(store.profile?.timezone)
   const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
   store.selectedDate = dateStr
 }
@@ -20,7 +19,7 @@ function selectDate(day: number | '') {
 const selectedDayItems = computed(() => {
   if (!store.selectedDate) return []
   return store.calendarItems
-    .filter((item: any) => primaryTime(item).startsWith(store.selectedDate))
+    .filter((item: any) => occursOnDate(item, store.selectedDate, store.profile?.timezone))
     .sort((a: any, b: any) => {
       const aTime = primaryTime(a)
       const bTime = primaryTime(b)
@@ -37,6 +36,11 @@ const selectedDayItems = computed(() => {
 })
 
 const weekDays = ['一', '二', '三', '四', '五', '六', '日']
+
+onMounted(() => {
+  const { month, year } = currentDateParts(store.profile?.timezone)
+  store.loadCalendar(year, month)
+})
 
 function goDetail(item: any) {
   router.push(item.sourceType === 'team_task' ? `/tasks/${item.id}` : `/schedules/${item.id}`)

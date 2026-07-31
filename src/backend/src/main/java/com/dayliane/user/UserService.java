@@ -11,6 +11,8 @@ import org.springframework.stereotype.Service;
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.ZoneId;
+import java.time.DateTimeException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -41,8 +43,18 @@ public class UserService {
     }
 
     public void updateUserProfile(long userId, Map<String, Object> req) {
-        jdbc.update("update `user` set nickname = coalesce(?, nickname), avatar_url = coalesce(?, avatar_url) where id = ? and deleted_at is null",
-                nullableText(req.get("nickname")), nullableText(req.get("avatarUrl")), userId);
+        if (req.containsKey("nickname")) {
+            String nickname = nullableText(req.get("nickname"));
+            if (nickname == null || nickname.length() > 50) throw new BusinessException(400, "nickname is invalid");
+            jdbc.update("update `user` set nickname=? where id=? and deleted_at is null", nickname, userId);
+        }
+        if (req.containsKey("avatarUrl")) {
+            String avatarUrl = Objects.toString(req.get("avatarUrl"), "").trim();
+            if (avatarUrl.length() > 500 || (!avatarUrl.isBlank() && !avatarUrl.matches("https?://.+"))) {
+                throw new BusinessException(400, "avatarUrl must be an http(s) URL");
+            }
+            jdbc.update("update `user` set avatar_url=? where id=? and deleted_at is null", avatarUrl.isBlank() ? null : avatarUrl, userId);
+        }
     }
 
     public void updatePassword(long userId, String oldPassword, String newPassword) {
@@ -54,7 +66,9 @@ public class UserService {
     }
 
     public void updateTimezone(long userId, String timezone) {
-        jdbc.update("update `user` set timezone = ? where id = ?", blank(timezone) ? "Asia/Shanghai" : timezone, userId);
+        String next = blank(timezone) ? "Asia/Shanghai" : timezone;
+        try { ZoneId.of(next); } catch (DateTimeException ex) { throw new BusinessException(400, "timezone is invalid"); }
+        jdbc.update("update `user` set timezone = ? where id = ?", next, userId);
     }
 
     // Private helpers
