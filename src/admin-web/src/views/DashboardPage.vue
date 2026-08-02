@@ -32,6 +32,11 @@ const metricItems = computed(() => [
   { label: '待发提醒', value: store.dashboardStats.pendingReminders, detail: `${store.dashboardStats.unreadNotifications} 未读通知` },
   { label: '今日 AI', value: store.dashboardStats.aiCallsToday, detail: '调用次数' },
 ])
+const workspaceSignals = computed(() => [
+  { label: '活跃账号', value: store.dashboardStats.activeUsers, detail: `共 ${store.dashboardStats.users} 个用户`, tone: 'teal' },
+  { label: '任务执行中', value: store.dashboardStats.activeTeamTasks, detail: '团队任务队列', tone: 'blue' },
+  { label: '提醒待投递', value: store.dashboardStats.pendingReminders, detail: '等待处理', tone: 'amber' },
+])
 onMounted(() => store.fetchDashboardStats())
 </script>
 
@@ -50,6 +55,20 @@ onMounted(() => store.fetchDashboardStats())
       <div class="admin-health">
         <span class="health-dot"></span>
         <div><strong>服务正常</strong><small>API 与数据库已连接</small></div>
+      </div>
+    </section>
+
+    <section class="workspace-pulse">
+      <div class="workspace-pulse-head">
+        <div><span>LIVE WORKSPACE</span><h2>工作区脉搏</h2></div>
+        <span class="snapshot-status"><i></i>当前数据快照</span>
+      </div>
+      <div class="workspace-signal-grid">
+        <article v-for="signal in workspaceSignals" :key="signal.label" :class="['workspace-signal', signal.tone]">
+          <div class="workspace-signal-label"><span class="signal-dot"></span><span>{{ signal.label }}</span></div>
+          <strong>{{ signal.value }}</strong>
+          <small>{{ signal.detail }}</small>
+        </article>
       </div>
     </section>
 

@@ -10,7 +10,14 @@ export async function apiRequest<T = any>(path: string, options: RequestInit = {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options.headers as Record<string, string> || {}) }
   if (token) headers.Authorization = `Bearer ${token}`
   const transport = window.__DAYLIANE_HTTP_FETCH__ || window.fetch.bind(window)
-  const response = await transport(`${API_BASE}${path}`, { ...options, headers })
+  let response: Response
+  try {
+    response = await transport(`${API_BASE}${path}`, { ...options, headers })
+  } catch {
+    const error: any = new Error('无法连接到后端，请先启动后端服务（127.0.0.1:8080）')
+    error.code = 'NETWORK_UNAVAILABLE'
+    throw error
+  }
   const body = await response.json().catch(() => ({ code: response.status, message: '请求失败' }))
   if (body.code !== 0) {
     const error: any = new Error(body.message || '请求失败')

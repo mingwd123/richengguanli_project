@@ -1159,6 +1159,30 @@ input:focus, select:focus, textarea:focus {
 .row-menu-button { place-items: center; }
 .nav-items .mobile-more-button, .mobile-more-backdrop, .mobile-more-menu { display: none; }
 
+/* Home rhythm layer: a small live signal keeps the dashboard feeling active without adding noise. */
+.home-welcome-copy { min-width: 0; }
+.home-welcome-actions { display: flex; flex: 0 0 auto; align-items: flex-end; gap: 18px; }
+.home-rhythm { display: flex; align-items: center; gap: 8px; margin-top: 13px; color: var(--muted); font-size: 10px; }
+.home-rhythm strong { color: var(--muted-strong); font-size: 10px; }
+.rhythm-indicator { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 5px var(--primary-soft); animation: signalPulse 2.4s ease-in-out infinite; }
+.rhythm-divider { width: 1px; height: 12px; background: var(--border-strong); }
+.day-progress { width: 138px; display: grid; gap: 7px; padding-bottom: 2px; }
+.day-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+.day-progress strong { color: var(--text-strong); font-size: 12px; }
+.day-progress-track { height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-muted); }
+.day-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary), var(--secondary)); transition: width 300ms ease; }
+.home-welcome-actions .home-create { min-height: 40px; }
+
+@media (max-width: 900px) {
+  .home-welcome-actions { gap: 10px; }
+  .day-progress { display: none; }
+}
+
+@media (max-width: 560px) {
+  .home-rhythm { gap: 6px; }
+  .home-rhythm .rhythm-divider, .home-rhythm > span:last-child { display: none; }
+}
+
 @media (max-width: 900px) {
   .nav-items .nav-entry:not(.mobile-primary) { display: none !important; }
   .nav-items .mobile-more-button { display: grid !important; }

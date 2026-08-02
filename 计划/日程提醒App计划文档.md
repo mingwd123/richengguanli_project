@@ -87,6 +87,10 @@ Java Spring Boot
 
 MySQL
 
+> [!IMPORTANT]
+> **数据库名称纠正：本项目指定使用 `dayline`，不是 `dayliane`。**
+> 文档早期示例中的 `dayliane` 是笔误，不能作为本地开发、Docker、测试或部署环境的数据库名。产品名和 Java 包名中的 `Dayliane` / `com.dayliane` 不需要修改，但 `DB_NAME` 必须设置为 `dayline`。
+
 数据库迁移方案：Flyway 或 Liquibase
 
 数据库配置原则：
@@ -128,7 +132,7 @@ REMINDER_SCAN_TOKEN
 ```yaml
 spring:
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:dayliane}
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:dayline}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:root}
 

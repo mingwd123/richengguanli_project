@@ -40,6 +40,29 @@ const todayLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
   timeZone: store.profile?.timezone || getDisplayTimezone(), month: 'long', day: 'numeric', weekday: 'long'
 }).format(new Date()))
 
+const displayTimeLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
+  timeZone: store.profile?.timezone || getDisplayTimezone(), hour: '2-digit', minute: '2-digit'
+}).format(new Date(nowTs.value)))
+
+const rhythmLabel = computed(() => {
+  const hour = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: store.profile?.timezone || getDisplayTimezone(), hour: 'numeric', hourCycle: 'h23'
+  }).format(new Date(nowTs.value)))
+  if (hour < 6) return '夜间收束'
+  if (hour < 12) return '上午推进'
+  if (hour < 18) return '下午聚焦'
+  return '晚间整理'
+})
+
+const dayProgress = computed(() => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: store.profile?.timezone || getDisplayTimezone(), hour: 'numeric', minute: 'numeric', hourCycle: 'h23'
+  }).formatToParts(new Date(nowTs.value))
+  const hour = Number(parts.find(part => part.type === 'hour')?.value || 0)
+  const minute = Number(parts.find(part => part.type === 'minute')?.value || 0)
+  return Math.min(100, Math.max(1, Math.round(((hour * 60 + minute) / 1440) * 100)))
+})
+
 function toggleModule(name: string) {
   collapsedModules.value = collapsedModules.value.includes(name)
     ? collapsedModules.value.filter(v => v !== name)
@@ -195,15 +218,27 @@ function openCreateSchedule() {
 <template>
   <section class="home-layout">
     <section class="home-welcome">
-      <div>
+      <div class="home-welcome-copy">
         <p class="home-date">{{ todayLabel }}</p>
         <h2>{{ greeting }}，{{ store.profile?.nickname || '朋友' }}</h2>
         <p>先处理最重要的一件事，剩下的交给节奏。</p>
+        <div class="home-rhythm" aria-label="今日节奏状态">
+          <span class="rhythm-indicator"></span>
+          <strong>今日节奏已就绪</strong>
+          <span class="rhythm-divider"></span>
+          <span>{{ rhythmLabel }} · {{ displayTimeLabel }}</span>
+        </div>
       </div>
-      <button class="primary home-create" aria-label="添加今天的安排" title="添加今天的安排" @click="openCreateSchedule">
-        <Plus :size="17" />
-        <span>添加今天的安排</span>
-      </button>
+      <div class="home-welcome-actions">
+        <div class="day-progress" aria-label="今日时间进度">
+          <div><span>今日时间进度</span><strong>{{ dayProgress }}%</strong></div>
+          <span class="day-progress-track"><span :style="{ width: `${dayProgress}%` }"></span></span>
+        </div>
+        <button class="primary home-create" aria-label="添加今天的安排" title="添加今天的安排" @click="openCreateSchedule">
+          <Plus :size="17" />
+          <span>添加今天的安排</span>
+        </button>
+      </div>
     </section>
 
     <div class="stats-row">

@@ -30,17 +30,17 @@ function handleDrag(event: MouseEvent) {
       <i :class="{ native: shell.runningInTauri.value }"></i>
       <span>{{ shell.runningInTauri.value ? 'Desktop' : 'Preview' }}</span>
     </div>
-    <div class="desktop-window-actions">
-      <button :class="{ active: shell.alwaysOnTop.value }" title="窗口置顶" aria-label="窗口置顶" @click="shell.setAlwaysOnTop(!shell.alwaysOnTop.value)">
+    <div class="desktop-window-actions" @mousedown.stop @dblclick.stop>
+      <button type="button" :class="{ active: shell.alwaysOnTop.value }" title="窗口置顶" aria-label="窗口置顶" @click="shell.setAlwaysOnTop(!shell.alwaysOnTop.value)">
         <Pin :size="14" />
       </button>
-      <button :class="{ active: shell.settingsOpen.value }" title="桌面偏好" aria-label="桌面偏好" @click="shell.toggleSettings">
+      <button type="button" :class="{ active: shell.settingsOpen.value }" title="桌面偏好" aria-label="桌面偏好" @click="shell.toggleSettings">
         <Settings2 :size="15" />
       </button>
       <span class="desktop-action-divider"></span>
-      <button title="最小化" aria-label="最小化" @click="minimizeWindow"><Minus :size="16" /></button>
-      <button title="最大化" aria-label="最大化" @click="toggleMaximizeWindow"><Square :size="13" /></button>
-      <button class="desktop-close-button" title="隐藏到托盘" aria-label="隐藏到托盘" @click="closeWindow"><X :size="16" /></button>
+      <button type="button" title="最小化" aria-label="最小化" @click="minimizeWindow"><Minus :size="16" /></button>
+      <button type="button" title="最大化" aria-label="最大化" @click="toggleMaximizeWindow"><Square :size="13" /></button>
+      <button type="button" class="desktop-close-button" title="隐藏到托盘" aria-label="隐藏到托盘" @click="closeWindow"><X :size="16" /></button>
     </div>
   </header>
 </template>

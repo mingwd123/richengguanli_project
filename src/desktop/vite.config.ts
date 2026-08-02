@@ -4,7 +4,9 @@ import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [vue()],
+  base: './',
   resolve: {
+    dedupe: ['vue', 'pinia', 'vue-router', 'lucide-vue-next'],
     alias: {
       '@desktop': resolve(__dirname, 'src'),
       '@web': resolve(__dirname, '../web-user/src'),

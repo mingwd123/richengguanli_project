@@ -97,5 +97,7 @@ async function handleRegister() {
 
       <p class="hint demo-account">演示账号&nbsp; 13800138000&nbsp; /&nbsp; Abc12345</p>
     </section>
+
+    <div v-if="store.toast" class="toast login-toast" role="alert">{{ store.toast }}</div>
   </main>
 </template>

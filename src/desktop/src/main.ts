@@ -8,7 +8,19 @@ import '@web/style.css'
 import './desktop.css'
 
 if (runningInTauri) {
-  window.__DAYLIANE_HTTP_FETCH__ = tauriFetch as typeof fetch
+  const nativeFetch = tauriFetch as typeof fetch
+  const browserFetch = window.fetch.bind(window)
+  window.__DAYLIANE_HTTP_FETCH__ = async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('http://127.0.0.1:8080') || url.startsWith('http://localhost:8080')) {
+      try {
+        return await browserFetch(input, init)
+      } catch {
+        return nativeFetch(input, init)
+      }
+    }
+    return nativeFetch(input, init)
+  }
 }
 
 createApp(App)

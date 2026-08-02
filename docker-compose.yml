@@ -2,7 +2,7 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_DATABASE: ${DB_NAME:-dayliane}
+      MYSQL_DATABASE: ${DB_NAME:-dayline}
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
     volumes:
       - dayliane_mysql:/var/lib/mysql
@@ -20,7 +20,7 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       DB_HOST: mysql
       DB_PORT: 3306
-      DB_NAME: ${DB_NAME:-dayliane}
+      DB_NAME: ${DB_NAME:-dayline}
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
