@@ -68,7 +68,7 @@ export const useAppStore = defineStore('app', () => {
   const today = ref<TodayOverview>({ personalSchedules: [], teamTasks: [], unreadNotificationCount: 0, groups: [] })
   const upcomingSeven = ref<UpcomingOverview>({ timezone: '', dateFrom: '', dateTo: '', personalSchedules: [], teamTasks: [], list: [] })
   const notificationDetail = ref<Notification | null>(null)
-  const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true })
+  const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, reminderPresetMinutes: [15, 30, 60, 1440] })
   const selectedDate = ref('')
 
   const loginForm = reactive<LoginForm>({ phone: '13800138000', password: 'Abc12345' })
@@ -123,7 +123,7 @@ export const useAppStore = defineStore('app', () => {
     localStorage.removeItem(REFRESH_TOKEN_KEY)
     profile.value = null
     schedules.value = []; taskGroups.value = []; teamTaskGroups.value = {}; teams.value = []; myTasks.value = []; createdTasks.value = []; teamTasks.value = []; notifications.value = []
-    notificationPreferences.value = { browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true }
+    notificationPreferences.value = { browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, reminderPresetMinutes: [15, 30, 60, 1440] }
     calendarSchedules.value = []; calendarTasks.value = []
     ;[schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage].forEach(state => {
       state.page = 1

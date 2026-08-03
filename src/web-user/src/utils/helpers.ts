@@ -40,6 +40,12 @@ export function toSchedulePayload(input: ScheduleForm) {
 
 export function toIso(value: string) { return value ? new Date(value).toISOString() : '' }
 
+export function reminderTimeForOffset(baseTime: string, offsetMinutes: number) {
+  const base = new Date(baseTime).getTime()
+  if (!baseTime || Number.isNaN(base) || !Number.isInteger(offsetMinutes) || offsetMinutes <= 0) return ''
+  return new Date(base - offsetMinutes * 60_000).toISOString()
+}
+
 export function toApiTimePayload(input: Record<string, any>) {
   const out = { ...input }
   for (const key of ['startTime', 'endTime', 'deadlineTime', 'remindAt']) if (out[key]) out[key] = new Date(out[key]).toISOString()

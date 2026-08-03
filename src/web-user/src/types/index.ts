@@ -140,6 +140,7 @@ export interface NotificationPreference {
   taskAssignedEnabled: boolean
   taskStatusEnabled: boolean
   reminderEnabled: boolean
+  reminderPresetMinutes: number[]
 }
 
 /* ========== 通知 ========== */

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeTimelineItem, occursOnDate, sortByPriority } from './helpers'
+import { normalizeTimelineItem, occursOnDate, reminderTimeForOffset, sortByPriority } from './helpers'
 
 describe('schedule display helpers', () => {
   afterEach(() => vi.useRealTimers())
@@ -36,5 +36,10 @@ describe('schedule display helpers', () => {
       { id: 2, status: 'pending', deadlineTime: '2026-07-30T12:00:00Z' }
     ])
     expect(sorted.map(item => item.id)).toEqual([2, 1])
+  })
+
+  it('calculates a reminder time from the chosen offset', () => {
+    expect(reminderTimeForOffset('2026-08-02T10:00:00+08:00', 60)).toBe('2026-08-02T01:00:00.000Z')
+    expect(reminderTimeForOffset('', 60)).toBe('')
   })
 })

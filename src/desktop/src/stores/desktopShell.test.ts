@@ -11,4 +11,8 @@ describe('desktop shell settings', () => {
   it('falls back for invalid opacity values', () => {
     expect(clampOpacity(Number.NaN)).toBe(96)
   })
+
+  it('converts the displayed percentage to a CSS opacity ratio', () => {
+    expect(clampOpacity(86) / 100).toBeCloseTo(0.86)
+  })
 })

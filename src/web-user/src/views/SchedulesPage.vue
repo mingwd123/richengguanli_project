@@ -6,7 +6,7 @@ import ContextMenu from '../components/ContextMenu.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
 import { MoreHorizontal } from 'lucide-vue-next'
-import { primaryTime, timeTypeLabel, statusLabel, isOverdue } from '../utils/helpers'
+import { primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset } from '../utils/helpers'
 import type { Schedule } from '../types'
 
 const router = useRouter()
@@ -23,6 +23,38 @@ const filterDateFrom = ref(store.schedulePage.dateFrom || '')
 const filterDateTo = ref(store.schedulePage.dateTo || '')
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
+const selectedReminderOffset = ref<number | null>(null)
+const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
+const reminderBaseTime = computed(() => {
+  return store.scheduleForm.timeType === 'deadline_task'
+    ? store.scheduleForm.deadlineTime
+    : store.scheduleForm.startTime
+})
+
+function reminderBaseLabel() {
+  return store.scheduleForm.timeType === 'deadline_task' ? '截止时间' : '开始时间'
+}
+
+function reminderPresetLabel(minutes: number) {
+  if (minutes % 1440 === 0) return `提前 ${minutes / 1440} 天`
+  if (minutes % 60 === 0) return `提前 ${minutes / 60} 小时`
+  return `提前 ${minutes} 分钟`
+}
+
+function applyReminderOffset(minutes: number) {
+  if (!reminderBaseTime.value) {
+    store.notify(`请先填写${reminderBaseLabel()}`)
+    return
+  }
+  const reminderTime = reminderTimeForOffset(reminderBaseTime.value, minutes)
+  if (!reminderTime) return
+  store.scheduleForm.remindAt = toDatetimeLocal(reminderTime)
+  selectedReminderOffset.value = minutes
+}
+
+function handleManualReminderChange() {
+  selectedReminderOffset.value = null
+}
 
 function toDatetimeLocal(value: string) {
   const text = String(value).trim().replace(' ', 'T')
@@ -121,6 +153,16 @@ watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo], () => {
   }), 250)
 })
 watch(() => store.schedulePage.sort, () => store.loadSchedules({ page: 1 }))
+watch([
+  () => store.scheduleForm.timeType,
+  () => store.scheduleForm.startTime,
+  () => store.scheduleForm.deadlineTime
+], () => {
+  if (selectedReminderOffset.value !== null && reminderBaseTime.value) applyReminderOffset(selectedReminderOffset.value)
+})
+watch(() => store.scheduleModalOpen, isOpen => {
+  if (!isOpen) selectedReminderOffset.value = null
+})
 onUnmounted(() => clearTimeout(filterTimer))
 
 const scheduleGroups = computed(() => {
@@ -431,7 +473,26 @@ const contextItems = computed(() => {
           <label v-if="store.scheduleForm.timeType === 'point_event'">发生时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label>
           <label v-if="store.scheduleForm.timeType === 'deadline_task'">截止时间<input v-model="store.scheduleForm.deadlineTime" type="datetime-local" /></label>
           <template v-if="store.scheduleForm.timeType === 'duration_task'"><label>开始时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label><label>结束时间<input v-model="store.scheduleForm.endTime" type="datetime-local" /></label></template>
-          <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" /></label>
+          <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" @input="handleManualReminderChange" /></label>
+          <div class="reminder-shortcuts" aria-label="快捷提醒时间">
+            <div class="reminder-shortcut-head">
+              <strong>快捷提醒</strong>
+              <small v-if="reminderBaseTime">按{{ reminderBaseLabel() }}计算</small>
+              <small v-else>请先填写{{ reminderBaseLabel() }}</small>
+            </div>
+            <div class="reminder-shortcut-options">
+              <button
+                v-for="minutes in reminderPresets"
+                :key="minutes"
+                type="button"
+                :class="{ active: selectedReminderOffset === minutes }"
+                :disabled="!reminderBaseTime"
+                :aria-pressed="selectedReminderOffset === minutes"
+                @click="applyReminderOffset(minutes)"
+              >{{ reminderPresetLabel(minutes) }}</button>
+              <span v-if="selectedReminderOffset === null && store.scheduleForm.remindAt" class="reminder-custom-state">自定义</span>
+            </div>
+          </div>
           <div class="form-actions"><button type="button" @click="store.closeScheduleModal()">取消</button><button class="primary" :disabled="store.loading">保存</button></div>
         </form>
       </section>

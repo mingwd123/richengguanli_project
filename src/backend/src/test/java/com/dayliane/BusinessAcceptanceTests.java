@@ -46,7 +46,7 @@ class BusinessAcceptanceTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "notification_preference", "reminder", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
     }
@@ -445,8 +445,10 @@ class BusinessAcceptanceTests {
                 "browserEnabled", true,
                 "taskAssignedEnabled", false,
                 "taskStatusEnabled", true,
-                "reminderEnabled", false
+                "reminderEnabled", false,
+                "reminderPresetMinutes", List.of(30, 60, 1440)
         ));
+        assertThat(notificationService.preferences(member)).containsEntry("reminderPresetMinutes", List.of(30, 60, 1440));
 
         long teamId = id(teamService.createTeam(owner, "Preference Team"));
         teamService.joinTeam(member, text(teamService.teamDetail(teamId, owner), "inviteCode"));

@@ -14,9 +14,13 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 @Service
 public class NotificationService {
+    private static final List<Integer> DEFAULT_REMINDER_PRESET_MINUTES = List.of(15, 30, 60, 1440);
+    private static final int MAX_REMINDER_PRESETS = 8;
+    private static final int MAX_REMINDER_OFFSET_MINUTES = 30 * 24 * 60;
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate named;
 
@@ -68,7 +72,9 @@ public class NotificationService {
                 "taskStatusEnabled", rs.getBoolean("taskStatusEnabled"),
                 "reminderEnabled", rs.getBoolean("reminderEnabled")
         ), userId);
-        return rows.isEmpty() ? defaultPreferences() : rows.get(0);
+        Map<String, Object> preferences = new LinkedHashMap<>(rows.isEmpty() ? defaultPreferences() : rows.get(0));
+        preferences.put("reminderPresetMinutes", reminderPresetMinutes(userId));
+        return preferences;
     }
 
     @Transactional
@@ -78,12 +84,18 @@ public class NotificationService {
         boolean taskAssignedEnabled = bool(req, "taskAssignedEnabled", current);
         boolean taskStatusEnabled = bool(req, "taskStatusEnabled", current);
         boolean reminderEnabled = bool(req, "reminderEnabled", current);
+        List<Integer> reminderPresetMinutes = reminderPresetMinutes(req, current);
         if (count("select count(*) from notification_preference where user_id=?", userId) == 0) {
             jdbc.update("insert into notification_preference (user_id,browser_enabled,task_assigned_enabled,task_status_enabled,reminder_enabled) values (?,?,?,?,?)",
                     userId, browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled);
         } else {
             jdbc.update("update notification_preference set browser_enabled=?,task_assigned_enabled=?,task_status_enabled=?,reminder_enabled=?,updated_at=utc_timestamp() where user_id=?",
                     browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled, userId);
+        }
+        jdbc.update("delete from reminder_preset where user_id=?", userId);
+        for (int index = 0; index < reminderPresetMinutes.size(); index++) {
+            jdbc.update("insert into reminder_preset (user_id,offset_minutes,sort_order) values (?,?,?)",
+                    userId, reminderPresetMinutes.get(index), (index + 1) * 10);
         }
         return preferences(userId);
     }
@@ -140,6 +152,42 @@ public class NotificationService {
                 "taskStatusEnabled", true,
                 "reminderEnabled", true
         );
+    }
+
+    private List<Integer> reminderPresetMinutes(long userId) {
+        List<Integer> values = jdbc.queryForList(
+                "select offset_minutes from reminder_preset where user_id=? order by sort_order,id",
+                Integer.class, userId);
+        return values.isEmpty() ? DEFAULT_REMINDER_PRESET_MINUTES : values;
+    }
+
+    private static List<Integer> reminderPresetMinutes(Map<String, Object> req, Map<String, Object> current) {
+        if (!req.containsKey("reminderPresetMinutes")) {
+            Object existing = current.get("reminderPresetMinutes");
+            if (existing instanceof List<?> list) return list.stream().map(NotificationService::positiveInt).toList();
+            return DEFAULT_REMINDER_PRESET_MINUTES;
+        }
+        Object raw = req.get("reminderPresetMinutes");
+        if (!(raw instanceof List<?> list)) throw new BusinessException(400, "reminderPresetMinutes must be a list");
+        if (list.isEmpty()) throw new BusinessException(400, "at least one reminder preset is required");
+        if (list.size() > MAX_REMINDER_PRESETS) throw new BusinessException(400, "too many reminder presets");
+        TreeSet<Integer> values = new TreeSet<>();
+        for (Object item : list) {
+            int minutes = positiveInt(item);
+            if (minutes > MAX_REMINDER_OFFSET_MINUTES) throw new BusinessException(400, "reminder preset is too large");
+            if (!values.add(minutes)) throw new BusinessException(400, "reminder presets must be unique");
+        }
+        return List.copyOf(values);
+    }
+
+    private static int positiveInt(Object value) {
+        try {
+            int parsed = value instanceof Number number ? number.intValue() : Integer.parseInt(String.valueOf(value));
+            if (parsed <= 0) throw new NumberFormatException();
+            return parsed;
+        } catch (NumberFormatException e) {
+            throw new BusinessException(400, "reminder preset must be a positive integer");
+        }
     }
 
     private static boolean bool(Map<String, Object> req, String key, Map<String, Object> current) {

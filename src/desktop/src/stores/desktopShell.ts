@@ -23,6 +23,7 @@ let initialized = false
 
 function applyOpacity() {
   document.documentElement.style.setProperty('--desktop-opacity', `${opacity.value}%`)
+  document.documentElement.style.setProperty('--desktop-opacity-ratio', String(opacity.value / 100))
 }
 
 export function useDesktopShell() {
