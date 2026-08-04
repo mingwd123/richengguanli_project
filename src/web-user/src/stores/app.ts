@@ -6,7 +6,8 @@ import type {
   TodayOverview, TimelineItem, CalendarDay, ScheduleForm, TaskForm,
   LoginForm, RegisterForm, PageResult, UpcomingOverview, NotificationPreference
 } from '../types'
-import { toSchedulePayload, toApiTimePayload, normalizeTimelineItem, buildMonthDays, primaryTime, dateKeyInTimezone, setDisplayTimezone } from '../utils/helpers'
+import { toSchedulePayload, toApiTimePayload, normalizeTimelineItem, buildMonthDays, primaryTime, setDisplayTimezone } from '../utils/helpers'
+import { buildTimelineStats, isTimelineItemOpen } from '../utils/timeline'
 
 const TOKEN_KEY = 'dayliane_token'
 const REFRESH_TOKEN_KEY = 'dayliane_refresh_token'
@@ -87,17 +88,12 @@ export const useAppStore = defineStore('app', () => {
   const activeTeam = computed(() => teams.value[0] || null)
   const timelineItems = computed<TimelineItem[]>(() =>
     [...schedules.value.map(i => normalizeTimelineItem(i, 'schedule')), ...myTasks.value.map(i => normalizeTimelineItem(i, 'team_task'))]
-      .filter(i => ['pending', 'active', 'accepted'].includes(i.status) || ['pending', 'accepted'].includes(i.assignStatus || ''))
+      .filter(isTimelineItemOpen)
       .filter(i => i.sortAt)
       .sort((a, b) => new Date(a.sortAt).getTime() - new Date(b.sortAt).getTime()))
   const upcoming = computed(() => timelineItems.value.slice(0, 6))
   const timelineStats = computed(() => {
-    const todayKey = dateKeyInTimezone()
-    return {
-      today: timelineItems.value.filter(i => dateKeyInTimezone(i.sortAt) === todayKey).length,
-      overdue: timelineItems.value.filter(i => new Date(i.sortAt).getTime() < Date.now()).length,
-      upcoming: timelineItems.value.filter(i => new Date(i.sortAt).getTime() >= Date.now()).length
-    }
+    return buildTimelineStats(timelineItems.value, { timezone: profile.value?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai' })
   })
   const calendarItems = computed(() => [
     ...calendarSchedules.value.map(item => ({ ...item, sourceType: 'schedule' })),

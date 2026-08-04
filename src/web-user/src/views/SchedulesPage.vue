@@ -427,6 +427,7 @@ const contextItems = computed(() => {
             <CountdownPill
               v-if="s.status === 'pending'"
               :time="primaryTime(s)"
+              :time-type="s.timeType"
               :created-at="s.createdAt"
               :start-time="s.startTime"
               :end-time="s.endTime"

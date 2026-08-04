@@ -8,6 +8,7 @@ import type { Notification } from '@web/types'
 import { getDisplayTimezone } from '@web/utils/helpers'
 import { nativeNotificationGranted, sendNativeNotification } from '../services/native'
 import { useDesktopShell } from '../stores/desktopShell'
+import DesktopQuickTimeline from '../components/DesktopQuickTimeline.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -85,9 +86,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="app-frame desktop-app-frame">
-    <SideNav />
-    <section class="main-area desktop-main-area">
+  <main :class="['app-frame', 'desktop-app-frame', { 'desktop-quick-layout': shell.quickTimeline.value }]">
+    <DesktopQuickTimeline v-if="shell.quickTimeline.value" />
+    <template v-else>
+      <SideNav />
+      <section class="main-area desktop-main-area">
       <header class="page-topbar">
         <div class="page-heading">
           <p class="topbar-date">{{ dateLabel }}</p>
@@ -118,7 +121,8 @@ onUnmounted(() => {
           <component :is="Component" :key="route.path" />
         </transition>
       </router-view>
-    </section>
+      </section>
+    </template>
     <div v-if="store.toast" class="toast">{{ store.toast }}</div>
   </main>
 </template>

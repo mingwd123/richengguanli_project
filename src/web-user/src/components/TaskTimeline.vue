@@ -22,7 +22,7 @@ const sliced = computed(() => props.items.slice(0, 8).map(item => {
       :class="['timeline-entry', item.kind, { duration: item.isDuration }]"
     >
       <div class="time-node">
-        <span :class="['line-dot', urgency(item.endTime)]"></span>
+        <span :class="['line-dot', urgency(item.endTime, item.kind)]"></span>
         <span v-if="item.isDuration" class="duration-bar"></span>
       </div>
       <div class="timeline-card">
@@ -32,7 +32,7 @@ const sliced = computed(() => props.items.slice(0, 8).map(item => {
         </div>
         <strong>{{ item.title }}</strong>
         <small>{{ item.sourceLabel }}</small>
-        <small>{{ countdown(item.endTime) }}</small>
+        <small>{{ countdown(item.endTime, item.kind) }}</small>
       </div>
     </article>
     <div v-if="items.length === 0" class="timeline-empty">

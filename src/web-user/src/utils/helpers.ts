@@ -1,4 +1,5 @@
-import type { ScheduleForm, TimelineItem, CalendarDay } from '../types'
+import type { ScheduleForm, TimelineItem, CalendarDay, TimeType } from '../types'
+import { isTimelineOverdue, timelineKind, timelineOccursOnDate, timelineTimeRange } from './timeline'
 
 let displayTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
 
@@ -53,13 +54,8 @@ export function toApiTimePayload(input: Record<string, any>) {
 }
 
 export function normalizeTimelineItem(item: any, sourceType: 'schedule' | 'team_task'): TimelineItem {
-  const startAt = item.startTime || ''
-  const endAt = item.endTime || ''
-  const deadlineAt = item.deadlineTime || ''
-  const kind = sourceType === 'team_task'
-    ? (startAt && deadlineAt ? 'duration_task' : 'deadline_task')
-    : item.timeType === 'point_event' ? 'point_event' : item.timeType === 'duration_task' ? 'duration_task' : 'deadline_task'
-  const sortAt = kind === 'point_event' ? startAt : kind === 'duration_task' ? (endAt || deadlineAt || startAt) : (deadlineAt || startAt)
+  const kind = timelineKind({ ...item, sourceType })
+  const { sortAt } = timelineTimeRange({ ...item, sourceType, kind })
   return { ...item, sourceType, kind, kindLabel: kindName(kind), sortAt, statusText: item.assignStatus || item.status, sourceLabel: sourceType === 'team_task' ? (item.teamName || '团队任务') : (item.groupName || '个人日程') }
 }
 
@@ -80,15 +76,7 @@ export function buildMonthDays(items: any[], timezone = displayTimezone): Calend
 export function primaryTime(item: any) { return item.deadlineTime || item.endTime || item.startTime || item.createdAt || '' }
 
 export function occursOnDate(item: any, dateKey: string, timezone = displayTimezone) {
-  const start = item.startTime || ''
-  const end = item.endTime || item.deadlineTime || ''
-  const isDuration = item.sourceType === 'team_task'
-    ? !!start && !!item.deadlineTime
-    : (item.timeType === 'duration_task' || (item.timeType === 'deadline_task' && !!start && !!item.deadlineTime)) && !!end
-  if (!isDuration) return dateKeyInTimezone(primaryTime(item), timezone) === dateKey
-  const startKey = dateKeyInTimezone(start, timezone)
-  const endKey = dateKeyInTimezone(end, timezone)
-  return !!startKey && !!endKey && dateKey >= startKey && dateKey <= endKey
+  return timelineOccursOnDate(item, dateKey, timezone)
 }
 
 export function formatTime(value: string, timezone = displayTimezone) {
@@ -97,29 +85,32 @@ export function formatTime(value: string, timezone = displayTimezone) {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { timeZone: timezone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date)
 }
 
-export function countdown(value: string) {
+export function countdown(value: string, timeType?: TimeType) {
   if (!value) return '无截止时间'
   const diff = new Date(value).getTime() - Date.now()
   const abs = Math.abs(diff)
   const minutes = Math.floor(abs / 60000)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
-  if (diff < 0) return days > 0 ? `已逾期 ${days} 天` : hours > 0 ? `已逾期 ${hours} 小时` : `已逾期 ${minutes} 分钟`
+  if (diff < 0) {
+    if (timeType === 'point_event') return '已过'
+    return days > 0 ? `已逾期 ${days} 天` : hours > 0 ? `已逾期 ${hours} 小时` : `已逾期 ${minutes} 分钟`
+  }
   if (hours >= 24) return `剩余 ${days} 天`
   return `剩余 ${hours} 小时 ${minutes % 60} 分钟`
 }
 
-export function urgency(value: string) {
+export function urgency(value: string, timeType?: TimeType) {
   if (!value) return ''
   const diff = new Date(value).getTime() - Date.now()
-  if (diff < 0 || diff <= 10 * 60000) return 'danger'
+  if (diff < 0) return timeType === 'point_event' ? 'past' : 'danger'
+  if (diff <= 10 * 60000) return 'danger'
   if (diff <= 30 * 60000) return 'warning'
   return ''
 }
 
 export function isOverdue(item: any) {
-  const at = primaryTime(item)
-  return !!at && !['completed', 'cancelled'].includes(item.status) && item.assignStatus !== 'completed' && new Date(at).getTime() < Date.now()
+  return isTimelineOverdue(item)
 }
 
 export function sortByPriority<T extends Record<string, any>>(items: T[]) {

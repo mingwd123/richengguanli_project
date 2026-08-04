@@ -31,7 +31,7 @@ const selectedDayItems = computed(() => {
       ...item,
       typeLabel: item.sourceType === 'team_task' ? '团队任务' : timeTypeLabel(item.timeType),
       timeDisplay: formatTime(primaryTime(item)),
-      countdownText: countdown(primaryTime(item))
+      countdownText: countdown(primaryTime(item), item.sourceType === 'schedule' ? item.timeType : undefined)
     }))
 })
 

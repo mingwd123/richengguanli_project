@@ -3,8 +3,9 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
-import { formatTime, countdown, urgency, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
+import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
 import type { TimelineItem } from '../types'
+import { timelinePresentationStatus, timelineTimeRange } from '../utils/timeline'
 import {
   ArrowRight,
   CalendarDays,
@@ -93,6 +94,8 @@ const timelineEntries = computed(() => {
     .sort((a, b) => a.sortTs - b.sortTs)
 
   const markerIndex = items.findIndex(item => item.sortTs >= now)
+  const firstVisibleIndex = markerIndex < 0 ? Math.max(0, items.length - (TIMELINE_LIMIT - 1)) : Math.max(0, markerIndex - 4)
+  const visibleItems = items.slice(firstVisibleIndex, firstVisibleIndex + TIMELINE_LIMIT - 1)
   const nowEntry: TimelineEntryView = {
     id: `now-${now}`,
     sourceType: 'now',
@@ -111,9 +114,9 @@ const timelineEntries = computed(() => {
     cardClass: 'now',
     barClass: 'now'
   } as TimelineEntryView
-  if (markerIndex < 0) items.push(nowEntry)
-  else items.splice(markerIndex, 0, nowEntry)
-  return items.slice(0, TIMELINE_LIMIT)
+  const nowIndex = visibleItems.findIndex(item => item.sortTs >= now)
+  visibleItems.splice(nowIndex < 0 ? visibleItems.length : nowIndex, 0, nowEntry)
+  return visibleItems
 })
 
 type TimelineEntryView = TimelineItem & {
@@ -126,23 +129,30 @@ type TimelineEntryView = TimelineItem & {
   isOngoing: boolean
   isPast: boolean
   isFuture: boolean
+  presentation: ReturnType<typeof timelinePresentationStatus>
   cardClass: string
   barClass: string
 }
 
 function normalizeTimelineEntry(item: TimelineItem, now: number): TimelineEntryView | null {
-  const durationEnd = item.endTime || item.deadlineTime
-  const isDuration = item.kind === 'duration_task' && item.startTime && durationEnd
-  const startTs = new Date(isDuration ? item.startTime! : item.sortAt).getTime()
-  const endTs = isDuration ? new Date(durationEnd!).getTime() : startTs
-  const sortTs = isDuration ? startTs : new Date(item.sortAt).getTime()
+  const range = timelineTimeRange(item)
+  const isDuration = range.isDuration
+  const startTs = new Date(range.startAt).getTime()
+  const endTs = new Date(range.endAt).getTime()
+  const sortTs = new Date(range.sortAt).getTime()
   if (Number.isNaN(sortTs) || Number.isNaN(endTs)) return null
   const dateTs = isDuration ? startTs : sortTs
   const displayDate = formatMonthDay(dateTs)
   const displayTime = isDuration ? `${formatClock(startTs)} - ${formatClock(endTs)}` : formatClock(sortTs)
-  const summary = isDuration
+  const presentation = timelinePresentationStatus(item, now)
+  const defaultSummary = isDuration
     ? `${item.sourceLabel} · ${formatClock(startTs)}-${formatClock(endTs)}`
-    : `${item.sourceLabel} · ${countdown(item.deadlineTime || item.endTime || item.startTime || item.sortAt)}`
+    : `${item.sourceLabel} · ${countdown(item.deadlineTime || item.endTime || item.startTime || item.sortAt, item.kind)}`
+  const summary = presentation === 'past'
+    ? `${item.sourceLabel} - 已过`
+    : presentation === 'active'
+      ? `${item.sourceLabel} - 进行中至 ${formatClock(endTs)}`
+      : defaultSummary
   return {
     ...item,
     sortTs,
@@ -151,12 +161,18 @@ function normalizeTimelineEntry(item: TimelineItem, now: number): TimelineEntryV
     badgeText: labelForTimelineKind(item.kind),
     summary,
     isDuration,
-    isOngoing: isDuration && startTs <= now && endTs >= now,
-    isPast: endTs < now,
-    isFuture: startTs > now,
-    cardClass: endTs < now ? 'overdue' : item.kind,
-    barClass: endTs < now ? 'overdue' : item.kind
+    isOngoing: presentation === 'active',
+    isPast: presentation === 'past',
+    isFuture: presentation === 'upcoming',
+    presentation,
+    cardClass: presentation === 'overdue' ? 'overdue' : item.kind,
+    barClass: presentation === 'overdue' ? 'overdue' : item.kind
   }
+}
+
+function schedulePresentationClasses(schedule: any) {
+  const presentation = timelinePresentationStatus({ ...schedule, sourceType: 'schedule' }, nowTs.value)
+  return { overdue: presentation === 'overdue', past: presentation === 'past' }
 }
 
 function formatMonthDay(value: number | string) {
@@ -172,6 +188,7 @@ function upcomingSource(item: any) { return item.sourceType === 'schedule' ? (it
 function upcomingTime(item: any) { return item.deadlineTime || item.endTime || item.startTime || '' }
 
 function labelForTimelineKind(kind: string) {
+  if (kind === 'deadline_task') return '截止任务'
   if (kind === 'duration_task') return '时间段任务'
   if (kind === 'deadline_task') return '安排事项'
   if (kind === 'point_event') return '安排事项'
@@ -311,15 +328,15 @@ function openCreateSchedule() {
             <article
               v-for="schedule in module.items.slice(0, 3)"
               :key="schedule.id"
-              :class="['task-card', { overdue: urgency(schedule.deadlineTime || schedule.endTime || schedule.startTime) === 'danger' }]"
+              :class="['task-card', schedulePresentationClasses(schedule)]"
               @click="goSchedule(schedule.id)"
-              :title="`${schedule.title}\n模块: ${schedule.groupName || '未分组'}\n状态: ${schedule.status}\n截止: ${formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime)}\n${countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime)}`"
+              :title="`${schedule.title}\n模块: ${schedule.groupName || '未分组'}\n状态: ${schedule.status}\n时间: ${formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime)}\n${countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime, schedule.timeType)}`"
             >
               <div>
                 <strong>{{ schedule.title }}</strong>
                 <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
               </div>
-              <CountdownPill :time="schedule.deadlineTime || schedule.endTime || schedule.startTime" :created-at="schedule.createdAt" :start-time="schedule.startTime" :end-time="schedule.endTime" :deadline-time="schedule.deadlineTime" :remind-at="schedule.remindAt" />
+              <CountdownPill :time="schedule.deadlineTime || schedule.endTime || schedule.startTime" :time-type="schedule.timeType" :created-at="schedule.createdAt" :start-time="schedule.startTime" :end-time="schedule.endTime" :deadline-time="schedule.deadlineTime" :remind-at="schedule.remindAt" />
             </article>
             <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项日程</p>
           </template>
@@ -340,7 +357,7 @@ function openCreateSchedule() {
             <article
               v-for="task in module.items.slice(0, 3)"
               :key="task.id"
-              :class="['task-card', { overdue: urgency(task.deadlineTime || task.startTime) === 'danger' }]"
+              :class="['task-card', { overdue: isOverdue(task) }]"
               @click="goTask(task.id)"
               :title="`${task.title}\n团队: ${task.teamName || ''}\n状态: ${task.assignStatus || task.status}\n截止: ${formatTime(task.deadlineTime || task.startTime)}\n${countdown(task.deadlineTime || task.startTime)}`"
             >
@@ -384,7 +401,12 @@ function openCreateSchedule() {
             </div>
             <div class="timeline-dot-wrap">
               <span v-if="item.kind === 'now'" class="timeline-now-dot"></span>
-              <span v-else-if="item.isDuration" :class="['duration-bar', { ongoing: item.isOngoing }]"></span>
+              <span v-else-if="item.isDuration" :class="['timeline-duration-marker', { ongoing: item.isOngoing }]">
+                <span class="timeline-duration-node start"></span>
+                <span class="timeline-duration-rail"></span>
+                <span class="timeline-duration-node end"></span>
+              </span>
+              <span v-else-if="item.kind === 'deadline_task'" class="timeline-deadline-node"></span>
               <span v-else :class="['line-dot', item.barClass === 'overdue' ? 'timeline-dot-overdue' : item.barClass]"></span>
             </div>
             <div :class="['timeline-card', { 'timeline-overdue': item.barClass === 'overdue' }]">

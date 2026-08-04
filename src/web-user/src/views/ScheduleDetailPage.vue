@@ -79,6 +79,10 @@ function goBack() {
   router.push('/schedules')
 }
 
+function isPastPointEvent(item: Schedule) {
+  return item.timeType === 'point_event' && new Date(item.startTime).getTime() < Date.now()
+}
+
 onMounted(loadDetail)
 </script>
 
@@ -110,6 +114,7 @@ onMounted(loadDetail)
         <div v-if="schedule.timeType === 'point_event'">
           <span class="muted">发生时间：</span>
           <span>{{ formatTime(schedule.startTime) }}</span>
+          <span v-if="schedule.status === 'pending' && isPastPointEvent(schedule)" class="tag past" style="margin-left:8px">已过</span>
         </div>
         <div v-if="schedule.timeType === 'deadline_task'">
           <span class="muted">截止时间：</span>

@@ -243,20 +243,21 @@ Authorization: Bearer {access_token}
 **请求：**
 ```json
 {
-  "title": "项目周会",
-  "description": "会议室A",
+  "title": "项目冲刺",
+  "description": "完成本周实现与验收",
   "groupName": "工作",
-  "timeType": "deadline_task",
-  "startTime": "2026-07-23T10:00:00+08:00",
-  "deadlineTime": "2026-07-23T11:00:00+08:00",
-  "remindAt": "2026-07-23T09:30:00+08:00"
+  "timeType": "duration_task",
+  "startTime": "2026-08-06T10:00:00+08:00",
+  "endTime": "2026-08-06T11:00:00+08:00",
+  "remindAt": "2026-08-06T09:30:00+08:00"
 }
 ```
 
 **说明：**
-- `timeType`：`point_event`（瞬时日程，如会议、活动）/ `deadline_task`（截止型，如作业截至）
-- `startTime`：point_event 使用；deadline_task 如有开始时间可设置为持续任务展示
-- `deadlineTime`：deadline_task 的截止时间
+- `timeType`：`point_event`（瞬时日程，如会议、活动）/ `deadline_task`（截止任务，如作业截至）/ `duration_task`（持续任务）
+- `point_event`：仅使用 `startTime`，且为必填。
+- `deadline_task`：仅使用 `deadlineTime`，且为必填。
+- `duration_task`：仅使用 `startTime` 与 `endTime`，且均为必填；`endTime` 不得早于 `startTime`。
 - `remindAts`：提醒时间数组，可选；每个时间生成一条 reminder 记录
 
 **响应：**
@@ -266,13 +267,13 @@ Authorization: Bearer {access_token}
   "message": "success",
   "data": {
     "id": 1,
-    "title": "项目周会",
+    "title": "项目冲刺",
     "groupName": "工作",
-    "timeType": "deadline_task",
+    "timeType": "duration_task",
     "status": "pending",
-    "startTime": "2026-07-23T10:00:00+08:00",
-    "deadlineTime": "2026-07-23T11:00:00+08:00",
-    "createdAt": "2026-07-23T08:00:00+08:00"
+    "startTime": "2026-08-06T10:00:00+08:00",
+    "endTime": "2026-08-06T11:00:00+08:00",
+    "createdAt": "2026-08-04T08:00:00+08:00"
   }
 }
 ```
@@ -291,7 +292,7 @@ Authorization: Bearer {access_token}
 | 参数 | 说明 |
 | --- | --- |
 | status | 筛选：pending/completed/cancelled |
-| date_from / date_to | 按截止时间或开始时间范围筛选 |
+| date_from / date_to | 按日程关联时间范围筛选：瞬时日程按开始时间、截止任务按截止时间、持续任务按起止时间段 |
 | group_name | 按分组名称筛选 |
 
 **响应：**
@@ -303,11 +304,11 @@ Authorization: Bearer {access_token}
     "list": [
       {
         "id": 1,
-        "title": "项目周会",
+        "title": "项目冲刺",
         "groupName": "工作",
-        "timeType": "deadline_task",
-        "startTime": "2026-07-23T10:00:00+08:00",
-        "deadlineTime": "2026-07-23T11:00:00+08:00",
+        "timeType": "duration_task",
+        "startTime": "2026-08-06T10:00:00+08:00",
+        "endTime": "2026-08-06T11:00:00+08:00",
         "status": "pending",
         "hasReminder": true
       }
@@ -320,8 +321,8 @@ Authorization: Bearer {access_token}
 ```
 
 **倒计时展示规则：**
-- API 不返回 countdown 字符串，由前端根据 `deadlineTime` 和当前时间实时计算
-- 后端返回 `deadlineTime`，前端计算显示
+- API 不返回 countdown 字符串。截止任务由前端根据 `deadlineTime` 实时计算，持续任务根据 `endTime` 实时计算；瞬时日程不显示倒计时。
+- 后端返回对应的时间字段，前端计算显示。
 - 倒计时逻辑：>24h 显示"剩余 X 天"，≤24h 显示"X小时X分"，≤30分钟橙色，≤10分钟红色
 - 逾期显示："已逾期 X分钟 / X小时 / X天"
 

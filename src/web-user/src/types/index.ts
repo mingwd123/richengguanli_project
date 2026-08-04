@@ -209,6 +209,7 @@ export interface TimelineItem {
   kindLabel: string
   sortAt: string
   status: string
+  statusText?: string
   assignStatus?: string
   sourceLabel: string
   teamName?: string
@@ -216,6 +217,32 @@ export interface TimelineItem {
   deadlineTime?: string
   startTime?: string
   endTime?: string
+}
+
+export type TimelinePresentationStatus =
+  | 'upcoming'
+  | 'active'
+  | 'past'
+  | 'overdue'
+  | 'completed'
+  | 'cancelled'
+  | 'rejected'
+  | 'unscheduled'
+
+export interface TimelineTimeRange {
+  kind: TimeType
+  startAt: string
+  endAt: string
+  sortAt: string
+  isDuration: boolean
+}
+
+export interface TimelineStats {
+  today: number
+  overdue: number
+  upcoming: number
+  active: number
+  past: number
 }
 
 /* ========== 表单 ========== */

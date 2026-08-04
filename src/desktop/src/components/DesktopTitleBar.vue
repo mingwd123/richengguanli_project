@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Minus, Pin, Settings2, Square, X } from 'lucide-vue-next'
+import { ListTodo, Minus, Pin, Settings2, Square, X } from 'lucide-vue-next'
 import { useDesktopShell } from '../stores/desktopShell'
 import {
   closeWindow,
@@ -12,7 +12,7 @@ import {
 
 const route = useRoute()
 const shell = useDesktopShell()
-const routeTitle = computed(() => String(route.meta.title || '工作台'))
+const routeTitle = computed(() => shell.quickTimeline.value ? '快捷时间轴' : String(route.meta.title || '工作台'))
 
 function handleDrag(event: MouseEvent) {
   if (event.buttons === 1) startWindowDrag()
@@ -31,6 +31,9 @@ function handleDrag(event: MouseEvent) {
       <span>{{ shell.runningInTauri.value ? 'Desktop' : 'Preview' }}</span>
     </div>
     <div class="desktop-window-actions" @mousedown.stop @dblclick.stop>
+      <button type="button" :class="{ active: shell.quickTimeline.value }" :disabled="shell.quickTimeline.value && shell.quickTimelineExitGuard.value === 'blocked'" :title="shell.quickTimeline.value && shell.quickTimelineExitGuard.value === 'blocked' ? '正在创建子任务' : shell.quickTimeline.value ? '打开完整工作台' : '打开快捷时间轴'" :aria-label="shell.quickTimeline.value && shell.quickTimelineExitGuard.value === 'blocked' ? '正在创建子任务' : shell.quickTimeline.value ? '打开完整工作台' : '打开快捷时间轴'" @click="shell.toggleQuickTimeline">
+        <ListTodo :size="15" />
+      </button>
       <button type="button" :class="{ active: shell.alwaysOnTop.value }" title="窗口置顶" aria-label="窗口置顶" @click="shell.setAlwaysOnTop(!shell.alwaysOnTop.value)">
         <Pin :size="14" />
       </button>
