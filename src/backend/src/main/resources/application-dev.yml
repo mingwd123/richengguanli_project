@@ -13,9 +13,12 @@ app:
     secret: ${JWT_SECRET:change-me-in-development}
   internal:
     reminder-scan-token: ${REMINDER_SCAN_TOKEN:change-me-in-development}
+  demo-data:
+    enabled: ${DEMO_DATA_ENABLED:true}
   ai:
     enabled: ${AI_ENABLED:true}
     provider: ${AI_PROVIDER:deepseek}
     model: ${AI_MODEL:deepseek-chat}
     api-base-url: ${AI_API_BASE_URL:https://api.deepseek.com/v1}
     api-key: ${AI_API_KEY:}
+    allowed-hosts: ${AI_ALLOWED_HOSTS:api.deepseek.com}

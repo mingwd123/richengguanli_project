@@ -63,8 +63,8 @@ export function timelineTimeRange(item: TimelineItemLike): TimelineTimeRange {
 
 function terminalStatus(item: TimelineItemLike): Extract<TimelinePresentationStatus, 'completed' | 'cancelled' | 'rejected'> | null {
   if (item.status === 'completed' || item.assignStatus === 'completed') return 'completed'
-  if (item.assignStatus === 'rejected') return 'rejected'
-  if (item.status === 'cancelled' || item.status === 'all_rejected') return 'cancelled'
+  if (item.assignStatus === 'rejected' || item.status === 'all_rejected' || item.status === 'approval_rejected') return 'rejected'
+  if (item.status === 'cancelled') return 'cancelled'
   return null
 }
 
@@ -92,7 +92,7 @@ export function isTimelineOverdue(item: TimelineItemLike, now: number | Date = D
 
 export function isTimelineItemOpen(item: TimelineItemLike) {
   const status = terminalStatus(item)
-  return !status
+  return !status && item.status !== 'pending_approval' && item.status !== 'approval_rejected'
 }
 
 function dayStartTimestamp(dateKey: string, timezone: string) {

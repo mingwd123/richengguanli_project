@@ -90,7 +90,7 @@ public class ReminderService {
         if ("schedule".equals(type)) {
             count = jdbc.queryForObject("select count(*) from schedule where id=? and user_id=? and status='pending' and deleted_at is null", Integer.class, targetId, userId);
         } else if ("team_task".equals(type)) {
-            count = jdbc.queryForObject("select count(*) from team_task t join team_task_assignee a on a.task_id=t.id and a.user_id=? and a.is_active=true and a.status in ('pending','accepted') where t.id=? and t.status='active' and t.deleted_at is null", Integer.class, userId, targetId);
+            count = jdbc.queryForObject("select count(*) from team_task t join team_task_assignee a on a.task_id=t.id and a.user_id=? and a.is_active=true and a.status in ('pending','accepted') where t.id=? and t.approval_status='approved' and t.status in ('active','unassigned') and t.deleted_at is null", Integer.class, userId, targetId);
         } else {
             return false;
         }

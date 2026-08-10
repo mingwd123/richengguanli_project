@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, reactive, ref, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, timeTypeLabel, statusLabel, countdown, urgency } from '../utils/helpers'
+import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, urgency } from '../utils/helpers'
 import type { Schedule, TimeType } from '../types'
 
 const props = defineProps<{ id: string }>()
+const route = useRoute()
 const router = useRouter()
 const store = useAppStore()
 
@@ -14,13 +15,13 @@ const loading = ref(false)
 const editing = ref(false)
 const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '' })
 const initialRemindAt = ref('')
+const openedFromHome = computed(() => route.query.from === 'home')
+const returnTarget = computed(() => openedFromHome.value ? '/' : '/schedules')
+const returnLabel = computed(() => openedFromHome.value ? '返回首页' : '返回日程列表')
+const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
 
 function toDatetimeLocal(value: string) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value.slice(0, 16)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return toDatetimeLocalInTimezone(value, userTimezone.value)
 }
 
 function fillEditForm(item: Schedule) {
@@ -56,27 +57,28 @@ function openEdit() {
 
 async function saveEdit() {
   if (!schedule.value) return
-  const ok = await store.updateSchedule(schedule.value.id, { ...editForm, reminderChanged: editForm.remindAt !== initialRemindAt.value })
+  const ok = await store.updateSchedule(schedule.value.id, {
+    ...editForm,
+    reminderChanged: editForm.remindAt !== initialRemindAt.value
+  })
   if (!ok) return
   editing.value = false
   await loadDetail()
 }
 
-function handleAction(action: string) {
+async function handleAction(action: string) {
   if (!schedule.value) return
-  store.setScheduleStatus(schedule.value, action).then(() => loadDetail())
+  if (await store.setScheduleStatus(schedule.value, action)) await loadDetail()
 }
 
-function handleDelete() {
+async function handleDelete() {
   if (!schedule.value) return
   if (!confirm('确认删除此日程？')) return
-  store.deleteSchedule(Number(schedule.value.id)).then(() => {
-    router.push('/schedules')
-  })
+  if (await store.deleteSchedule(Number(schedule.value.id))) await router.push(returnTarget.value)
 }
 
 function goBack() {
-  router.push('/schedules')
+  router.push(returnTarget.value)
 }
 
 function isPastPointEvent(item: Schedule) {
@@ -90,7 +92,7 @@ onMounted(loadDetail)
   <section class="list-page">
     <div class="page-topbar" style="padding:0">
       <div>
-        <button @click="goBack" style="border:0;background:transparent;padding:0;color:#2f80ed;font-weight:700">← 返回日程列表</button>
+        <button @click="goBack" style="border:0;background:transparent;padding:0;color:#2f80ed;font-weight:700">← {{ returnLabel }}</button>
       </div>
     </div>
 

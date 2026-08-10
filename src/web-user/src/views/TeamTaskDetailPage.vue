@@ -3,12 +3,14 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { Sparkles } from 'lucide-vue-next'
-import { formatTime, countdown, urgency, statusLabel } from '../utils/helpers'
-import type { TeamTask, TeamTaskAssignee, TaskGroup } from '../types'
+import { canCorrectTeamTaskAssignee, canDeleteTeamTask, formatTime, countdown, getDisplayTimezone, statusLabel, toDatetimeLocalInTimezone, urgency, zonedDateTimeToIso } from '../utils/helpers'
+import type { TeamTask, TeamTaskAssignee, TeamTaskReassignmentCandidate, TaskGroup } from '../types'
 
 const eventTypeLabels: Record<string, string> = {
   created: '创建', assigned: '分配', accepted: '接受', rejected: '拒绝',
   completed: '完成', cancelled: '取消', restored: '恢复', reassigned: '重新分配',
+  assignment_proposed: '提议分配', approval_requested: '提交审批', approved: '审批通过', approval_rejected: '审批拒绝', approval_resubmitted: '重新提交审批',
+  assignee_removed: '成员移除',
   time_updated: '修改时间', status_corrected: '修正状态'
 }
 
@@ -21,9 +23,11 @@ const loading = ref(false)
 const aiOptimizing = ref(false)
 const optimizedDesc = ref('')
 const editOpen = ref(false)
+const reviewSaving = ref(false)
 const taskGroups = ref<TaskGroup[]>([])
 const editForm = reactive({ title: '', description: '', groupId: '', startTime: '', deadlineTime: '', remindAt: '' })
 const initialRemindAt = ref('')
+const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
 async function aiOptimizeDesc() {
   if (!task.value?.description) return
   aiOptimizing.value = true; optimizedDesc.value = ''
@@ -47,9 +51,25 @@ async function applyOptimizedDescription() {
 }
 
 const isCreatorOrAdmin = computed(() => {
-  if (!task.value || !store.profile) return false
+  if (!task.value) return false
+  if (task.value.canManage !== undefined) return task.value.canManage
+  if (!store.profile) return false
   const team = store.teams.find(t => t.id === task.value?.teamId)
   return task.value.creatorId === store.profile.id || team?.myRole === 'owner' || team?.myRole === 'admin'
+})
+const isTeamAdmin = computed(() => {
+  if (!task.value) return false
+  const role = store.teams.find(team => team.id === task.value?.teamId)?.myRole
+  return role === 'owner' || role === 'admin'
+})
+const hasVacancies = computed(() => Number(task.value?.unassignedCount || 0) > 0)
+const hasReassignmentCandidates = computed(() => Boolean(task.value?.reassignmentCandidates?.length))
+const canCancelTask = computed(() => Boolean(task.value && isCreatorOrAdmin.value && ['pending_approval', 'active', 'unassigned', 'all_rejected'].includes(task.value.status)))
+const taskStatusClass = computed(() => {
+  if (!task.value) return 'warning'
+  if (task.value.status === 'completed') return 'blue'
+  if (['cancelled', 'all_rejected', 'approval_rejected'].includes(task.value.status)) return 'danger'
+  return 'warning'
 })
 
 async function loadDetail() {
@@ -65,11 +85,7 @@ async function loadDetail() {
 }
 
 function toDatetimeLocal(value: string) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value.slice(0, 16)
-  const pad = (part: number) => String(part).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return toDatetimeLocalInTimezone(value, userTimezone.value)
 }
 
 async function startEdit() {
@@ -93,14 +109,15 @@ async function saveEdit() {
     return
   }
   try {
+    const timezone = userTimezone.value
     const payload: Record<string, any> = {
       title: editForm.title.trim(),
       description: editForm.description,
       groupId: Number(editForm.groupId),
-      startTime: editForm.startTime ? new Date(editForm.startTime).toISOString() : '',
-      deadlineTime: editForm.deadlineTime ? new Date(editForm.deadlineTime).toISOString() : '',
+      startTime: zonedDateTimeToIso(editForm.startTime, timezone),
+      deadlineTime: zonedDateTimeToIso(editForm.deadlineTime, timezone),
     }
-    if (editForm.remindAt !== initialRemindAt.value) payload.remindAt = editForm.remindAt ? new Date(editForm.remindAt).toISOString() : ''
+    if (editForm.remindAt !== initialRemindAt.value) payload.remindAt = zonedDateTimeToIso(editForm.remindAt, timezone)
     await store.request(`/team-tasks/${task.value.id}`, {
       method: 'PUT',
       body: JSON.stringify(payload)
@@ -111,29 +128,59 @@ async function saveEdit() {
   } catch (e: any) { store.notify(e.message || '更新失败') }
 }
 
-function handleTaskAction(action: string) {
+async function handleTaskAction(action: 'cancel' | 'restore' | 'resubmit-approval') {
   if (!task.value) return
-  const myTask = store.myTasks.find(t => String(t.id) === props.id)
-  if (myTask) {
-    store.taskAction(myTask, action).then(() => loadDetail())
-  } else {
-    store.request(`/team-tasks/${props.id}/${action}`, { method: 'POST' }).then(() => {
-      loadDetail()
-      store.notify('操作成功')
-    }).catch((e: any) => store.notify(e.message))
+  const teamId = task.value.teamId
+  try {
+    await store.request(`/team-tasks/${props.id}/${action}`, { method: 'POST' })
+    await Promise.all([loadDetail(), store.loadAll(), store.loadTeamTasks(teamId)])
+    const messages = {
+      cancel: '任务已取消',
+      restore: '任务已恢复',
+      'resubmit-approval': '任务已重新提交审批',
+    }
+    store.notify(messages[action])
+  } catch (e: any) { store.notify(e.message || '操作失败') }
+}
+
+async function reviewApproval(action: 'approve' | 'reject-approval') {
+  if (!task.value?.canReview || task.value.status !== 'pending_approval' || reviewSaving.value) return
+  if (action === 'approve' && hasVacancies.value) {
+    store.notify('请先为已移除的执行人补位')
+    return
+  }
+  if (action === 'reject-approval' && !window.confirm('确认拒绝这项任务安排？')) return
+  reviewSaving.value = true
+  try {
+    const teamId = task.value.teamId
+    await store.request(`/team-tasks/${props.id}/${action}`, { method: 'POST' })
+    await Promise.all([loadDetail(), store.loadAll(), store.loadTeamTasks(teamId)])
+    store.notify(action === 'approve' ? '任务审批已通过' : '任务审批已拒绝')
+  } catch (e: any) {
+    store.notify(e.message || '审批操作失败')
+  } finally {
+    reviewSaving.value = false
   }
 }
 
 function goReassign(assignee: TeamTaskAssignee) {
-  router.push(`/tasks/${props.id}/assignees/${assignee.userId}/reassign`)
+  router.push(`/tasks/${props.id}/assignees/${assignee.assigneeId}/reassign`)
+}
+
+function goFillVacancy(candidate: TeamTaskReassignmentCandidate) {
+  router.push(`/tasks/${props.id}/assignees/${candidate.assigneeId}/reassign`)
 }
 
 function goCorrectStatus(assignee: TeamTaskAssignee) {
-  router.push(`/tasks/${props.id}/assignees/${assignee.userId}/status`)
+  router.push(`/tasks/${props.id}/assignees/${assignee.assigneeId}/status`)
 }
 
 function handleDelete() {
   if (!task.value) return
+  if (!canDeleteTeamTask(task.value)) {
+    store.notify('已完成任务不能删除')
+    return
+  }
   if (!confirm('确认删除此任务？')) return
   store.request(`/team-tasks/${props.id}`, { method: 'DELETE' }).then(() => {
     store.notify('任务已删除')
@@ -193,11 +240,11 @@ onMounted(loadDetail)
         <div>
           <span class="muted">截止时间：</span>
           <span>{{ formatTime(task.deadlineTime) }}</span>
-          <span v-if="task.status === 'active'" :class="['tag', urgency(task.deadlineTime)]" style="margin-left:8px">{{ countdown(task.deadlineTime) }}</span>
+          <span v-if="['active', 'unassigned'].includes(task.status)" :class="['tag', urgency(task.deadlineTime)]" style="margin-left:8px">{{ countdown(task.deadlineTime) }}</span>
         </div>
         <div>
           <span class="muted">整体状态：</span>
-          <span :class="['tag', task.status === 'completed' ? 'blue' : task.status === 'cancelled' || task.status === 'all_rejected' ? 'danger' : 'warning']">{{ statusLabel(task.status) }}</span>
+          <span :class="['tag', taskStatusClass]">{{ statusLabel(task.status) }}</span>
         </div>
         <div v-if="task.pendingReminders?.length">
           <span class="muted">下次提醒：</span><span>{{ formatTime(task.pendingReminders[0].remindAt) }}</span>
@@ -225,11 +272,15 @@ onMounted(loadDetail)
           <small>第 {{ a.assignRound }} 轮</small>
           <div class="top-actions">
             <!-- rejected 执行人的重新分配入口 -->
-            <button v-if="a.assignStatus === 'rejected' && isCreatorOrAdmin" @click="goReassign(a)">重新分配</button>
+            <button v-if="a.isCurrent && a.assignStatus === 'rejected' && isCreatorOrAdmin && !['completed', 'cancelled', 'approval_rejected'].includes(task.status)" @click="goReassign(a)">重新分配</button>
             <!-- 创建者/管理员修正执行人状态 -->
-            <button v-if="isCreatorOrAdmin" @click="goCorrectStatus(a)">修正状态</button>
+            <button v-if="canCorrectTeamTaskAssignee(task) && a.isCurrent && isCreatorOrAdmin" @click="goCorrectStatus(a)">修正状态</button>
           </div>
         </article>
+        <div v-if="isTeamAdmin && hasReassignmentCandidates" class="form-actions" style="margin-top:12px">
+          <button v-for="candidate in task.reassignmentCandidates" :key="candidate.assigneeId" @click="goFillVacancy(candidate)">为 {{ candidate.nickname }} 补位</button>
+        </div>
+        <p v-if="task.status === 'pending_approval' && task.canReview && hasVacancies" class="hint" style="margin-top:10px">需先补齐执行人，才能通过审批。</p>
       </div>
 
       <div style="margin-top:24px">
@@ -251,9 +302,12 @@ onMounted(loadDetail)
 
       <!-- 创建者/管理员操作 -->
       <div v-if="isCreatorOrAdmin" class="form-actions" style="margin-top:24px">
-        <button v-if="task.status === 'active'" @click="handleTaskAction('cancel')">取消任务</button>
-        <button v-if="task.status === 'cancelled'" @click="handleTaskAction('restore')">恢复任务</button>
-        <button @click="handleDelete">删除任务</button>
+        <button v-if="task.status === 'pending_approval' && task.canReview" :disabled="reviewSaving || hasVacancies" :title="hasVacancies ? '请先补齐执行人' : '通过审批'" class="primary" @click="reviewApproval('approve')">通过审批</button>
+        <button v-if="task.status === 'pending_approval' && task.canReview" :disabled="reviewSaving" @click="reviewApproval('reject-approval')">拒绝审批</button>
+        <button v-if="task.status === 'approval_rejected'" class="primary" @click="handleTaskAction('resubmit-approval')">重新提交审批</button>
+        <button v-if="canCancelTask" @click="handleTaskAction('cancel')">取消任务</button>
+        <button v-if="task.status === 'cancelled' && isTeamAdmin" @click="handleTaskAction('restore')">恢复任务</button>
+        <button v-if="canDeleteTeamTask(task)" @click="handleDelete">删除任务</button>
       </div>
     </section>
 

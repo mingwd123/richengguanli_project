@@ -84,7 +84,9 @@ export const useAppStore = defineStore('app', () => {
   const timezoneForm = reactive({ timezone: '' })
 
   const pendingScheduleCount = computed(() => schedules.value.filter(s => s.status === 'pending').length)
-  const activeTaskCount = computed(() => myTasks.value.filter(t => t.status === 'active').length)
+  const activeTaskCount = computed(() => myTasks.value.filter(t =>
+    ['active', 'unassigned'].includes(t.status) && ['pending', 'accepted'].includes(t.assignStatus || '')
+  ).length)
   const activeTeam = computed(() => teams.value[0] || null)
   const timelineItems = computed<TimelineItem[]>(() =>
     [...schedules.value.map(i => normalizeTimelineItem(i, 'schedule')), ...myTasks.value.map(i => normalizeTimelineItem(i, 'team_task'))]
@@ -97,13 +99,19 @@ export const useAppStore = defineStore('app', () => {
   })
   const calendarItems = computed(() => [
     ...calendarSchedules.value.map(item => ({ ...item, sourceType: 'schedule' })),
-    ...calendarTasks.value.map(item => ({ ...item, sourceType: 'team_task' }))
+    ...calendarTasks.value.filter(item => !['pending_approval', 'approval_rejected'].includes(item.status)).map(item => ({ ...item, sourceType: 'team_task' }))
   ])
   const monthDays = computed<CalendarDay[]>(() => buildMonthDays(calendarItems.value, profile.value?.timezone))
   const loggedIn = computed(() => !!token.value)
   const aiRecordEnabled = ref(localStorage.getItem(AI_RECORD_KEY) !== 'false')
 
   let refreshPromise: Promise<boolean> | null = null
+  let sessionRevision = 0
+  let loadAllRequestVersion = 0
+  let calendarRequestVersion = 0
+  let unreadCountRequestVersion = 0
+  let notificationPollVersion = 0
+  const listRequestVersions = new WeakMap<object, number>()
 
   function persistTokens(access: string, refresh: string) {
     token.value = access
@@ -112,7 +120,15 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem(REFRESH_TOKEN_KEY, refresh)
   }
 
+  function establishSession(access: string, refresh: string) {
+    sessionRevision += 1
+    persistTokens(access, refresh)
+  }
+
   function clearSession() {
+    sessionRevision += 1
+    refreshPromise = null
+    loading.value = false
     token.value = ''
     refreshToken.value = ''
     localStorage.removeItem(TOKEN_KEY)
@@ -133,29 +149,47 @@ export const useAppStore = defineStore('app', () => {
   async function refreshSession() {
     if (!refreshToken.value) return false
     if (!refreshPromise) {
-      refreshPromise = apiRequest<{ accessToken: string; refreshToken: string }>('/auth/refresh-token', {
-        method: 'POST', body: JSON.stringify({ refreshToken: refreshToken.value })
+      const requestedRefreshToken = refreshToken.value
+      const requestedRevision = sessionRevision
+      let pending: Promise<boolean>
+      pending = apiRequest<{ accessToken: string; refreshToken: string }>('/auth/refresh-token', {
+        method: 'POST', body: JSON.stringify({ refreshToken: requestedRefreshToken })
       }).then(data => {
+        if (sessionRevision !== requestedRevision || refreshToken.value !== requestedRefreshToken) return false
         persistTokens(data.accessToken, data.refreshToken)
         return true
       }).catch(() => {
-        clearSession()
+        if (sessionRevision === requestedRevision && refreshToken.value === requestedRefreshToken) clearSession()
         return false
-      }).finally(() => { refreshPromise = null })
+      }).finally(() => {
+        if (refreshPromise === pending) refreshPromise = null
+      })
+      refreshPromise = pending
     }
     return refreshPromise
   }
 
   async function request<T = any>(path: string, options: RequestInit = {}) {
     const attemptedToken = token.value
+    const requestSession = sessionRevision
+    const ensureCurrentSession = (data: T) => {
+      if (!path.startsWith('/auth/') && requestSession !== sessionRevision) {
+        const error: any = new Error('登录状态已变化')
+        error.code = 'SESSION_CHANGED'
+        throw error
+      }
+      return data
+    }
     try {
-      return await apiRequest<T>(path, options, attemptedToken)
+      return ensureCurrentSession(await apiRequest<T>(path, options, attemptedToken))
     } catch (error: any) {
       const canRefresh = error.code === 401 && !path.startsWith('/auth/') && !!refreshToken.value
       if (!canRefresh) throw error
-      if (attemptedToken !== token.value) return apiRequest<T>(path, options, token.value)
+      if (requestSession !== sessionRevision) throw error
+      if (attemptedToken !== token.value) return ensureCurrentSession(await apiRequest<T>(path, options, token.value))
       if (!(await refreshSession())) throw error
-      return apiRequest<T>(path, options, token.value)
+      if (requestSession !== sessionRevision) throw error
+      return ensureCurrentSession(await apiRequest<T>(path, options, token.value))
     }
   }
 
@@ -172,7 +206,7 @@ export const useAppStore = defineStore('app', () => {
     loading.value = true
     try {
       const data = await request<{ accessToken: string; refreshToken: string }>('/auth/login', { method: 'POST', body: JSON.stringify(loginForm) })
-      persistTokens(data.accessToken, data.refreshToken)
+      establishSession(data.accessToken, data.refreshToken)
       await loadAll()
       notify('登录成功')
       return true
@@ -188,7 +222,7 @@ export const useAppStore = defineStore('app', () => {
       const data = await request<{ accessToken: string; refreshToken: string }>('/auth/register', {
         method: 'POST', body: JSON.stringify({ phone: registerForm.phone, password: registerForm.password, nickname: registerForm.nickname || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
       })
-      persistTokens(data.accessToken, data.refreshToken)
+      establishSession(data.accessToken, data.refreshToken)
       await loadAll()
       notify('注册成功')
       return true
@@ -209,6 +243,9 @@ export const useAppStore = defineStore('app', () => {
 
   async function loadAll() {
     if (!token.value) return
+    const requestVersion = ++loadAllRequestVersion
+    const requestSession = sessionRevision
+    const isCurrentRequest = () => requestVersion === loadAllRequestVersion && requestSession === sessionRevision
     loading.value = true
     try {
       const [me, groupPage, todayData, upcomingData, preferences] = await Promise.all([
@@ -216,23 +253,43 @@ export const useAppStore = defineStore('app', () => {
         request<TodayOverview>('/home/today'), request<UpcomingOverview>('/home/upcoming'),
         request<NotificationPreference>('/notifications/preferences')
       ])
+      if (!isCurrentRequest()) return
       profile.value = me; setDisplayTimezone(me.timezone); profileForm.nickname = me.nickname; profileForm.avatarUrl = me.avatarUrl || ''; profileForm.timezone = me.timezone; timezoneForm.timezone = me.timezone
       notificationPreferences.value = preferences
       taskGroups.value = (groupPage.list || []).sort((a, b) => a.sortOrder - b.sortOrder)
       if (!scheduleForm.groupId && taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       today.value = todayData; upcomingSeven.value = upcomingData
       await Promise.all([loadSchedules(), loadTeams(), loadAssignedTasks(), loadCreatedTasks(), loadNotifications()])
+      if (!isCurrentRequest()) return
       if (teams.value[0] && !taskForm.teamId) taskForm.teamId = String(teams.value[0].id)
     } catch (e: any) {
+      if (!isCurrentRequest()) return
       if (e.code === 401 || e.code === 404) logout()
       notify(e.message)
-    } finally { loading.value = false }
+    } finally {
+      if (isCurrentRequest()) loading.value = false
+    }
   }
 
   function syncPage(state: ListState, data: PageResult<unknown>) {
     state.page = data.page || state.page
     state.size = data.size || state.size
     state.total = data.total || 0
+  }
+
+  function beginListRequest(state: ListState) {
+    const version = (listRequestVersions.get(state) || 0) + 1
+    listRequestVersions.set(state, version)
+    state.loading = true
+    return { version, session: sessionRevision }
+  }
+
+  function isCurrentListRequest(state: ListState, requestState: { version: number; session: number }) {
+    return listRequestVersions.get(state) === requestState.version && sessionRevision === requestState.session
+  }
+
+  function finishListRequest(state: ListState, requestState: { version: number; session: number }) {
+    if (isCurrentListRequest(state, requestState)) state.loading = false
   }
 
   function listParams(state: ListState) {
@@ -249,36 +306,48 @@ export const useAppStore = defineStore('app', () => {
 
   async function loadSchedules(patch: Partial<ListState> = {}) {
     Object.assign(schedulePage, patch)
-    schedulePage.loading = true
+    const listRequest = beginListRequest(schedulePage)
     try {
       const data = await request<PageResult<Schedule>>(queryPath('/schedules', listParams(schedulePage)))
+      if (!isCurrentListRequest(schedulePage, listRequest)) return data.list || []
       schedules.value = data.list || []
       syncPage(schedulePage, data)
       return schedules.value
-    } catch (e: any) { notify(e.message || '加载日程失败'); return [] } finally { schedulePage.loading = false }
+    } catch (e: any) {
+      if (isCurrentListRequest(schedulePage, listRequest)) notify(e.message || '加载日程失败')
+      return []
+    } finally { finishListRequest(schedulePage, listRequest) }
   }
 
   async function loadTeams(patch: Partial<ListState> = {}) {
     Object.assign(teamPage, patch)
-    teamPage.loading = true
+    const listRequest = beginListRequest(teamPage)
     try {
       const data = await request<PageResult<Team>>(queryPath('/teams', { page: teamPage.page, size: teamPage.size, sort: teamPage.sort }))
+      if (!isCurrentListRequest(teamPage, listRequest)) return data.list || []
       teams.value = (data.list || []).map((team: any) => ({ ...team, myRole: team.myRole || team.role }))
       syncPage(teamPage, data)
       if (teams.value[0] && !taskForm.teamId) taskForm.teamId = String(teams.value[0].id)
       return teams.value
-    } catch (e: any) { notify(e.message || '加载团队失败'); return [] } finally { teamPage.loading = false }
+    } catch (e: any) {
+      if (isCurrentListRequest(teamPage, listRequest)) notify(e.message || '加载团队失败')
+      return []
+    } finally { finishListRequest(teamPage, listRequest) }
   }
 
   async function loadAssignedTasks(patch: Partial<ListState> = {}) {
     Object.assign(assignedTaskPage, patch)
-    assignedTaskPage.loading = true
+    const listRequest = beginListRequest(assignedTaskPage)
     try {
       const data = await request<PageResult<MyTask>>(queryPath('/team-tasks/my', listParams(assignedTaskPage)))
+      if (!isCurrentListRequest(assignedTaskPage, listRequest)) return data.list || []
       myTasks.value = data.list || []
       syncPage(assignedTaskPage, data)
       return myTasks.value
-    } catch (e: any) { notify(e.message || '加载分配给我的任务失败'); return [] } finally { assignedTaskPage.loading = false }
+    } catch (e: any) {
+      if (isCurrentListRequest(assignedTaskPage, listRequest)) notify(e.message || '加载分配给我的任务失败')
+      return []
+    } finally { finishListRequest(assignedTaskPage, listRequest) }
   }
 
   async function loadTeamTaskGroups(teamId: number | string) {
@@ -294,30 +363,43 @@ export const useAppStore = defineStore('app', () => {
 
   async function loadCreatedTasks(patch: Partial<ListState> = {}) {
     Object.assign(createdTaskPage, patch)
-    createdTaskPage.loading = true
+    const listRequest = beginListRequest(createdTaskPage)
     try {
       const data = await request<PageResult<MyTask>>(queryPath('/team-tasks/created', listParams(createdTaskPage)))
+      if (!isCurrentListRequest(createdTaskPage, listRequest)) return data.list || []
       createdTasks.value = data.list || []
       syncPage(createdTaskPage, data)
       return createdTasks.value
-    } catch (e: any) { notify(e.message || '加载我创建的任务失败'); return [] } finally { createdTaskPage.loading = false }
+    } catch (e: any) {
+      if (isCurrentListRequest(createdTaskPage, listRequest)) notify(e.message || '加载我创建的任务失败')
+      return []
+    } finally { finishListRequest(createdTaskPage, listRequest) }
   }
 
   async function loadTeamTasks(teamId: number | string, patch: Partial<ListState> = {}) {
     Object.assign(teamTaskPage, patch, { teamId: String(teamId || '') })
-    if (!teamId) { teamTasks.value = []; return [] }
-    teamTaskPage.loading = true
+    const listRequest = beginListRequest(teamTaskPage)
+    if (!teamId) {
+      teamTasks.value = []
+      finishListRequest(teamTaskPage, listRequest)
+      return []
+    }
     try {
       const data = await request<PageResult<MyTask>>(queryPath(`/teams/${teamId}/tasks`, listParams(teamTaskPage)))
+      if (!isCurrentListRequest(teamTaskPage, listRequest)) return data.list || []
       teamTasks.value = data.list || []
       syncPage(teamTaskPage, data)
       return teamTasks.value
-    } catch (e: any) { notify(e.message || '加载团队任务失败'); return [] } finally { teamTaskPage.loading = false }
+    } catch (e: any) {
+      if (isCurrentListRequest(teamTaskPage, listRequest)) notify(e.message || '加载团队任务失败')
+      return []
+    } finally { finishListRequest(teamTaskPage, listRequest) }
   }
 
   async function loadNotifications(patch: Partial<ListState> = {}, silent = false) {
     Object.assign(notificationPage, patch)
-    notificationPage.loading = !silent
+    const listRequest = beginListRequest(notificationPage)
+    if (silent) notificationPage.loading = false
     try {
       const data = await request<PageResult<Notification>>(queryPath('/notifications', {
         page: notificationPage.page,
@@ -325,31 +407,38 @@ export const useAppStore = defineStore('app', () => {
         sort: notificationPage.sort,
         is_read: notificationPage.isRead
       }))
+      if (!isCurrentListRequest(notificationPage, listRequest)) return data.list || []
       notifications.value = data.list || []
       syncPage(notificationPage, data)
       showBrowserNotifications(notifications.value)
       return notifications.value
     } catch (e: any) {
-      if (!silent) notify(e.message || '加载通知失败')
+      if (!silent && isCurrentListRequest(notificationPage, listRequest)) notify(e.message || '加载通知失败')
       return []
-    } finally { notificationPage.loading = false }
+    } finally { finishListRequest(notificationPage, listRequest) }
   }
 
   async function loadUnreadCount(silent = false) {
+    const requestVersion = ++unreadCountRequestVersion
+    const requestSession = sessionRevision
     try {
       const data = await request<{ count: number }>('/notifications/unread-count')
+      if (requestVersion !== unreadCountRequestVersion || requestSession !== sessionRevision) return today.value.unreadNotificationCount
       today.value = { ...today.value, unreadNotificationCount: Number(data.count || 0) }
       return Number(data.count || 0)
     } catch (e: any) {
-      if (!silent) notify(e.message || '加载未读通知失败')
+      if (!silent && requestVersion === unreadCountRequestVersion && requestSession === sessionRevision) notify(e.message || '加载未读通知失败')
       return today.value.unreadNotificationCount
     }
   }
 
   async function pollNotifications() {
     if (!token.value) return
+    const requestVersion = ++notificationPollVersion
+    const requestSession = sessionRevision
     try {
       const latest = await request<PageResult<Notification>>('/notifications?page=1&size=20&sort=created_desc')
+      if (requestVersion !== notificationPollVersion || requestSession !== sessionRevision) return
       showBrowserNotifications(latest.list || [])
       await Promise.all([loadNotifications({}, true), loadUnreadCount(true)])
     } catch {
@@ -367,6 +456,8 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function loadCalendar(year: number, month: number) {
+    const requestVersion = ++calendarRequestVersion
+    const requestSession = sessionRevision
     const dateFrom = `${year}-${String(month).padStart(2, '0')}-01`
     const dateTo = `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`
     try {
@@ -374,16 +465,19 @@ export const useAppStore = defineStore('app', () => {
         fetchAllPages<Schedule>('/schedules', { dateFrom, dateTo, sort: 'time_asc' }),
         fetchAllPages<MyTask>('/team-tasks/my', { dateFrom, dateTo, sort: 'time_asc' })
       ])
+      if (requestVersion !== calendarRequestVersion || requestSession !== sessionRevision) return
       calendarSchedules.value = personal
       calendarTasks.value = assigned
-    } catch (e: any) { notify(e.message || '加载日历失败') }
+    } catch (e: any) {
+      if (requestVersion === calendarRequestVersion && requestSession === sessionRevision) notify(e.message || '加载日历失败')
+    }
   }
 
   async function createSchedule() {
     if (!scheduleForm.title.trim()) return notify('请输入标题')
     if (!scheduleForm.groupId) return notify('请先创建分组')
     try {
-      await request('/schedules', { method: 'POST', body: JSON.stringify(toSchedulePayload(scheduleForm)) })
+      await request('/schedules', { method: 'POST', body: JSON.stringify(toSchedulePayload(scheduleForm, profile.value?.timezone)) })
       Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '' })
       if (taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       await loadAll(); scheduleModalOpen.value = false; notify('日程已创建')
@@ -394,20 +488,20 @@ export const useAppStore = defineStore('app', () => {
     if (!form.title.trim()) return notify('请输入标题')
     if (!form.groupId) return notify('请选择模块')
     try {
-      const payload = toSchedulePayload(form)
-      if (form.reminderChanged) payload.remindAt = form.remindAt ? new Date(form.remindAt).toISOString() : ''
-      else delete payload.remindAt
+      const payload = toSchedulePayload(form, profile.value?.timezone)
+      if (form.reminderChanged && !form.remindAt) payload.remindAt = ''
+      if (!form.reminderChanged) delete payload.remindAt
       await request(`/schedules/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
       await loadAll(); notify('日程已更新')
       return true
     } catch (e: any) { notify(e.message); return false }
   }
 
-  async function setScheduleStatus(item: Schedule, action: string) {
-    try { await request(`/schedules/${item.id}/${action}`, { method: 'PUT' }); await loadAll() } catch (e: any) { notify(e.message) }
+  async function setScheduleStatus(item: Pick<Schedule, 'id'>, action: string) {
+    try { await request(`/schedules/${item.id}/${action}`, { method: 'PUT' }); await loadAll(); return true } catch (e: any) { notify(e.message); return false }
   }
   async function deleteSchedule(id: number) {
-    try { await request(`/schedules/${id}`, { method: 'DELETE' }); await loadAll(); notify('日程已删除') } catch (e: any) { notify(e.message) }
+    try { await request(`/schedules/${id}`, { method: 'DELETE' }); await loadAll(); notify('日程已删除'); return true } catch (e: any) { notify(e.message); return false }
   }
   async function moveScheduleGroup(id: number, groupId: number | string) {
     try { await request(`/schedules/${id}/move-group`, { method: 'PUT', body: JSON.stringify({ groupId: Number(groupId) }) }); await loadAll(); notify('日程已移动') } catch (e: any) { notify(e.message) }
@@ -458,15 +552,21 @@ export const useAppStore = defineStore('app', () => {
     if (!taskForm.teamId || !taskForm.groupId || !taskForm.title.trim()) { notify('请选择团队、分组并填写标题'); return false }
     if (!taskForm.assigneeUserIds.length) { notify('请选择执行人'); return false }
     try {
-      await request('/team-tasks', { method: 'POST', body: JSON.stringify(toApiTimePayload({ ...taskForm, teamId: Number(taskForm.teamId), groupId: Number(taskForm.groupId) })) })
+      const created = await request<MyTask>('/team-tasks', { method: 'POST', body: JSON.stringify(toApiTimePayload({ ...taskForm, teamId: Number(taskForm.teamId), groupId: Number(taskForm.groupId) }, profile.value?.timezone)) })
       const teamId = taskForm.teamId
       Object.assign(taskForm, { teamId, groupId: String(teamTaskGroups.value[Number(teamId)]?.[0]?.id || ''), title: '', description: '', deadlineTime: '', startTime: '', remindAt: '', assigneeUserIds: [] })
-      await loadAll(); await Promise.all([loadTeamTaskGroups(teamId), loadTeamTasks(teamId)]); notify('团队任务已创建')
+      await loadAll(); await Promise.all([loadTeamTaskGroups(teamId), loadTeamTasks(teamId)])
+      notify(created.status === 'pending_approval' || created.approvalStatus === 'pending' ? '团队任务已提交管理员审批' : '团队任务已创建')
       return true
     } catch (e: any) { notify(e.message); return false }
   }
   async function taskAction(task: MyTask, action: string) {
-    try { await request(`/team-tasks/${task.id}/${action}`, { method: 'POST' }); await loadAll(); await Promise.all([loadTeamTaskGroups(task.teamId), loadTeamTasks(task.teamId)]) } catch (e: any) { notify(e.message) }
+    try {
+      await request(`/team-tasks/${task.id}/${action}`, { method: 'POST' })
+      await loadAll()
+      await Promise.all([loadTeamTaskGroups(task.teamId), loadTeamTasks(task.teamId)])
+      return true
+    } catch (e: any) { notify(e.message); return false }
   }
   async function moveTeamTaskGroup(task: MyTask, groupId: number | string) {
     try { await request(`/team-tasks/${task.id}/move-group`, { method: 'PUT', body: JSON.stringify({ groupId: Number(groupId) }) }); await loadAll(); await Promise.all([loadTeamTaskGroups(task.teamId), loadTeamTasks(task.teamId)]); notify('团队任务已移动') } catch (e: any) { notify(e.message) }

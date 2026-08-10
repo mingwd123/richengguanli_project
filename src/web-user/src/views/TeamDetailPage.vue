@@ -99,7 +99,7 @@ onMounted(loadMembers)
         <div class="section-head"><h2>团队任务</h2><button @click="router.push('/tasks')">任务工作台</button></div>
         <article v-for="task in tasks" :key="task.id" class="table-row" style="grid-template-columns:minmax(0,1fr) auto auto" @click="goTask(task.id)">
           <div><strong>{{ task.title }}</strong><small>{{ task.groupName || '未分组' }} · {{ formatTime(task.deadlineTime || task.startTime) }}</small></div>
-          <span :class="['tag', task.status === 'completed' ? 'blue' : task.status === 'active' ? 'warning' : 'danger']">{{ statusLabel(task.status) }}</span>
+          <span :class="['tag', task.status === 'completed' ? 'blue' : ['active', 'pending_approval', 'unassigned'].includes(task.status) ? 'warning' : 'danger']">{{ statusLabel(task.status) }}</span>
           <button @click.stop="goTask(task.id)">查看</button>
         </article>
         <p v-if="!tasks.length" class="hint" style="text-align:center;padding:24px 0">该团队暂无任务</p>

@@ -119,6 +119,7 @@ public class AuthService {
         );
     }
 
+    @Transactional
     public Map<String, Object> refreshToken(String refreshToken) {
         Long userId = jwtService.verifyRefreshToken(refreshToken);
         if (userId == null) {
@@ -131,10 +132,9 @@ public class AuthService {
             throw new BusinessException(401, "refresh token is invalid");
         }
         String jti = jwtService.getJti(refreshToken);
-        if (jti == null || !refreshTokenStore.isValid(jti, userId)) {
+        if (jti == null || !refreshTokenStore.consume(jti, userId)) {
             throw new BusinessException(401, "refresh token is invalid");
         }
-        refreshTokenStore.invalidate(jti);
         String newAccessToken = issueAccessToken(userId);
         String newRefreshToken = issueRefreshToken(userId);
         return Map.of(
@@ -273,12 +273,16 @@ public class AuthService {
     }
 
     private boolean passwordMatches(String password, String stored) {
-        if (password == null || stored == null) return false;
+        if (password == null || !isBcryptHash(stored)) return false;
         try {
-            if (passwordEncoder.matches(password, stored)) return true;
+            return passwordEncoder.matches(password, stored);
         } catch (IllegalArgumentException ignored) {
+            return false;
         }
-        return Objects.equals(password, stored);
+    }
+
+    private static boolean isBcryptHash(String value) {
+        return value != null && (value.startsWith("$2a$") || value.startsWith("$2b$") || value.startsWith("$2y$"));
     }
 
     private void createDefaultTaskGroups(long userId) {

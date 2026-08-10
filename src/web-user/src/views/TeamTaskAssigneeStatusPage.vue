@@ -2,10 +2,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { statusLabel } from '../utils/helpers'
+import { canCorrectTeamTaskAssignee, statusLabel } from '../utils/helpers'
 import type { TeamTask, TeamTaskAssignee } from '../types'
 
-const props = defineProps<{ id: string; userId: string }>()
+const props = defineProps<{ id: string; assigneeId: string }>()
 const router = useRouter()
 const store = useAppStore()
 const task = ref<TeamTask | null>(null)
@@ -14,8 +14,9 @@ const saving = ref(false)
 const selectedStatus = ref('')
 
 const assignee = computed<TeamTaskAssignee | undefined>(() =>
-  task.value?.assignees.find(item => String(item.userId) === props.userId)
+  task.value?.assignees.find(item => String(item.assigneeId) === props.assigneeId)
 )
+const canCorrect = computed(() => Boolean(task.value?.canManage && canCorrectTeamTaskAssignee(task.value)))
 
 const statusOptions = [
   { value: 'pending', label: '待接受', description: '任务已分配，等待执行人确认。' },
@@ -37,12 +38,16 @@ async function loadDetail() {
 }
 
 async function submit() {
+  if (!canCorrect.value) {
+    store.notify('当前任务不可修正执行状态')
+    return
+  }
   if (!assignee.value || !selectedStatus.value) return
   saving.value = true
   try {
-    await store.request(`/team-tasks/${props.id}/assignees/${assignee.value.userId}/status`, {
+    await store.request(`/team-tasks/${props.id}/assignees/${assignee.value.assigneeId}/status`, {
       method: 'PUT',
-      body: JSON.stringify({ assignStatus: selectedStatus.value })
+      body: JSON.stringify({ status: selectedStatus.value })
     })
     store.notify('执行状态已修正')
     router.push(`/tasks/${props.id}`)
@@ -66,6 +71,10 @@ onMounted(loadDetail)
 
     <div v-if="loading" class="hint page-state">加载中...</div>
     <div v-else-if="!task || !assignee" class="hint page-state">未找到对应执行人</div>
+    <div v-else-if="!canCorrect" class="hint page-state">
+      <p>当前任务不可修正执行状态。</p>
+      <button style="margin-top:12px" @click="goBack">返回任务详情</button>
+    </div>
 
     <section v-else class="form-card status-editor">
       <h2>修正执行状态</h2>

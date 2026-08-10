@@ -1,12 +1,30 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import PaginationBar from '../components/PaginationBar.vue'
 import { formatTime } from '../utils/helpers'
+import type { Notification } from '../types'
 
 const store = useAppStore()
+const router = useRouter()
 
 const unreadCount = computed(() => store.today.unreadNotificationCount)
+
+const notificationTypeLabels: Record<string, string> = {
+  schedule_reminder: '日程提醒',
+  team_task_assigned: '任务分配',
+  team_task_status: '任务状态',
+  team_member_joined: '成员加入',
+  task_approval_requested: '任务审批',
+  task_approved: '审批通过',
+  task_approval_rejected: '审批未通过',
+  task_unassigned: '任务待补位',
+}
+
+function notificationTypeLabel(type: string) {
+  return notificationTypeLabels[type] || type
+}
 
 function reloadNotifications() {
   store.loadNotifications({ page: 1 })
@@ -16,9 +34,17 @@ function handleReadAll() {
   store.readAll()
 }
 
-function handleClick(n: any) {
-  store.openNotificationDetail(n)
+function handleClick(n: Notification) {
   store.markNotificationRead(n)
+  if (n.relatedType === 'schedule' && n.relatedId) {
+    router.push(`/schedules/${n.relatedId}`)
+    return
+  }
+  if (n.relatedType === 'team_task' && n.relatedId) {
+    router.push(`/tasks/${n.relatedId}`)
+    return
+  }
+  store.openNotificationDetail(n)
 }
 
 function closeDetail() {
@@ -103,7 +129,7 @@ function closeDetail() {
             </div>
             <div>
               <span class="muted">类型：</span>
-              <span>{{ store.notificationDetail.type }}</span>
+              <span>{{ notificationTypeLabel(store.notificationDetail.type) }}</span>
             </div>
             <div>
               <span class="muted">已读：</span>

@@ -6,9 +6,12 @@ import DataTable from '../components/DataTable.vue'
 const store = useAdminStore()
 const showDetail = ref(false)
 const statusOptions = [
+  { value: 'pending_approval', label: '待团队审批' },
   { value: 'active', label: '进行中' },
+  { value: 'unassigned', label: '待重新分配' },
   { value: 'completed', label: '已完成' },
   { value: 'all_rejected', label: '全部拒绝' },
+  { value: 'approval_rejected', label: '审批未通过' },
   { value: 'cancelled', label: '已取消' },
 ]
 
@@ -95,7 +98,7 @@ function closeDetail() {
       </template>
       <template #actions="{ row }">
         <button @click="viewDetail(row)">详情</button>
-        <button v-if="row.status === 'active' || row.status === 'all_rejected'" class="warning" @click="store.adminTeamTaskAction(row.id, 'cancel')">取消</button>
+        <button v-if="['pending_approval', 'active', 'unassigned', 'all_rejected'].includes(row.status)" class="warning" @click="store.adminTeamTaskAction(row.id, 'cancel')">取消</button>
         <button v-if="row.status === 'cancelled'" @click="store.adminTeamTaskAction(row.id, 'restore')">恢复</button>
       </template>
     </DataTable>

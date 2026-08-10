@@ -16,3 +16,5 @@ app:
     secret: test-secret-for-dayliane-acceptance-tests
   reminder:
     scheduler-enabled: false
+  ai:
+    allowed-hosts: 8.8.8.8,127.0.0.1

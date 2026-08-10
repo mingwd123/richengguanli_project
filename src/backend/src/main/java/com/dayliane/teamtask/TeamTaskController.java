@@ -168,6 +168,24 @@ public class TeamTaskController {
         return ApiResponse.success(teamTaskService.restoreTeamTask(id, userId));
     }
 
+    @PostMapping("/team-tasks/{id}/approve")
+    public ApiResponse<Map<String, Object>> approve(HttpServletRequest request, @PathVariable long id) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.approveTeamTask(id, userId));
+    }
+
+    @PostMapping("/team-tasks/{id}/reject-approval")
+    public ApiResponse<Map<String, Object>> rejectApproval(HttpServletRequest request, @PathVariable long id) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.rejectTeamTaskApproval(id, userId));
+    }
+
+    @PostMapping("/team-tasks/{id}/resubmit-approval")
+    public ApiResponse<Map<String, Object>> resubmitApproval(HttpServletRequest request, @PathVariable long id) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(teamTaskService.resubmitTeamTaskApproval(id, userId));
+    }
+
     @PostMapping("/team-tasks/{id}/reassign")
     public ApiResponse<Map<String, Object>> reassign(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));

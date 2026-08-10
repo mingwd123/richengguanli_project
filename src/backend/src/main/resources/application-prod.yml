@@ -9,9 +9,12 @@ app:
     secret: ${JWT_SECRET}
   internal:
     reminder-scan-token: ${REMINDER_SCAN_TOKEN}
+  demo-data:
+    enabled: ${DEMO_DATA_ENABLED:false}
   ai:
     enabled: ${AI_ENABLED:false}
     provider: ${AI_PROVIDER}
     model: ${AI_MODEL}
     api-base-url: ${AI_API_BASE_URL}
     api-key: ${AI_API_KEY}
+    allowed-hosts: ${AI_ALLOWED_HOSTS:}

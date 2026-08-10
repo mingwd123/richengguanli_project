@@ -43,7 +43,7 @@ export interface TaskGroup {
 
 /* ========== 团队 ========== */
 export type TeamRole = 'owner' | 'admin' | 'member'
-export type MemberStatus = 'active' | 'inactive'
+export type MemberStatus = 'active' | 'inactive' | 'removed'
 
 export interface Team {
   id: number
@@ -68,8 +68,9 @@ export interface TeamMember {
 }
 
 /* ========== 团队任务 ========== */
-export type TeamTaskStatus = 'active' | 'completed' | 'cancelled' | 'all_rejected'
+export type TeamTaskStatus = 'pending_approval' | 'active' | 'unassigned' | 'completed' | 'cancelled' | 'all_rejected' | 'approval_rejected'
 export type AssignStatus = 'pending' | 'accepted' | 'rejected' | 'completed'
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface TeamTaskAssignee {
   assigneeId: number
@@ -79,6 +80,13 @@ export interface TeamTaskAssignee {
   assignStatus: AssignStatus
   assignRound: number
   isCurrent: boolean
+}
+
+export interface TeamTaskReassignmentCandidate {
+  assigneeId: number
+  userId: number
+  nickname: string
+  status: AssignStatus
 }
 
 export interface TeamTaskEvent {
@@ -105,7 +113,13 @@ export interface TeamTask {
   startTime: string
   endTime: string
   status: TeamTaskStatus
+  approvalStatus?: ApprovalStatus
+  reviewedBy?: number | null
+  reviewedAt?: string
+  unassignedCount?: number
+  canReview?: boolean
   assignees: TeamTaskAssignee[]
+  reassignmentCandidates?: TeamTaskReassignmentCandidate[]
   events: TeamTaskEvent[]
   pendingReminders: Reminder[]
   createdAt: string
@@ -125,9 +139,12 @@ export interface MyTask {
   deadlineTime: string
   startTime: string
   status: TeamTaskStatus
+  approvalStatus?: ApprovalStatus
+  canReview?: boolean
   description?: string
   assignStatus?: AssignStatus
   assignees?: TeamTaskAssignee[]
+  reassignmentCandidates?: TeamTaskReassignmentCandidate[]
   assigneeCount?: number
   remindAt?: string
   createdAt: string
@@ -144,7 +161,15 @@ export interface NotificationPreference {
 }
 
 /* ========== 通知 ========== */
-export type NotificationType = 'schedule_reminder' | 'team_task_assigned' | 'team_task_status' | 'team_member_joined'
+export type NotificationType =
+  | 'schedule_reminder'
+  | 'team_task_assigned'
+  | 'team_task_status'
+  | 'team_member_joined'
+  | 'task_approval_requested'
+  | 'task_approved'
+  | 'task_approval_rejected'
+  | 'task_unassigned'
 
 export interface Notification {
   id: number
@@ -159,7 +184,7 @@ export interface Notification {
   createdAt: string
 }
 
-export type ReminderStatus = 'pending' | 'sent' | 'cancelled' | 'failed'
+export type ReminderStatus = 'pending' | 'paused' | 'sent' | 'cancelled' | 'failed'
 
 export interface Reminder {
   id: number

@@ -63,7 +63,7 @@ public class UserService {
     public void updatePassword(long userId, String oldPassword, String newPassword) {
         Map<String, Object> user = requireUserEntity(userId);
         String hash = String.valueOf(user.get("passwordHash"));
-        if (!passwordEncoder.matches(oldPassword, hash) && !Objects.equals(oldPassword, hash)) throw new BusinessException(400, "old password is incorrect");
+        if (!passwordMatches(oldPassword, hash)) throw new BusinessException(400, "old password is incorrect");
         if (newPassword == null || newPassword.length() < 8 || !newPassword.matches(".*[A-Za-z].*") || !newPassword.matches(".*\\d.*")) throw new BusinessException(400, "new password format is invalid");
         jdbc.update("update `user` set password_hash=?, token_version=token_version+1 where id=?", passwordEncoder.encode(newPassword), userId);
         refreshTokenStore.invalidateAllForUser(userId);
@@ -96,6 +96,19 @@ public class UserService {
         if (v == null) return null;
         String s = String.valueOf(v);
         return s.isBlank() ? null : s;
+    }
+
+    private boolean passwordMatches(String password, String stored) {
+        if (password == null || !isBcryptHash(stored)) return false;
+        try {
+            return passwordEncoder.matches(password, stored);
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isBcryptHash(String value) {
+        return value != null && (value.startsWith("$2a$") || value.startsWith("$2b$") || value.startsWith("$2y$"));
     }
 
     private static boolean blank(String s) {

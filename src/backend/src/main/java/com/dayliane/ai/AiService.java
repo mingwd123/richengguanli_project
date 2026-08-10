@@ -13,6 +13,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.net.IDN;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,9 +26,13 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 @Service
@@ -45,23 +51,29 @@ public class AiService {
     private final String defaultModel;
     private final String defaultApiBaseUrl;
     private final String apiKey;
+    private final Set<String> allowedApiHosts;
 
     public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, ObjectMapper objectMapper,
                      @Value("${app.ai.enabled:false}") boolean defaultEnabled,
                      @Value("${app.ai.provider:}") String defaultProvider,
-                     @Value("${app.ai.model:}") String defaultModel,
-                     @Value("${app.ai.api-base-url:}") String defaultApiBaseUrl,
-                     @Value("${app.ai.api-key:}") String apiKey) {
+                      @Value("${app.ai.model:}") String defaultModel,
+                      @Value("${app.ai.api-base-url:}") String defaultApiBaseUrl,
+                      @Value("${app.ai.api-key:}") String apiKey,
+                      @Value("${app.ai.allowed-hosts:}") String allowedHosts) {
         this.jdbc = jdbc;
         this.adminService = adminService;
         this.userService = userService;
         this.objectMapper = objectMapper;
-        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
         this.defaultEnabled = defaultEnabled;
         this.defaultProvider = defaultProvider;
         this.defaultModel = defaultModel;
         this.defaultApiBaseUrl = defaultApiBaseUrl;
         this.apiKey = apiKey;
+        this.allowedApiHosts = allowedApiHosts(allowedHosts, defaultApiBaseUrl);
     }
 
     public Map<String, Object> parseSchedule(long userId, String text, boolean recordUsage) {
@@ -126,7 +138,7 @@ public class AiService {
         String provider = String.valueOf(before.get("provider"));
         String modelName = String.valueOf(before.get("modelName"));
         String apiBaseUrl = String.valueOf(before.get("apiBaseUrl"));
-        validateConfig(provider, modelName, apiBaseUrl);
+        if (enabled) validateConfig(provider, modelName, apiBaseUrl);
         jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,enabled,remark) values (?,?,?,?,?,?)",
                 provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(), enabled, limit(String.valueOf(before.get("remark")), 4000));
         Map<String, Object> after = configView();
@@ -192,8 +204,9 @@ public class AiService {
         String model = String.valueOf(config.get("modelName"));
         if (blank(apiKey) || blank(baseUrl) || blank(model)) throw new BusinessException(400, "AI configuration is incomplete");
         try {
+            URI validatedBaseUrl = validateApiBaseUrl(baseUrl);
             String body = objectMapper.writeValueAsString(Map.of("model", model, "messages", List.of(Map.of("role", "system", "content", "You are a helpful scheduling assistant. Follow the requested JSON schema exactly. All user-facing text in the JSON response must be written in Chinese."), Map.of("role", "user", "content", prompt)), "temperature", 0.2));
-            HttpRequest request = HttpRequest.newBuilder(URI.create(trimBaseUrl(baseUrl) + "/chat/completions"))
+            HttpRequest request = HttpRequest.newBuilder(URI.create(trimBaseUrl(validatedBaseUrl.toString()) + "/chat/completions"))
                     .timeout(Duration.ofSeconds(30)).header("Content-Type", "application/json").header("Authorization", "Bearer " + apiKey)
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -241,7 +254,7 @@ public class AiService {
 
     private String dailyContext(long userId) {
         List<Map<String, Object>> schedules = jdbc.query("select title,description,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime from schedule where user_id=? and deleted_at is null and status='pending' order by coalesce(deadline_time,start_time,created_at) asc limit 20", (rs, i) -> Map.of("title", rs.getString("title"), "description", nullToEmpty(rs.getString("description")), "timeType", rs.getString("timeType"), "startTime", String.valueOf(rs.getTimestamp("startTime")), "endTime", String.valueOf(rs.getTimestamp("endTime")), "deadlineTime", String.valueOf(rs.getTimestamp("deadlineTime"))), userId);
-        List<Map<String, Object>> tasks = jdbc.query("select t.title,t.description,t.start_time startTime,t.deadline_time deadlineTime from team_task t join team_task_assignee a on a.task_id=t.id where a.user_id=? and a.is_active=true and t.deleted_at is null and t.status='active' order by coalesce(t.deadline_time,t.start_time,t.created_at) asc limit 20", (rs, i) -> Map.of("title", rs.getString("title"), "description", nullToEmpty(rs.getString("description")), "startTime", String.valueOf(rs.getTimestamp("startTime")), "deadlineTime", String.valueOf(rs.getTimestamp("deadlineTime"))), userId);
+        List<Map<String, Object>> tasks = jdbc.query("select t.title,t.description,t.start_time startTime,t.deadline_time deadlineTime from team_task t join team_task_assignee a on a.task_id=t.id where a.user_id=? and a.is_active=true and a.status in ('pending','accepted') and t.approval_status='approved' and t.deleted_at is null and t.status in ('active','unassigned') order by coalesce(t.deadline_time,t.start_time,t.created_at) asc limit 20", (rs, i) -> Map.of("title", rs.getString("title"), "description", nullToEmpty(rs.getString("description")), "startTime", String.valueOf(rs.getTimestamp("startTime")), "deadlineTime", String.valueOf(rs.getTimestamp("deadlineTime"))), userId);
         try { return limit(objectMapper.writeValueAsString(Map.of("schedules", schedules, "teamTasks", tasks)), MAX_INPUT_LENGTH); }
         catch (Exception ex) { return ""; }
     }
@@ -288,7 +301,77 @@ public class AiService {
     private ZoneId userZone(long userId) { try { return ZoneId.of(String.valueOf(userService.userView(userId).getOrDefault("timezone", "Asia/Shanghai"))); } catch (Exception ignored) { return ZoneId.of("Asia/Shanghai"); } }
     private static String maskSensitive(String value) { if (value == null) return null; String masked = PHONE_PATTERN.matcher(value).replaceAll("$1****$2"); return EMAIL_PATTERN.matcher(masked).replaceAll("$1***@$2"); }
     private void requireText(String text) { if (blank(text)) throw new BusinessException(400, "text is required"); }
-    private void validateConfig(String provider, String modelName, String apiBaseUrl) { if (blank(provider) || blank(modelName) || blank(apiBaseUrl)) throw new BusinessException(400, "provider, modelName and apiBaseUrl are required"); try { URI.create(trimBaseUrl(apiBaseUrl)); } catch (Exception ex) { throw new BusinessException(400, "apiBaseUrl is invalid"); } }
+    private void validateConfig(String provider, String modelName, String apiBaseUrl) {
+        if (blank(provider) || blank(modelName) || blank(apiBaseUrl)) {
+            throw new BusinessException(400, "provider, modelName and apiBaseUrl are required");
+        }
+        validateApiBaseUrl(apiBaseUrl);
+    }
+
+    private URI validateApiBaseUrl(String apiBaseUrl) {
+        try {
+            URI uri = URI.create(trimBaseUrl(apiBaseUrl));
+            if (!"https".equalsIgnoreCase(uri.getScheme()) || blank(uri.getHost())
+                    || (uri.getPort() != -1 && uri.getPort() != 443)
+                    || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null) {
+                throw new BusinessException(400, "apiBaseUrl must be an HTTPS base URL");
+            }
+            String host = normalizeHost(uri.getHost());
+            if (!allowedApiHosts.contains(host)) {
+                throw new BusinessException(400, "apiBaseUrl host is not allowed");
+            }
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            if (addresses.length == 0 || Arrays.stream(addresses).anyMatch(AiService::isUnsafeAddress)) {
+                throw new BusinessException(400, "apiBaseUrl must resolve to a public address");
+            }
+            return uri;
+        } catch (BusinessException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new BusinessException(400, "apiBaseUrl is invalid or cannot be resolved");
+        }
+    }
+
+    private static Set<String> allowedApiHosts(String configuredHosts, String defaultApiBaseUrl) {
+        Set<String> hosts = new LinkedHashSet<>();
+        if (!blank(configuredHosts)) {
+            for (String host : configuredHosts.split(",")) {
+                if (!host.isBlank()) hosts.add(normalizeHost(host));
+            }
+        }
+        if (!blank(defaultApiBaseUrl)) {
+            try {
+                String host = URI.create(trimBaseUrl(defaultApiBaseUrl)).getHost();
+                if (!blank(host)) hosts.add(normalizeHost(host));
+            } catch (Exception ignored) {
+                // Invalid defaults are rejected before an outbound request is made.
+            }
+        }
+        return Set.copyOf(hosts);
+    }
+
+    private static String normalizeHost(String host) {
+        String normalized = host == null ? "" : host.trim();
+        while (normalized.endsWith(".")) normalized = normalized.substring(0, normalized.length() - 1);
+        return IDN.toASCII(normalized).toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isUnsafeAddress(InetAddress address) {
+        if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isLinkLocalAddress()
+                || address.isSiteLocalAddress() || address.isMulticastAddress()) {
+            return true;
+        }
+        byte[] raw = address.getAddress();
+        if (raw.length == 4) {
+            int first = raw[0] & 0xff;
+            int second = raw[1] & 0xff;
+            return first == 0
+                    || (first == 100 && second >= 64 && second <= 127)
+                    || (first == 198 && (second == 18 || second == 19))
+                    || first >= 224;
+        }
+        return raw.length == 16 && ((raw[0] & 0xfe) == 0xfc);
+    }
     private void addDateFilters(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) { if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); } if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); } }
     private Map<String, Object> safeConfig(Map<String, Object> config) { Map<String, Object> out = new LinkedHashMap<>(config); out.remove("apiKey"); out.put("apiKeyMasked", maskApiKey()); return out; }
     private String maskApiKey() { if (blank(apiKey)) return ""; return apiKey.length() <= 8 ? "****" : apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4); }

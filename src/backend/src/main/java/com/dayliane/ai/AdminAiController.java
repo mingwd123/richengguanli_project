@@ -1,6 +1,7 @@
 package com.dayliane.ai;
 
 import com.dayliane.auth.AuthService;
+import com.dayliane.admin.AdminService;
 import com.dayliane.common.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,27 +19,29 @@ import java.util.Map;
 public class AdminAiController {
     private final AiService aiService;
     private final AuthService authService;
+    private final AdminService adminService;
 
-    public AdminAiController(AiService aiService, AuthService authService) {
+    public AdminAiController(AiService aiService, AuthService authService, AdminService adminService) {
         this.aiService = aiService;
         this.authService = authService;
+        this.adminService = adminService;
     }
 
     @GetMapping("/config")
     public ApiResponse<Map<String, Object>> config(HttpServletRequest request) {
-        authService.requireAdmin(request.getHeader("Authorization"));
+        requireSuperAdmin(request);
         return ApiResponse.success(aiService.configView());
     }
 
     @PutMapping("/config")
     public ApiResponse<Map<String, Object>> updateConfig(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        long adminId = requireSuperAdmin(request);
         return ApiResponse.success(aiService.updateConfig(adminId, req, clientIp(request), userAgent(request)));
     }
 
     @PutMapping("/enabled")
     public ApiResponse<Map<String, Object>> updateEnabled(HttpServletRequest request, @RequestBody Map<String, Object> req) {
-        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        long adminId = requireSuperAdmin(request);
         Object value = req.get("enabled");
         if (value == null) throw new com.dayliane.common.BusinessException(400, "enabled is required");
         boolean enabled = value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value));
@@ -63,8 +66,14 @@ public class AdminAiController {
 
     @PostMapping("/test")
     public ApiResponse<Map<String, Object>> test(HttpServletRequest request) {
-        authService.requireAdmin(request.getHeader("Authorization"));
+        requireSuperAdmin(request);
         return ApiResponse.success(aiService.test());
+    }
+
+    private long requireSuperAdmin(HttpServletRequest request) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        adminService.requireSuperAdmin(adminId);
+        return adminId;
     }
 
     private static String userAgent(HttpServletRequest request) { return request.getHeader("User-Agent"); }

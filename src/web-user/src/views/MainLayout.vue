@@ -86,8 +86,8 @@ function openCreateSchedule() {
           </button>
           <button
             class="icon-button notification-button"
-            :title="store.browserNoticePermission === 'granted' ? '查看通知' : '开启系统通知'"
-            @click="store.browserNoticePermission === 'granted' ? router.push('/notifications') : store.requestBrowserNoticePermission()"
+            title="查看通知"
+            @click="router.push('/notifications')"
           >
             <Bell :size="18" />
             <span v-if="store.today.unreadNotificationCount" class="action-badge">{{ Math.min(store.today.unreadNotificationCount, 99) }}</span>

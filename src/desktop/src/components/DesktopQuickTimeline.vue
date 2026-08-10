@@ -232,6 +232,12 @@ const canAdminTeamTask = computed(() => {
   return team?.myRole === 'owner' || team?.myRole === 'admin'
 })
 
+const hasTeamTaskVacancies = computed(() => Number(teamTaskDetail.value?.unassignedCount || 0) > 0)
+
+function isActionableTeamTask(task: Pick<MyTask, 'status'>) {
+  return ['active', 'unassigned'].includes(task.status)
+}
+
 function roundedFuture(minutes: number) {
   const date = new Date(Date.now() + minutes * 60_000)
   date.setMinutes(Math.ceil(date.getMinutes() / 15) * 15, 0, 0)
@@ -310,7 +316,10 @@ async function loadQuickTimelineData(notifyOnError = true) {
     ])
     if (requestId !== quickDataRequest) return
     const tasks = new Map<number, MyTask>()
-    for (const task of [...pendingTasks, ...acceptedTasks]) tasks.set(task.id, task)
+    for (const task of [...pendingTasks, ...acceptedTasks]) {
+      if (!isActionableTeamTask(task) || !['pending', 'accepted'].includes(task.assignStatus || '')) continue
+      tasks.set(task.id, task)
+    }
     quickSchedules.value = schedules
     quickTasks.value = [...tasks.values()]
     quickDataLoaded.value = true
@@ -369,6 +378,7 @@ function presentationLabel(presentation: TimelinePresentationStatus) {
 function actionLabel(entry: QuickEntry) {
   if (entry.sourceType === 'schedule') return '完成'
   const task = entry.raw as MyTask
+  if (!isActionableTeamTask(task)) return ''
   if (task.assignStatus === 'pending') return '接受'
   if (task.assignStatus === 'accepted') return '完成'
   return ''
@@ -636,6 +646,7 @@ async function performAction(entry: QuickEntry) {
       return
     }
     const task = entry.raw as MyTask
+    if (!isActionableTeamTask(task)) return
     const action = task.assignStatus === 'pending' ? 'accept' : task.assignStatus === 'accepted' ? 'complete' : ''
     if (action) {
       await store.request(`/team-tasks/${task.id}/${action}`, { method: 'POST' })
@@ -693,10 +704,10 @@ async function submitCreateTeamTask() {
     const payload = taskPayload(form)
     payload.teamId = Number(form.teamId)
     payload.groupId = Number(form.groupId)
-    await store.request('/team-tasks', { method: 'POST', body: JSON.stringify(payload) })
+    const created = await store.request<TeamTask>('/team-tasks', { method: 'POST', body: JSON.stringify(payload) })
     teamCreateForm.value = newTeamTaskForm(teamId)
     await Promise.all([refreshQuickWorkspace(), loadTeamCreateContext(teamId)])
-    store.notify('团队任务已创建')
+    store.notify(created.approvalStatus === 'pending' ? '任务已提交，等待团队管理员审批' : '团队任务已创建')
     clearTeamAiState()
     await returnToTimeline()
   } catch (error: any) {
@@ -720,6 +731,7 @@ async function submitTeamBreakdown() {
 
   aiBreakdownTasks.value = aiBreakdownTasks.value.map(task => ({ ...task, error: '' }))
   let created = 0
+  let pendingApproval = 0
   const failed = new Set<QuickTeamBreakdownTask>()
   aiBreakdownSaving.value = true
   shell.setQuickTimelineExitGuard('blocked')
@@ -755,8 +767,9 @@ async function submitTeamBreakdown() {
         })
         payload.teamId = Number(base.teamId)
         payload.groupId = Number(base.groupId)
-        await store.request('/team-tasks', { method: 'POST', body: JSON.stringify(payload) })
+        const result = await store.request<TeamTask>('/team-tasks', { method: 'POST', body: JSON.stringify(payload) })
         created += 1
+        if (result.approvalStatus === 'pending') pendingApproval += 1
       } catch (error: any) {
         const numericCode = Number(error.code)
         const resultUncertain = error.code === 'NETWORK_UNAVAILABLE'
@@ -776,7 +789,8 @@ async function submitTeamBreakdown() {
     if (created) await refreshQuickWorkspace()
     aiBreakdownTasks.value = aiBreakdownTasks.value.filter(task => !task.selected || failed.has(task))
     if (failed.size) {
-      store.notify(created ? `已创建 ${created} 条，${failed.size} 条失败，请修正后重试` : '子任务创建失败，请检查提示后重试')
+      const successText = pendingApproval ? `已提交 ${created} 条待审批任务` : `已创建 ${created} 条`
+      store.notify(created ? `${successText}，${failed.size} 条失败，请修正后重试` : '子任务创建失败，请检查提示后重试')
       return
     }
 
@@ -787,7 +801,7 @@ async function submitTeamBreakdown() {
     aiBreakdownTasks.value = []
     shell.setQuickTimelineExitGuard('none')
     clearTeamAiState()
-    store.notify(`已创建 ${created} 条子任务`)
+    store.notify(pendingApproval ? `已提交 ${created} 条子任务，等待团队管理员审批` : `已创建 ${created} 条子任务`)
     await returnToTimeline()
   } finally {
     aiBreakdownSaving.value = false
@@ -1112,7 +1126,7 @@ onUnmounted(() => {
         <dl class="quick-detail-list">
           <div><dt>创建者</dt><dd>{{ teamTaskDetail.creatorName }}</dd></div>
           <div><dt>开始时间</dt><dd>{{ formatTime(teamTaskDetail.startTime) }}</dd></div>
-          <div><dt>截止时间</dt><dd>{{ formatTime(teamTaskDetail.deadlineTime) }}<small v-if="teamTaskDetail.status === 'active'">{{ countdown(teamTaskDetail.deadlineTime) }}</small></dd></div>
+          <div><dt>截止时间</dt><dd>{{ formatTime(teamTaskDetail.deadlineTime) }}<small v-if="['active', 'unassigned'].includes(teamTaskDetail.status)">{{ countdown(teamTaskDetail.deadlineTime) }}</small></dd></div>
           <div v-if="teamTaskDetail.pendingReminders?.length"><dt>下次提醒</dt><dd>{{ formatTime(teamTaskDetail.pendingReminders[0].remindAt) }}</dd></div>
         </dl>
 
@@ -1129,10 +1143,13 @@ onUnmounted(() => {
         </section>
 
         <footer class="quick-detail-actions">
-          <button v-if="myTaskAssignment?.assignStatus === 'pending'" class="primary" :disabled="actionBusy" @click="runTeamTaskAction('accept')"><Check :size="16" />接受</button>
-          <button v-if="myTaskAssignment?.assignStatus === 'accepted'" class="primary" :disabled="actionBusy" @click="runTeamTaskAction('complete')"><Check :size="16" />完成</button>
-          <button v-if="['pending', 'accepted'].includes(myTaskAssignment?.assignStatus || '')" :disabled="actionBusy" @click="runTeamTaskAction('reject')"><XCircle :size="15" />拒绝</button>
-          <button v-if="canManageTeamTask && teamTaskDetail.status === 'active'" class="danger" :disabled="actionBusy" @click="runTeamTaskAction('cancel')"><XCircle :size="15" />取消任务</button>
+          <button v-if="teamTaskDetail.canReview && teamTaskDetail.status === 'pending_approval'" class="primary" :disabled="actionBusy || hasTeamTaskVacancies" :title="hasTeamTaskVacancies ? '请先补齐执行人' : '批准安排'" @click="runTeamTaskAction('approve')"><Check :size="16" />批准安排</button>
+          <button v-if="teamTaskDetail.canReview && teamTaskDetail.status === 'pending_approval'" :disabled="actionBusy" @click="runTeamTaskAction('reject-approval')"><XCircle :size="15" />拒绝审批</button>
+          <button v-if="canManageTeamTask && teamTaskDetail.status === 'approval_rejected'" class="primary" :disabled="actionBusy" @click="runTeamTaskAction('resubmit-approval')"><RotateCcw :size="15" />重新提交审批</button>
+          <button v-if="['active', 'unassigned'].includes(teamTaskDetail.status) && myTaskAssignment?.assignStatus === 'pending'" class="primary" :disabled="actionBusy" @click="runTeamTaskAction('accept')"><Check :size="16" />接受</button>
+          <button v-if="['active', 'unassigned'].includes(teamTaskDetail.status) && myTaskAssignment?.assignStatus === 'accepted'" class="primary" :disabled="actionBusy" @click="runTeamTaskAction('complete')"><Check :size="16" />完成</button>
+          <button v-if="['active', 'unassigned'].includes(teamTaskDetail.status) && ['pending', 'accepted'].includes(myTaskAssignment?.assignStatus || '')" :disabled="actionBusy" @click="runTeamTaskAction('reject')"><XCircle :size="15" />拒绝</button>
+          <button v-if="canManageTeamTask && ['pending_approval', 'active', 'unassigned', 'all_rejected'].includes(teamTaskDetail.status)" class="danger" :disabled="actionBusy" @click="runTeamTaskAction('cancel')"><XCircle :size="15" />取消任务</button>
           <button v-if="canAdminTeamTask && teamTaskDetail.status === 'cancelled'" :disabled="actionBusy" @click="runTeamTaskAction('restore')"><RotateCcw :size="15" />恢复任务</button>
         </footer>
       </section>

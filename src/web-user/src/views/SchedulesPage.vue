@@ -6,7 +6,7 @@ import ContextMenu from '../components/ContextMenu.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
 import { MoreHorizontal } from 'lucide-vue-next'
-import { primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset } from '../utils/helpers'
+import { getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset, toDatetimeLocalInTimezone, zonedDateTimeToIso } from '../utils/helpers'
 import type { Schedule } from '../types'
 
 const router = useRouter()
@@ -25,6 +25,7 @@ const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
 const selectedReminderOffset = ref<number | null>(null)
 const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
+const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
 const reminderBaseTime = computed(() => {
   return store.scheduleForm.timeType === 'deadline_task'
     ? store.scheduleForm.deadlineTime
@@ -46,7 +47,7 @@ function applyReminderOffset(minutes: number) {
     store.notify(`请先填写${reminderBaseLabel()}`)
     return
   }
-  const reminderTime = reminderTimeForOffset(reminderBaseTime.value, minutes)
+  const reminderTime = reminderTimeForOffset(reminderBaseTime.value, minutes, userTimezone.value)
   if (!reminderTime) return
   store.scheduleForm.remindAt = toDatetimeLocal(reminderTime)
   selectedReminderOffset.value = minutes
@@ -57,12 +58,7 @@ function handleManualReminderChange() {
 }
 
 function toDatetimeLocal(value: string) {
-  const text = String(value).trim().replace(' ', 'T')
-  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) return text.slice(0, 16)
-  const date = new Date(text)
-  if (Number.isNaN(date.getTime())) return text.slice(0, 16)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return toDatetimeLocalInTimezone(value, userTimezone.value)
 }
 
 function inferGroupId(draft: any, sourceText: string) {
@@ -308,10 +304,10 @@ function dropSchedule(group: any, targetId?: number) {
 }
 async function editScheduleTime(schedule: Schedule) {
   const current = schedule.deadlineTime || schedule.endTime || schedule.startTime || ''
-  const userInput = window.prompt('请输入新时间 (格式: yyyy-MM-dd HH:mm)', current.slice(0, 16).replace('T', ' '))
+  const userInput = window.prompt('请输入新时间 (格式: yyyy-MM-dd HH:mm)', toDatetimeLocal(current).replace('T', ' '))
   if (userInput === null || !userInput.trim()) return
-  const iso = new Date(userInput.trim()).toISOString()
   try {
+    const iso = zonedDateTimeToIso(userInput.trim(), userTimezone.value)
     const payload: any = {}
     if (schedule.timeType === 'deadline_task') payload.deadlineTime = iso
     else if (schedule.timeType === 'duration_task') payload.endTime = iso

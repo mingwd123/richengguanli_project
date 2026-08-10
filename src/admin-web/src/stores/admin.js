@@ -46,7 +46,7 @@ export const useAdminStore = defineStore('admin', () => {
   const stats = computed(() => ({
     total: page.value.total,
     active: page.value.list.filter(item => item.status === 'active').length,
-    pending: page.value.list.filter(item => item.status === 'pending').length,
+    pending: page.value.list.filter(item => ['pending', 'pending_approval', 'unassigned', 'all_rejected'].includes(item.status)).length,
   }))
 
   async function request(path, options = {}) {
@@ -374,6 +374,13 @@ export const useAdminStore = defineStore('admin', () => {
   function formatValue(value) {
     if (value === true) return '是'
     if (value === false) return '否'
+    const labels = {
+      pending_approval: '待团队审批',
+      unassigned: '待重新分配',
+      all_rejected: '全部拒绝',
+      approval_rejected: '审批未通过',
+    }
+    if (typeof value === 'string' && labels[value]) return labels[value]
     return value ?? '-'
   }
 

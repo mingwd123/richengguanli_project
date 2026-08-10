@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { countdown, normalizeTimelineItem, occursOnDate, reminderTimeForOffset, sortByPriority, urgency } from './helpers'
+import { canCorrectTeamTaskAssignee, canDeleteTeamTask, countdown, normalizeTimelineItem, occursOnDate, reminderTimeForOffset, setDisplayTimezone, sortByPriority, toApiTimePayload, toDatetimeLocalInTimezone, toSchedulePayload, urgency, zonedDateTimeToIso } from './helpers'
 import { buildTimelineStats, timelinePresentationStatus, timelineTimeRange } from './timeline'
 
 describe('schedule display helpers', () => {
-  afterEach(() => vi.useRealTimers())
+  afterEach(() => {
+    vi.useRealTimers()
+    setDisplayTimezone('Asia/Shanghai')
+  })
 
   it('shows a duration task on every local date in its range', () => {
     const task = {
@@ -96,5 +99,49 @@ describe('schedule display helpers', () => {
   it('calculates a reminder time from the chosen offset', () => {
     expect(reminderTimeForOffset('2026-08-02T10:00:00+08:00', 60)).toBe('2026-08-02T01:00:00.000Z')
     expect(reminderTimeForOffset('', 60)).toBe('')
+  })
+
+  it('round-trips editor values through the configured user timezone', () => {
+    const instant = '2026-08-09T01:30:00.000Z'
+    expect(toDatetimeLocalInTimezone(instant, 'Asia/Shanghai')).toBe('2026-08-09T09:30')
+    expect(zonedDateTimeToIso('2026-08-09T09:30', 'Asia/Shanghai')).toBe(instant)
+  })
+
+  it('does not use the device timezone when editing another user timezone', () => {
+    expect(toDatetimeLocalInTimezone('2026-01-15T17:45:00.000Z', 'America/New_York')).toBe('2026-01-15T12:45')
+    expect(zonedDateTimeToIso('2026-01-15T12:45', 'America/New_York')).toBe('2026-01-15T17:45:00.000Z')
+  })
+
+  it('keeps timezone-free AI draft values as user-local editor values', () => {
+    expect(toDatetimeLocalInTimezone('2026-01-15 12:45', 'America/New_York')).toBe('2026-01-15T12:45')
+  })
+
+  it('builds schedule and team task payloads in the configured user timezone', () => {
+    setDisplayTimezone('America/New_York')
+    expect(toSchedulePayload({
+      title: 'Review', description: '', groupId: '1', groupName: 'Work', timeType: 'point_event',
+      startTime: '2026-01-15T12:45', endTime: '', deadlineTime: '', remindAt: '2026-01-15T11:45'
+    })).toMatchObject({
+      startTime: '2026-01-15T17:45:00.000Z',
+      remindAt: '2026-01-15T16:45:00.000Z'
+    })
+    expect(toApiTimePayload({ deadlineTime: '2026-01-15T12:45' })).toMatchObject({ deadlineTime: '2026-01-15T17:45:00.000Z' })
+  })
+
+  it('calculates reminder offsets from a datetime-local value in the user timezone', () => {
+    expect(reminderTimeForOffset('2026-01-15T12:45', 60, 'America/New_York')).toBe('2026-01-15T16:45:00.000Z')
+  })
+})
+
+describe('team task terminal-state guards', () => {
+  it('blocks deletion after completion', () => {
+    expect(canDeleteTeamTask({ status: 'active' })).toBe(true)
+    expect(canDeleteTeamTask({ status: 'completed' })).toBe(false)
+  })
+
+  it('allows status correction only for approved non-completed tasks', () => {
+    expect(canCorrectTeamTaskAssignee({ status: 'active', approvalStatus: 'approved' })).toBe(true)
+    expect(canCorrectTeamTaskAssignee({ status: 'completed', approvalStatus: 'approved' })).toBe(false)
+    expect(canCorrectTeamTaskAssignee({ status: 'pending_approval', approvalStatus: 'pending' })).toBe(false)
   })
 })

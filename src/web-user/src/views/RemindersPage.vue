@@ -12,16 +12,23 @@ const page = ref<PageResult<Reminder>>({ list: [], total: 0, page: 1, size: 20 }
 const status = ref('')
 const targetType = ref('')
 const totalPages = computed(() => Math.max(1, Math.ceil(page.value.total / page.value.size)))
-const statusText: Record<string, string> = { pending: '待发送', sent: '已发送', cancelled: '已取消', failed: '发送失败' }
+const statusText: Record<string, string> = { pending: '待发送', paused: '已暂停', sent: '已发送', cancelled: '已取消', failed: '发送失败' }
+let requestVersion = 0
 
 async function load(pageNumber = 1) {
+  const version = ++requestVersion
   loading.value = true
   try {
     const params = new URLSearchParams({ page: String(pageNumber), size: String(page.value.size) })
     if (status.value) params.set('status', status.value)
     if (targetType.value) params.set('targetType', targetType.value)
-    page.value = await store.request<PageResult<Reminder>>(`/reminders/my?${params.toString()}`)
-  } catch (e: any) { store.notify(e.message || '加载提醒记录失败') } finally { loading.value = false }
+    const data = await store.request<PageResult<Reminder>>(`/reminders/my?${params.toString()}`)
+    if (version === requestVersion) page.value = data
+  } catch (e: any) {
+    if (version === requestVersion) store.notify(e.message || '加载提醒记录失败')
+  } finally {
+    if (version === requestVersion) loading.value = false
+  }
 }
 
 function openTarget(item: Reminder) {
@@ -41,7 +48,7 @@ onMounted(() => load())
       </div>
       <div class="search-bar">
         <select v-model="status" aria-label="提醒状态">
-          <option value="">全部状态</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="cancelled">已取消</option><option value="failed">发送失败</option>
+          <option value="">全部状态</option><option value="pending">待发送</option><option value="paused">已暂停</option><option value="sent">已发送</option><option value="cancelled">已取消</option><option value="failed">发送失败</option>
         </select>
         <select v-model="targetType" aria-label="提醒来源">
           <option value="">全部来源</option><option value="schedule">个人日程</option><option value="team_task">团队任务</option>
@@ -51,7 +58,7 @@ onMounted(() => load())
       <template v-else>
         <article v-for="item in page.list" :key="item.id" class="table-row reminder-row" @click="openTarget(item)">
           <div><strong>{{ item.targetTitle }}</strong><small>{{ item.targetType === 'schedule' ? '个人日程' : '团队任务' }} · {{ formatTime(item.remindAt) }}</small></div>
-          <span :class="['tag', item.status === 'sent' ? 'blue' : item.status === 'pending' ? 'warning' : 'danger']">{{ statusText[item.status] || item.status }}</span>
+          <span :class="['tag', item.status === 'sent' ? 'blue' : ['pending', 'paused'].includes(item.status) ? 'warning' : 'danger']">{{ statusText[item.status] || item.status }}</span>
           <small>{{ item.sentAt ? `发送于 ${formatTime(item.sentAt)}` : `创建于 ${formatTime(item.createdAt)}` }}</small>
           <button @click.stop="openTarget(item)">查看</button>
         </article>

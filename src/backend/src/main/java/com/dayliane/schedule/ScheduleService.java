@@ -74,8 +74,15 @@ public class ScheduleService {
         if (!blank(status)) { where.append(" and status=:status"); p.addValue("status", status); }
         if (!blank(groupName)) { where.append(" and group_name=:groupName"); p.addValue("groupName", groupName); }
         if (!blank(keyword)) { where.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
-        if (!blank(dateFrom)) { where.append(" and coalesce(end_time,deadline_time,start_time,created_at) >= :dateFrom"); p.addValue("dateFrom", dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { where.append(" and coalesce(start_time,deadline_time,end_time,created_at) <= :dateTo"); p.addValue("dateTo", dateTo + " 23:59:59"); }
+        ZoneId zone = userZone(userId);
+        if (!blank(dateFrom)) {
+            where.append(" and coalesce(end_time,deadline_time,start_time,created_at) >= :dateFrom");
+            p.addValue("dateFrom", Timestamp.from(parseFilterDate(dateFrom, "dateFrom").atStartOfDay(zone).toInstant()));
+        }
+        if (!blank(dateTo)) {
+            where.append(" and coalesce(start_time,deadline_time,end_time,created_at) < :dateToExclusive");
+            p.addValue("dateToExclusive", Timestamp.from(parseFilterDate(dateTo, "dateTo").plusDays(1).atStartOfDay(zone).toInstant()));
+        }
         String order = "completed".equals(status) && "manual".equals(sort) ? "sort_order asc,id asc" : scheduleOrder(sort);
         int safePage = Math.max(1, page);
         int safeSize = Math.min(100, Math.max(1, size));
@@ -205,8 +212,9 @@ public class ScheduleService {
         jdbc.update("update schedule set title=?, description=?, group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=?, start_time=?, end_time=?, deadline_time=? where id=? and user_id=?",
                 title, description, group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, timeType, startTime, endTime, deadlineTime, id, userId);
         if (req.containsKey("remindAt") || req.containsKey("remindAts")) {
-            cancelPendingReminders("schedule", id, userId);
+            cancelRestorableReminders("schedule", id, userId);
             createScheduleReminders(userId, id, req);
+            if (!"pending".equals(current.get("status"))) pausePendingReminders("schedule", id, userId);
         }
         return requireSchedule(id, userId);
     }
@@ -215,17 +223,19 @@ public class ScheduleService {
     public void deleteSchedule(long id, long userId) {
         requireSchedule(id, userId);
         jdbc.update("update schedule set deleted_at=utc_timestamp(), deleted_by=? where id=?", userId, id);
-        cancelPendingReminders("schedule", id, userId);
+        cancelRestorableReminders("schedule", id, userId);
     }
 
     @Transactional
     public Map<String, Object> setScheduleStatus(long id, long userId, String status) {
         Map<String, Object> schedule = requireSchedule(id, userId);
         String current = String.valueOf(schedule.get("status"));
-        if ("completed".equals(current) && "completed".equals(status)) throw new BusinessException(400, "completed schedule cannot be completed again");
-        if ("cancelled".equals(current) && "completed".equals(status)) throw new BusinessException(400, "cancelled schedule cannot be completed directly");
+        if (!List.of("pending", "completed", "cancelled").contains(status)) throw new BusinessException(400, "status is invalid");
+        if (current.equals(status)) throw new BusinessException(400, "schedule is already " + status);
+        if (!"pending".equals(current) && !"pending".equals(status)) throw new BusinessException(400, "schedule must be restored before changing to " + status);
         jdbc.update("update schedule set status=? where id=? and user_id=?", status, id, userId);
-        if (List.of("completed", "cancelled").contains(status)) cancelPendingReminders("schedule", id, null);
+        if (List.of("completed", "cancelled").contains(status)) pausePendingReminders("schedule", id, userId);
+        else resumePausedReminders("schedule", id, userId);
         return Map.of("id", id, "status", status);
     }
 
@@ -420,11 +430,17 @@ public class ScheduleService {
     private void validateTaskGroupName(String name) { if (name == null || name.isBlank()) throw new BusinessException(400, "task group name is required"); if (name.length() > 50) throw new BusinessException(400, "task group name is too long"); }
     private void createScheduleReminders(long userId, long scheduleId, Map<String, Object> req) { Object arr = req.get("remindAts"); if (arr instanceof List<?> list) for (Object v : list) insertReminder(userId, "schedule", scheduleId, parseRequiredTime(v, "remindAt")); else if (req.get("remindAt") != null && !String.valueOf(req.get("remindAt")).isBlank()) insertReminder(userId, "schedule", scheduleId, parseRequiredTime(req.get("remindAt"), "remindAt")); }
     private void insertReminder(long userId, String type, long id, Timestamp remindAt) { if (remindAt != null) jdbc.update("insert into reminder (user_id,target_type,target_id,remind_at,status) values (?,?,?,?, 'pending')", userId, type, id, remindAt); }
-    private void cancelPendingReminders(String type, long id, Long userId) { if (userId == null) jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and status='pending'", type, id); else jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and user_id=? and status='pending'", type, id, userId); }
+    private void pausePendingReminders(String type, long id, long userId) { jdbc.update("update reminder set status='paused' where target_type=? and target_id=? and user_id=? and status='pending'", type, id, userId); }
+    private void resumePausedReminders(String type, long id, long userId) {
+        jdbc.update("update reminder set status='pending' where target_type=? and target_id=? and user_id=? and status='paused' and remind_at>utc_timestamp()", type, id, userId);
+        jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and user_id=? and status='paused' and remind_at<=utc_timestamp()", type, id, userId);
+    }
+    private void cancelRestorableReminders(String type, long id, long userId) { jdbc.update("update reminder set status='cancelled' where target_type=? and target_id=? and user_id=? and status in ('pending','paused')", type, id, userId); }
     private static Map<String, Object> pagedResult(List<Map<String, Object>> rows, int total, int page, int size) { return Map.of("list", rows, "total", total, "page", page, "size", size); }
     private Integer count(String sql, Object... args) { Integer n = jdbc.queryForObject(sql, Integer.class, args); return n == null ? 0 : n; }
     private static String iso(Timestamp ts) { return ts == null ? "" : OffsetDateTime.ofInstant(ts.toInstant(), ZoneOffset.UTC).toString(); }
     private static boolean blank(String s) { return s == null || s.isBlank(); }
+    private static LocalDate parseFilterDate(String value, String field) { try { return LocalDate.parse(value); } catch (DateTimeException ex) { throw new BusinessException(400, field + " is invalid"); } }
     private static String text(Map<String, Object> m, String k) { return String.valueOf(m.getOrDefault(k, "")); }
     private static String textOr(Map<String, Object> m, String k, String f) { String v = text(m, k); return blank(v) ? f : v; }
     private static String nullableText(Object v) { if (v == null) return null; String s = String.valueOf(v); return s.isBlank() ? null : s; }

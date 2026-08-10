@@ -7,8 +7,10 @@ const store = useAdminStore()
 const showDetail = ref(false)
 const statusOptions = [
   { value: 'pending', label: '待发送' },
+  { value: 'paused', label: '已暂停' },
   { value: 'sent', label: '已发送' },
   { value: 'cancelled', label: '已取消' },
+  { value: 'failed', label: '发送失败' },
 ]
 
 const columns = [

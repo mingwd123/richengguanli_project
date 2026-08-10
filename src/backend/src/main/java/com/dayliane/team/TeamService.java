@@ -2,6 +2,7 @@ package com.dayliane.team;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.PermissionService;
+import com.dayliane.teamtask.TeamTaskService;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -23,10 +24,12 @@ public class TeamService {
 
     private final JdbcTemplate jdbc;
     private final PermissionService permissionService;
+    private final TeamTaskService teamTaskService;
 
-    public TeamService(JdbcTemplate jdbc, PermissionService permissionService) {
+    public TeamService(JdbcTemplate jdbc, PermissionService permissionService, TeamTaskService teamTaskService) {
         this.jdbc = jdbc;
         this.permissionService = permissionService;
+        this.teamTaskService = teamTaskService;
     }
 
     @Transactional
@@ -121,7 +124,7 @@ public class TeamService {
         if ("owner".equals(targetRole)) throw new BusinessException(403, "owner cannot be removed");
         if (!"owner".equals(operatorRole) && !("admin".equals(operatorRole) && "member".equals(targetRole))) throw new BusinessException(403, "no permission to remove member");
         jdbc.update("update team_member set status='removed', removed_at=utc_timestamp(), removed_by=? where team_id=? and user_id=?", operatorId, teamId, targetUserId);
-        jdbc.update("update team_task_assignee set is_active=false where user_id=? and task_id in (select id from team_task where team_id=?) and is_active=true and status <> 'completed'", targetUserId, teamId);
+        teamTaskService.deactivateMemberAssignments(teamId, targetUserId, operatorId);
     }
 
     public Map<String, Object> regenerateInvite(long teamId, long userId) {
@@ -155,7 +158,7 @@ public class TeamService {
         Map<String, Object> team = requireTeam(teamId);
         team.put("role", permissionService.role(teamId, userId));
         team.put("memberCount", count("select count(*) from team_member where team_id=? and status='active'", teamId));
-        team.put("activeTaskCount", count("select count(*) from team_task where team_id=? and status='active' and deleted_at is null", teamId));
+        team.put("activeTaskCount", count("select count(*) from team_task where team_id=? and status in ('active','unassigned') and deleted_at is null", teamId));
         return team;
     }
 

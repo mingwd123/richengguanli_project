@@ -25,11 +25,13 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       REMINDER_SCAN_TOKEN: ${REMINDER_SCAN_TOKEN:?Set REMINDER_SCAN_TOKEN in .env}
+      DEMO_DATA_ENABLED: "false"
       AI_ENABLED: ${AI_ENABLED:-false}
       AI_PROVIDER: ${AI_PROVIDER:-deepseek}
       AI_MODEL: ${AI_MODEL:-deepseek-chat}
       AI_API_BASE_URL: ${AI_API_BASE_URL:-https://api.deepseek.com/v1}
       AI_API_KEY: ${AI_API_KEY:-}
+      AI_ALLOWED_HOSTS: ${AI_ALLOWED_HOSTS:-api.deepseek.com}
     depends_on:
       mysql:
         condition: service_healthy

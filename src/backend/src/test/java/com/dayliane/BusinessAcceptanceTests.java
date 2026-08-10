@@ -15,15 +15,22 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.OffsetDateTime;
 import java.time.Instant;
 import java.sql.Timestamp;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -43,10 +50,11 @@ class BusinessAcceptanceTests {
     @Autowired AiService aiService;
     @Autowired UserService userService;
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
     }
@@ -168,7 +176,7 @@ class BusinessAcceptanceTests {
         assertThat(count("select count(*) from reminder where target_type='schedule' and target_id=? and status='pending'", scheduleId)).isEqualTo(1);
 
         assertThat(scheduleService.setScheduleStatus(scheduleId, userId, "completed")).containsEntry("status", "completed");
-        assertThat(count("select count(*) from reminder where target_type='schedule' and target_id=? and status='cancelled'", scheduleId)).isEqualTo(1);
+        assertThat(count("select count(*) from reminder where target_type='schedule' and target_id=? and status='paused'", scheduleId)).isEqualTo(1);
         assertBusinessCode(400, () -> scheduleService.setScheduleStatus(scheduleId, userId, "completed"));
 
         long cancelledId = id(scheduleService.createSchedule(userId, Map.of(
@@ -251,6 +259,260 @@ class BusinessAcceptanceTests {
         assertThat(teamTaskService.cancelTeamTask(rejected, owner)).containsEntry("status", "cancelled");
         assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_cancelled'", d, rejected)).isEqualTo(1);
         assertThat(teamTaskService.restoreTeamTask(rejected, owner)).containsEntry("status", "active");
+    }
+
+    @Test
+    void memberCreatedTasksRequireManagerApprovalBeforeAssignment() {
+        long owner = register("15000000031", "Owner");
+        long creator = register("15000000032", "Creator");
+        long assignee = register("15000000033", "Assignee");
+        long teamId = id(teamService.createTeam(owner, "Approval Team"));
+        String invite = text(teamService.teamDetail(teamId, owner), "inviteCode");
+        teamService.joinTeam(creator, invite);
+        teamService.joinTeam(assignee, invite);
+
+        long taskId = id(teamTaskService.createTeamTask(creator, Map.of(
+                "teamId", teamId,
+                "title", "Needs approval",
+                "assigneeUserIds", List.of(assignee),
+                "remindAt", future(2)
+        )));
+        assertThat(teamTaskService.teamTaskDetail(taskId, creator))
+                .containsEntry("status", "pending_approval")
+                .containsEntry("approvalStatus", "pending");
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=?", taskId)).isZero();
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", assignee, taskId)).isZero();
+        assertThat(count("select count(*) from notification where user_id=? and type='task_approval_requested' and related_id=?", owner, taskId)).isEqualTo(1);
+        assertThat(teamTaskService.listMyTeamTasks(assignee, 1, 20, null, null, null, null)).containsEntry("total", 0);
+        assertBusinessCode(400, () -> teamTaskService.teamTaskAssigneeTransition(taskId, assignee, "accepted", List.of("pending")));
+
+        assertThat(teamTaskService.cancelTeamTask(taskId, creator)).containsEntry("status", "cancelled");
+        assertThat(count("select count(*) from notification where user_id=? and type='task_approval_withdrawn' and related_id=?", owner, taskId)).isEqualTo(1);
+        assertBusinessCode(400, () -> teamTaskService.approveTeamTask(taskId, owner));
+        assertBusinessCode(400, () -> teamTaskService.rejectTeamTaskApproval(taskId, owner));
+
+        assertThat(teamTaskService.restoreTeamTask(taskId, owner)).containsEntry("status", "pending_approval");
+        assertThat(teamTaskService.approveTeamTask(taskId, owner))
+                .containsEntry("status", "active")
+                .containsEntry("approvalStatus", "approved");
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", assignee, taskId)).isEqualTo(1);
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", taskId, assignee)).isEqualTo(1);
+        assertBusinessCode(400, () -> teamTaskService.approveTeamTask(taskId, owner));
+
+        long rejectedId = id(teamTaskService.createTeamTask(creator, Map.of(
+                "teamId", teamId,
+                "title", "Rejected proposal",
+                "assigneeUserIds", List.of(assignee),
+                "remindAt", future(3)
+        )));
+        assertThat(teamTaskService.rejectTeamTaskApproval(rejectedId, owner))
+                .containsEntry("status", "approval_rejected")
+                .containsEntry("approvalStatus", "rejected");
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=?", rejectedId)).isZero();
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", assignee, rejectedId)).isZero();
+        assertThat(count("select count(*) from notification where user_id=? and type='task_approval_rejected' and related_id=?", creator, rejectedId)).isEqualTo(1);
+        assertBusinessCode(400, () -> teamTaskService.cancelTeamTask(rejectedId, creator));
+        assertThat(teamTaskService.resubmitTeamTaskApproval(rejectedId, creator))
+                .containsEntry("status", "pending_approval")
+                .containsEntry("approvalStatus", "pending");
+        assertThat(count("select count(*) from notification where user_id=? and type='task_approval_requested' and related_id=?", owner, rejectedId)).isEqualTo(2);
+        assertThat(teamTaskService.approveTeamTask(rejectedId, owner)).containsEntry("status", "active");
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", assignee, rejectedId)).isEqualTo(1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void removedAssigneesCreateRepairableGapsWithoutInvalidatingOtherReminders() {
+        long owner = register("15000000034", "Owner");
+        long admin = register("15000000035", "Admin");
+        long creator = register("15000000036", "Creator");
+        long removed = register("15000000037", "Removed");
+        long survivor = register("15000000038", "Survivor");
+        long replacement = register("15000000039", "Replacement");
+        long teamId = id(teamService.createTeam(owner, "Reassignment Team"));
+        String invite = text(teamService.teamDetail(teamId, owner), "inviteCode");
+        for (long userId : List.of(admin, creator, removed, survivor, replacement)) teamService.joinTeam(userId, invite);
+        teamService.changeRole(teamId, admin, owner, "admin");
+
+        long pendingId = id(teamTaskService.createTeamTask(creator, Map.of(
+                "teamId", teamId,
+                "title", "Pending gap",
+                "assigneeUserIds", List.of(removed),
+                "remindAt", future(2)
+        )));
+        long activeId = id(teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId,
+                "title", "Active gap",
+                "assigneeUserIds", List.of(removed, survivor),
+                "remindAt", past(1)
+        )));
+
+        teamService.removeMember(teamId, removed, admin);
+        assertThat(teamTaskService.teamTaskDetail(pendingId, owner))
+                .containsEntry("status", "pending_approval")
+                .containsEntry("unassignedCount", 1);
+        assertThat(count("select count(*) from notification where user_id=? and type='task_unassigned' and related_id=?", owner, pendingId)).isEqualTo(1);
+        assertThat(teamTaskService.teamTaskDetail(activeId, owner))
+                .containsEntry("status", "unassigned")
+                .containsEntry("unassignedCount", 1);
+        assertBusinessCode(400, () -> teamTaskService.approveTeamTask(pendingId, owner));
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='cancelled'", activeId, removed)).isEqualTo(1);
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", activeId, survivor)).isEqualTo(1);
+        assertThat(reminderService.scanReminders()).isEqualTo(1);
+        assertThat(count("select count(*) from notification where user_id=? and type='reminder' and related_id=?", survivor, activeId)).isEqualTo(1);
+
+        assertThat(teamTaskService.reassignTeamTask(pendingId, owner, removed, replacement))
+                .containsEntry("status", "pending_approval")
+                .containsEntry("unassignedCount", 0);
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", replacement, pendingId)).isZero();
+        assertThat(teamTaskService.approveTeamTask(pendingId, owner)).containsEntry("status", "active");
+        assertThat(count("select count(*) from notification where user_id=? and type='task_assigned' and related_id=?", replacement, pendingId)).isEqualTo(1);
+
+        Map<String, Object> repaired = teamTaskService.reassignTeamTask(activeId, owner, removed, replacement);
+        assertThat(repaired).containsEntry("status", "active").containsEntry("unassignedCount", 0);
+        assertThat((List<Map<String, Object>>) repaired.get("reassignmentCandidates")).isEmpty();
+        assertThat(count("select count(*) from team_task_assignee where task_id=? and user_id=? and is_active=true", activeId, replacement)).isEqualTo(1);
+    }
+
+    @Test
+    void removingRejectedAssigneeDoesNotCreateAFalseVacancy() {
+        long owner = register("15000000040", "Owner");
+        long rejected = register("15000000041", "Rejected");
+        long survivor = register("15000000042", "Survivor");
+        long teamId = id(teamService.createTeam(owner, "Rejected Removal Team"));
+        String invite = text(teamService.teamDetail(teamId, owner), "inviteCode");
+        teamService.joinTeam(rejected, invite);
+        teamService.joinTeam(survivor, invite);
+
+        long taskId = id(teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId,
+                "title", "Rejected member leaves",
+                "assigneeUserIds", List.of(rejected, survivor)
+        )));
+        teamTaskService.teamTaskAssigneeTransition(taskId, rejected, "rejected", List.of("pending"));
+        teamTaskService.teamTaskAssigneeTransition(taskId, survivor, "accepted", List.of("pending"));
+        teamService.removeMember(teamId, rejected, owner);
+
+        assertThat(teamTaskService.teamTaskDetail(taskId, owner))
+                .containsEntry("status", "active")
+                .containsEntry("unassignedCount", 0);
+        assertThat(teamTaskService.teamTaskAssigneeTransition(taskId, survivor, "completed", List.of("accepted")))
+                .containsEntry("status", "completed");
+    }
+
+    @Test
+    void duplicateActiveAssigneesAreBlockedByServiceAndDatabase() {
+        long owner = register("15000000039", "Owner");
+        long first = register("15000000040", "First");
+        long second = register("15000000041", "Second");
+        long teamId = id(teamService.createTeam(owner, "Unique Assignee Team"));
+        String invite = text(teamService.teamDetail(teamId, owner), "inviteCode");
+        teamService.joinTeam(first, invite);
+        teamService.joinTeam(second, invite);
+
+        assertBusinessCode(400, () -> teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId, "title", "Duplicate input", "assigneeUserIds", List.of(first, first))));
+        long taskId = id(teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId, "title", "Unique active", "assigneeUserIds", List.of(first, second))));
+        teamTaskService.teamTaskAssigneeTransition(taskId, first, "rejected", List.of("pending"));
+        assertBusinessCode(409, () -> teamTaskService.reassignTeamTask(taskId, owner, first, second));
+
+        jdbc.update("insert into team_task_assignee (task_id,user_id,assign_round,is_active,status,assigned_by,assigned_at) values (?,?,2,false,'rejected',?,utc_timestamp())", taskId, first, owner);
+        assertThat((List<?>) teamTaskService.teamTaskDetail(taskId, owner).get("reassignmentCandidates")).isEmpty();
+        assertThatThrownBy(() -> jdbc.update("insert into team_task_assignee (task_id,user_id,assign_round,is_active,status,assigned_by,assigned_at) values (?,?,3,true,'pending',?,utc_timestamp())", taskId, first, owner))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminRestoreAndStatusCorrectionsKeepTaskStateRemindersAndActorIdentityAligned() {
+        long owner = register("15000000042", "Same Id User");
+        long assignee = register("15000000043", "Assignee");
+        long teamId = id(teamService.createTeam(owner, "Admin Repair Team"));
+        teamService.joinTeam(assignee, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        jdbc.update("insert into admin_user (id,username,password_hash,role,status) values (?,'root','Admin12345','super_admin','active')", owner);
+
+        long taskId = id(teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId,
+                "title", "Repairable task",
+                "assigneeUserIds", List.of(assignee),
+                "remindAt", future(2)
+        )));
+        assertThat(adminService.adminCancelTeamTask(owner, taskId, "127.0.0.1", "test")).containsEntry("status", "cancelled");
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and status='paused'", taskId)).isEqualTo(1);
+        assertThat(adminService.adminRestoreTeamTask(owner, taskId, "127.0.0.1", "test"))
+                .containsEntry("status", "active")
+                .containsEntry("approvalStatus", "approved");
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and status='pending'", taskId)).isEqualTo(1);
+
+        long assigneeId = jdbc.queryForObject("select id from team_task_assignee where task_id=? and user_id=? and is_active=true", Long.class, taskId, assignee);
+        teamTaskService.teamTaskAssigneeTransition(taskId, assignee, "accepted", List.of("pending"));
+        assertThat(adminService.adminCorrectAssigneeStatus(owner, taskId, assigneeId, "pending", "127.0.0.1", "test"))
+                .containsEntry("status", "active");
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", taskId, assignee)).isEqualTo(1);
+        assertThat(adminService.adminCorrectAssigneeStatus(owner, taskId, assigneeId, "accepted", "127.0.0.1", "test"))
+                .containsEntry("status", "active");
+        assertThat(teamTaskService.correctTeamTaskAssigneeStatus(taskId, assigneeId, owner, "pending"))
+                .containsEntry("status", "active");
+        assertThat(teamTaskService.correctTeamTaskAssigneeStatus(taskId, assigneeId, owner, "accepted"))
+                .containsEntry("status", "active");
+        teamTaskService.teamTaskAssigneeTransition(taskId, assignee, "completed", List.of("accepted"));
+        assertThat(teamTaskService.teamTaskDetail(taskId, owner)).containsEntry("status", "completed");
+        assertBusinessCode(400, () -> teamTaskService.cancelTeamTask(taskId, owner));
+        assertBusinessCode(400, () -> adminService.adminCancelTeamTask(owner, taskId, "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> teamTaskService.correctTeamTaskAssigneeStatus(taskId, assigneeId, owner, "pending"));
+        assertBusinessCode(400, () -> adminService.adminCorrectAssigneeStatus(owner, taskId, assigneeId, "pending", "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> teamTaskService.deleteTeamTask(taskId, owner));
+        assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and status='pending'", taskId)).isZero();
+
+        List<Map<String, Object>> events = (List<Map<String, Object>>) teamTaskService.teamTaskDetail(taskId, owner).get("events");
+        assertThat(events).anySatisfy(event -> assertThat(event)
+                .containsEntry("actorType", "admin")
+                .containsEntry("actorName", "root"));
+    }
+
+    @Test
+    void concurrentCompletionCannotBeReopenedByUserOrAdminCorrection() throws Exception {
+        long owner = register("15000000046", "Terminal Owner");
+        long assignee = register("15000000047", "Terminal Assignee");
+        long teamId = id(teamService.createTeam(owner, "Terminal Team"));
+        teamService.joinTeam(assignee, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        jdbc.update("insert into admin_user (id,username,password_hash,role,status) values (?,'terminal-admin','Admin12345','super_admin','active')", owner);
+
+        long userCorrectionTask = acceptedTask(teamId, owner, assignee, "User correction race");
+        long userAssigneeId = activeAssigneeId(userCorrectionTask, assignee);
+        assertConcurrentCompletionRejectsCorrection(userCorrectionTask, userAssigneeId,
+                () -> teamTaskService.correctTeamTaskAssigneeStatus(userCorrectionTask, userAssigneeId, owner, "pending"));
+
+        long adminCorrectionTask = acceptedTask(teamId, owner, assignee, "Admin correction race");
+        long adminAssigneeId = activeAssigneeId(adminCorrectionTask, assignee);
+        assertConcurrentCompletionRejectsCorrection(adminCorrectionTask, adminAssigneeId,
+                () -> adminService.adminCorrectAssigneeStatus(owner, adminCorrectionTask, adminAssigneeId, "pending", "127.0.0.1", "test"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void teamTaskDateFiltersUseTheRequestingUsersTimezone() {
+        long owner = authService.register("15000000044", "Abc12345", "UTC Owner", "UTC");
+        long laMember = authService.register("15000000045", "Abc12345", "LA Member", "America/Los_Angeles");
+        long teamId = id(teamService.createTeam(owner, "Timezone Filter Team"));
+        teamService.joinTeam(laMember, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        long taskId = id(teamTaskService.createTeamTask(owner, Map.of(
+                "teamId", teamId,
+                "title", "LA January first",
+                "assigneeUserIds", List.of(laMember),
+                "deadlineTime", "2026-01-02T07:30:00Z"
+        )));
+
+        List<Map<String, Object>> laJanuaryFirst = (List<Map<String, Object>>) teamTaskService
+                .listMyTeamTasks(laMember, 1, 20, null, null, "2026-01-01", "2026-01-01").get("list");
+        assertThat(laJanuaryFirst).extracting(item -> item.get("id")).containsExactly(taskId);
+        assertThat(teamTaskService.listMyTeamTasks(laMember, 1, 20, null, null, "2026-01-02", "2026-01-02"))
+                .containsEntry("total", 0);
+        assertThat(teamTaskService.listTeamTasks(teamId, laMember, 1, 20, null, null, "2026-01-01", "2026-01-01"))
+                .containsEntry("total", 1);
+        assertThat(teamTaskService.listCreatedTeamTasks(owner, 1, 20, null, null, "2026-01-02", "2026-01-02"))
+                .containsEntry("total", 1);
     }
 
     @Test
@@ -474,6 +736,58 @@ class BusinessAcceptanceTests {
 
     private long register(String phone, String nickname) {
         return authService.register(phone, "Abc12345", nickname, "Asia/Shanghai");
+    }
+
+    private long acceptedTask(long teamId, long owner, long assignee, String title) {
+        long taskId = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", title, "assigneeUserIds", List.of(assignee))));
+        teamTaskService.teamTaskAssigneeTransition(taskId, assignee, "accepted", List.of("pending"));
+        return taskId;
+    }
+
+    private long activeAssigneeId(long taskId, long userId) {
+        return jdbc.queryForObject("select id from team_task_assignee where task_id=? and user_id=? and is_active=true", Long.class, taskId, userId);
+    }
+
+    private void assertConcurrentCompletionRejectsCorrection(long taskId, long assigneeId, Runnable correction) throws Exception {
+        CompletableFuture<Throwable> correctionResult;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement lockTask = connection.prepareStatement("select id from team_task where id=? for update");
+                 PreparedStatement completeAssignee = connection.prepareStatement("update team_task_assignee set status='completed',completed_at=current_timestamp where id=? and task_id=?");
+                 PreparedStatement completeTask = connection.prepareStatement("update team_task set status='completed' where id=?")) {
+                lockTask.setLong(1, taskId);
+                lockTask.executeQuery();
+                completeAssignee.setLong(1, assigneeId);
+                completeAssignee.setLong(2, taskId);
+                completeAssignee.executeUpdate();
+                completeTask.setLong(1, taskId);
+                completeTask.executeUpdate();
+
+                CountDownLatch started = new CountDownLatch(1);
+                correctionResult = CompletableFuture.supplyAsync(() -> {
+                    started.countDown();
+                    try {
+                        correction.run();
+                        return null;
+                    } catch (Throwable ex) {
+                        return ex;
+                    }
+                });
+                assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(100);
+                assertThat(correctionResult).isNotDone();
+                connection.commit();
+            } catch (Throwable ex) {
+                connection.rollback();
+                throw ex;
+            }
+        }
+
+        Throwable error = correctionResult.get(10, TimeUnit.SECONDS);
+        assertThat(error).isInstanceOf(BusinessException.class);
+        assertThat(((BusinessException) error).getCode()).isEqualTo(400);
+        assertThat(jdbc.queryForObject("select status from team_task where id=?", String.class, taskId)).isEqualTo("completed");
+        assertThat(jdbc.queryForObject("select status from team_task_assignee where id=?", String.class, assigneeId)).isEqualTo("completed");
     }
 
     private void assertBusinessCode(int code, ThrowingRunnable runnable) {

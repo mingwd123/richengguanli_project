@@ -4,16 +4,18 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
 import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
-import type { TimelineItem } from '../types'
+import type { Schedule, TimelineItem } from '../types'
 import { timelinePresentationStatus, timelineTimeRange } from '../utils/timeline'
 import {
   ArrowRight,
   CalendarDays,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock3,
   Inbox,
+  LoaderCircle,
   Plus,
   Sparkles,
   UsersRound,
@@ -25,6 +27,7 @@ const nowTs = ref(Date.now())
 let nowTimer = 0
 const collapsedModules = ref<string[]>([])
 const collapsedTeamModules = ref<string[]>([])
+const completingScheduleId = ref<number | null>(null)
 
 const TIMELINE_LIMIT = 12
 
@@ -82,7 +85,7 @@ const scheduleModules = computed(() => groupByTaskState(
 ))
 
 const teamTaskModules = computed(() => groupByTaskState(
-  store.today.teamTasks.filter(task => !['completed', 'cancelled', 'all_rejected'].includes(task.status) && !['completed', 'rejected'].includes(task.assignStatus || '')),
+  store.today.teamTasks.filter(task => ['active', 'unassigned'].includes(task.status) && !['completed', 'rejected'].includes(task.assignStatus || '')),
   task => task.teamName || '团队任务'
 ))
 
@@ -197,7 +200,7 @@ function labelForTimelineKind(kind: string) {
 }
 
 function goSchedule(id: number) {
-  router.push(`/schedules/${id}`)
+  router.push({ name: 'ScheduleDetail', params: { id }, query: { from: 'home' } })
 }
 
 function goTask(id: number) {
@@ -207,6 +210,16 @@ function goTask(id: number) {
 function goTimelineItem(item: TimelineEntryView) {
   if (item.sourceType === 'schedule') goSchedule(item.id)
   if (item.sourceType === 'team_task') goTask(item.id)
+}
+
+async function completeSchedule(schedule: Pick<Schedule, 'id'>) {
+  if (completingScheduleId.value !== null) return
+  completingScheduleId.value = schedule.id
+  try {
+    if (await store.setScheduleStatus(schedule, 'complete')) store.notify('日程已完成')
+  } finally {
+    completingScheduleId.value = null
+  }
 }
 
 onMounted(() => {
@@ -328,7 +341,7 @@ function openCreateSchedule() {
             <article
               v-for="schedule in module.items.slice(0, 3)"
               :key="schedule.id"
-              :class="['task-card', schedulePresentationClasses(schedule)]"
+              :class="['task-card', 'home-schedule-card', schedulePresentationClasses(schedule)]"
               @click="goSchedule(schedule.id)"
               :title="`${schedule.title}\n模块: ${schedule.groupName || '未分组'}\n状态: ${schedule.status}\n时间: ${formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime)}\n${countdown(schedule.deadlineTime || schedule.endTime || schedule.startTime, schedule.timeType)}`"
             >
@@ -337,6 +350,10 @@ function openCreateSchedule() {
                 <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
               </div>
               <CountdownPill :time="schedule.deadlineTime || schedule.endTime || schedule.startTime" :time-type="schedule.timeType" :created-at="schedule.createdAt" :start-time="schedule.startTime" :end-time="schedule.endTime" :deadline-time="schedule.deadlineTime" :remind-at="schedule.remindAt" />
+              <button type="button" class="home-schedule-complete" :disabled="completingScheduleId !== null" title="完成日程" aria-label="完成日程" @click.stop="completeSchedule(schedule)">
+                <LoaderCircle v-if="completingScheduleId === schedule.id" class="spinning" :size="16" />
+                <Check v-else :size="16" />
+              </button>
             </article>
             <p v-if="module.items.length > 3" class="muted module-more">还有 {{ module.items.length - 3 }} 项日程</p>
           </template>
@@ -409,13 +426,17 @@ function openCreateSchedule() {
               <span v-else-if="item.kind === 'deadline_task'" class="timeline-deadline-node"></span>
               <span v-else :class="['line-dot', item.barClass === 'overdue' ? 'timeline-dot-overdue' : item.barClass]"></span>
             </div>
-            <div :class="['timeline-card', { 'timeline-overdue': item.barClass === 'overdue' }]">
+            <div :class="['timeline-card', { 'timeline-overdue': item.barClass === 'overdue', 'has-complete': item.sourceType === 'schedule' && item.status === 'pending' }]">
               <div class="timeline-card-top">
                 <span :class="['kind-chip', item.barClass === 'overdue' ? item.kind : item.barClass]">{{ item.badgeText }}</span>
                 <span class="timeline-summary-text">{{ item.summary }}</span>
               </div>
               <strong>{{ item.title }}</strong>
               <small>{{ item.sourceLabel }}</small>
+              <button v-if="item.sourceType === 'schedule' && item.status === 'pending'" type="button" class="home-timeline-complete" :disabled="completingScheduleId !== null" title="完成日程" aria-label="完成日程" @click.stop="completeSchedule(item)">
+                <LoaderCircle v-if="completingScheduleId === item.id" class="spinning" :size="15" />
+                <Check v-else :size="15" />
+              </button>
             </div>
           </article>
         </div>

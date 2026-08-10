@@ -141,7 +141,7 @@ public class AdminService {
         stats.put("activeUsers", count("select count(*) from `user` where status='active' and deleted_at is null"));
         stats.put("teams", count("select count(*) from team where deleted_at is null"));
         stats.put("pendingSchedules", count("select count(*) from schedule where status='pending' and deleted_at is null"));
-        stats.put("activeTeamTasks", count("select count(*) from team_task where status='active' and deleted_at is null"));
+        stats.put("activeTeamTasks", count("select count(*) from team_task where status in ('active','unassigned') and deleted_at is null"));
         stats.put("pendingReminders", count("select count(*) from reminder where status='pending'"));
         stats.put("unreadNotifications", count("select count(*) from notification where is_read=false and deleted_at is null"));
         stats.put("aiCallsToday", count("select count(*) from ai_usage_log where created_at >= current_date"));
@@ -194,7 +194,7 @@ public class AdminService {
         Map<String, Object> team = requireTeamOnly(id);
         team.put("memberCount", count("select count(*) from team_member where team_id=? and status='active'", id));
         team.put("taskCount", count("select count(*) from team_task where team_id=? and deleted_at is null", id));
-        team.put("activeTaskCount", count("select count(*) from team_task where team_id=? and status='active' and deleted_at is null", id));
+        team.put("activeTaskCount", count("select count(*) from team_task where team_id=? and status in ('active','unassigned') and deleted_at is null", id));
         team.put("members", teamMembersOnly(id));
         team.put("recentTasks", jdbc.query("select id,title,status,creator_id creatorId,deadline_time deadlineTime,created_at createdAt from team_task where team_id=? and deleted_at is null order by created_at desc,id desc limit 20", (rs, i) -> {
             Map<String, Object> task = new LinkedHashMap<>();
@@ -269,7 +269,7 @@ public class AdminService {
     public Map<String, Object> adminTeamTaskDetail(long id) {
         try {
             Map<String, Object> task = jdbc.queryForObject(
-                    "select id,team_id teamId,creator_id creatorId,title,description,group_name groupName,start_time startTime,deadline_time deadlineTime,status,created_at createdAt from team_task where id=? and deleted_at is null",
+                    "select id,team_id teamId,creator_id creatorId,title,description,group_name groupName,start_time startTime,deadline_time deadlineTime,status,approval_status approvalStatus,reviewed_by reviewedBy,reviewed_at reviewedAt,unassigned_count unassignedCount,created_at createdAt from team_task where id=? and deleted_at is null",
                     teamTaskMapper(), id);
             task.put("assignees", teamTaskAssignees(id));
             task.put("creator", userView(longValue(task.get("creatorId"))));
@@ -362,14 +362,16 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> adminCancelTeamTask(long adminId, long taskId, String ipAddress, String userAgent) {
+        lockAdminTeamTask(taskId);
         Map<String, Object> task = adminTeamTaskDetail(taskId);
         String currentStatus = String.valueOf(task.get("status"));
-        if (!"active".equals(currentStatus) && !"all_rejected".equals(currentStatus)) {
-            throw new BusinessException(400, "only active or all_rejected task can be cancelled");
+        if (!List.of("active", "all_rejected", "unassigned", "pending_approval").contains(currentStatus)) {
+            throw new BusinessException(400, "task cannot be cancelled in current status");
         }
-        jdbc.update("update team_task set status='cancelled', updated_by=? where id=? and deleted_at is null", adminId, taskId);
-        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "cancelled", "管理员取消了任务");
-        jdbc.update("update reminder set status='cancelled' where target_type='team_task' and target_id=? and status='pending'", taskId);
+        int updated = jdbc.update("update team_task set status='cancelled', updated_by=? where id=? and status=? and deleted_at is null", adminId, taskId, currentStatus);
+        if (updated == 0) throw new BusinessException(409, "task status has changed");
+        jdbc.update("insert into team_task_event (task_id, actor_id, actor_type, event_type, content) values (?,?,'admin',?,?)", taskId, adminId, "cancelled", "管理员取消了任务");
+        jdbc.update("update reminder set status='paused' where target_type='team_task' and target_id=? and status='pending'", taskId);
         Map<String, Object> after = adminTeamTaskDetail(taskId);
         writeAdminOperationLog(adminId, "cancel_team_task", "team_task", taskId, task, after, ipAddress, userAgent);
         return after;
@@ -377,12 +379,22 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> adminRestoreTeamTask(long adminId, long taskId, String ipAddress, String userAgent) {
+        lockAdminTeamTask(taskId);
         Map<String, Object> task = adminTeamTaskDetail(taskId);
         if (!"cancelled".equals(task.get("status"))) {
             throw new BusinessException(400, "only cancelled task can be restored");
         }
-        jdbc.update("update team_task set status='active', updated_by=? where id=? and deleted_at is null", adminId, taskId);
-        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "restored", "管理员恢复了任务");
+        String approvalStatus = String.valueOf(task.getOrDefault("approvalStatus", "approved"));
+        String provisionalStatus = "pending".equals(approvalStatus) ? "pending_approval" : "rejected".equals(approvalStatus) ? "approval_rejected" : "active";
+        int updated = jdbc.update("update team_task set status=?, updated_by=? where id=? and status='cancelled' and deleted_at is null", provisionalStatus, adminId, taskId);
+        if (updated == 0) throw new BusinessException(409, "task status has changed");
+        recalculateAdminTeamTaskStatus(taskId);
+        Map<String, Object> restored = adminTeamTaskDetail(taskId);
+        if ("approved".equals(restored.get("approvalStatus")) && List.of("active", "unassigned").contains(String.valueOf(restored.get("status")))) {
+            resumeAdminTeamTaskReminders(taskId);
+            instantiateAdminTeamTaskReminderPlan(taskId);
+        }
+        jdbc.update("insert into team_task_event (task_id, actor_id, actor_type, event_type, content) values (?,?,'admin',?,?)", taskId, adminId, "restored", "管理员恢复了任务");
         Map<String, Object> after = adminTeamTaskDetail(taskId);
         writeAdminOperationLog(adminId, "restore_team_task", "team_task", taskId, task, after, ipAddress, userAgent);
         return after;
@@ -391,10 +403,15 @@ public class AdminService {
     @Transactional
     public Map<String, Object> adminCorrectAssigneeStatus(long adminId, long taskId, long assigneeId, String status, String ipAddress, String userAgent) {
         if (!List.of("pending", "accepted", "rejected", "completed").contains(status)) throw new BusinessException(400, "status is invalid");
+        lockAdminTeamTask(taskId);
         Map<String, Object> before = adminTeamTaskDetail(taskId);
-        int updated = jdbc.update("update team_task_assignee set status=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=?", status, adminId, assigneeId, taskId);
+        if (!"approved".equals(before.get("approvalStatus"))) throw new BusinessException(400, "task assignment is not approved");
+        if ("completed".equals(before.get("status"))) throw new BusinessException(400, "completed task cannot be reopened");
+        int updated = jdbc.update("update team_task_assignee set status=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, adminId, assigneeId, taskId);
         if (updated == 0) throw new BusinessException(404, "assignee not found");
-        jdbc.update("insert into team_task_event (task_id, actor_id, event_type, content) values (?,?,?,?)", taskId, adminId, "status_corrected", "管理员修正执行人状态为: " + statusLabel(status));
+        recalculateAdminTeamTaskStatus(taskId);
+        syncAdminAssigneeReminders(taskId, assigneeId, status);
+        jdbc.update("insert into team_task_event (task_id, actor_id, actor_type, event_type, content) values (?,?,'admin',?,?)", taskId, adminId, "status_corrected", "管理员修正执行人状态为: " + statusLabel(status));
         Map<String, Object> after = adminTeamTaskDetail(taskId);
         writeAdminOperationLog(adminId, "correct_assignee_status", "team_task", taskId, before, after, ipAddress, userAgent);
         return after;
@@ -404,14 +421,90 @@ public class AdminService {
     public Map<String, Object> adminSetScheduleStatus(long adminId, long scheduleId, String status, String ipAddress, String userAgent) {
         if (!List.of("pending", "completed", "cancelled").contains(status)) throw new BusinessException(400, "status is invalid");
         Map<String, Object> before = adminScheduleDetail(scheduleId);
+        String currentStatus = String.valueOf(before.get("status"));
+        if (currentStatus.equals(status)) throw new BusinessException(400, "schedule already has requested status");
+        boolean validTransition = "pending".equals(currentStatus)
+                ? List.of("completed", "cancelled").contains(status)
+                : "pending".equals(status) && List.of("completed", "cancelled").contains(currentStatus);
+        if (!validTransition) throw new BusinessException(400, "invalid schedule status transition");
         int updated = jdbc.update("update schedule set status=? where id=? and deleted_at is null", status, scheduleId);
         if (updated == 0) throw new BusinessException(404, "schedule not found");
         if (List.of("completed", "cancelled").contains(status)) {
-            jdbc.update("update reminder set status='cancelled' where target_type='schedule' and target_id=? and status='pending'", scheduleId);
+            jdbc.update("update reminder set status='paused' where target_type='schedule' and target_id=? and status='pending'", scheduleId);
+        } else {
+            jdbc.update("update reminder set status='cancelled' where target_type='schedule' and target_id=? and status='paused' and remind_at<=utc_timestamp()", scheduleId);
+            jdbc.update("update reminder set status='pending' where target_type='schedule' and target_id=? and status='paused' and remind_at>utc_timestamp()", scheduleId);
         }
         Map<String, Object> after = adminScheduleDetail(scheduleId);
         writeAdminOperationLog(adminId, "set_schedule_status", "schedule", scheduleId, before, after, ipAddress, userAgent);
         return after;
+    }
+
+    private void recalculateAdminTeamTaskStatus(long taskId) {
+        Map<String, Object> task = jdbc.queryForMap("select status,approval_status approvalStatus,unassigned_count unassignedCount from team_task where id=? and deleted_at is null for update", taskId);
+        if (List.of("completed", "cancelled").contains(String.valueOf(task.get("status")))) return;
+        if ("pending".equals(task.get("approvalStatus"))) {
+            jdbc.update("update team_task set status='pending_approval' where id=?", taskId);
+            return;
+        }
+        if ("rejected".equals(task.get("approvalStatus"))) {
+            jdbc.update("update team_task set status='approval_rejected' where id=?", taskId);
+            return;
+        }
+        if (((Number) task.get("unassignedCount")).intValue() > 0) {
+            jdbc.update("update team_task set status='unassigned' where id=?", taskId);
+            return;
+        }
+        List<String> statuses = jdbc.queryForList("select status from team_task_assignee where task_id=? and is_active=true for update", String.class, taskId);
+        if (statuses.isEmpty()) {
+            boolean hasUnreplacedRejectedAssignee = count("select count(*) from team_task_assignee a where a.task_id=? and a.is_active=false and a.status='rejected' and not exists (select 1 from team_task_assignee replacement where replacement.task_id=a.task_id and ((replacement.reassigned_from_user_id=a.user_id and replacement.assign_round>a.assign_round) or (replacement.user_id=a.user_id and replacement.is_active=true)))", taskId) > 0;
+            jdbc.update("update team_task set status=? where id=?", hasUnreplacedRejectedAssignee ? "all_rejected" : "unassigned", taskId);
+            return;
+        }
+        boolean hasOpen = statuses.stream().anyMatch(value -> List.of("pending", "accepted").contains(value));
+        boolean allRejected = statuses.stream().allMatch("rejected"::equals);
+        jdbc.update("update team_task set status=? where id=?", hasOpen ? "active" : allRejected ? "all_rejected" : "completed", taskId);
+    }
+
+    private void lockAdminTeamTask(long taskId) {
+        try {
+            jdbc.queryForObject("select id from team_task where id=? and deleted_at is null for update", Long.class, taskId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "team task not found");
+        }
+    }
+
+    private void resumeAdminTeamTaskReminders(long taskId) {
+        jdbc.update("update reminder set status='cancelled' where target_type='team_task' and target_id=? and status='paused' and remind_at<=utc_timestamp()", taskId);
+        jdbc.update("update reminder set status='pending' where target_type='team_task' and target_id=? and status='paused' and remind_at>utc_timestamp()", taskId);
+    }
+
+    private void instantiateAdminTeamTaskReminderPlan(long taskId) {
+        List<Long> assigneeUserIds = jdbc.queryForList("select user_id from team_task_assignee where task_id=? and is_active=true and status in ('pending','accepted')", Long.class, taskId);
+        for (Long assigneeUserId : assigneeUserIds) instantiateAdminAssigneeReminderPlan(taskId, assigneeUserId);
+    }
+
+    private void instantiateAdminAssigneeReminderPlan(long taskId, long assigneeUserId) {
+        List<Timestamp> remindTimes = jdbc.queryForList("select remind_at from team_task_reminder_plan where task_id=? and remind_at>utc_timestamp() order by remind_at", Timestamp.class, taskId);
+        for (Timestamp remindAt : remindTimes) {
+            jdbc.update("insert into reminder (user_id,target_type,target_id,remind_at,status) select ?,'team_task',?,?,'pending' where not exists (select 1 from reminder where user_id=? and target_type='team_task' and target_id=? and remind_at=? and status in ('pending','paused'))",
+                    assigneeUserId, taskId, remindAt, assigneeUserId, taskId, remindAt);
+        }
+    }
+
+    private void syncAdminAssigneeReminders(long taskId, long assigneeId, String status) {
+        Long assigneeUserId = jdbc.queryForObject("select user_id from team_task_assignee where id=? and task_id=? and is_active=true", Long.class, assigneeId, taskId);
+        if (assigneeUserId == null) return;
+        if (List.of("rejected", "completed").contains(status)) {
+            jdbc.update("update reminder set status='cancelled' where target_type='team_task' and target_id=? and user_id=? and status in ('pending','paused')", taskId, assigneeUserId);
+        } else {
+            String taskStatus = jdbc.queryForObject("select status from team_task where id=?", String.class, taskId);
+            if (List.of("active", "unassigned").contains(taskStatus)) instantiateAdminAssigneeReminderPlan(taskId, assigneeUserId);
+        }
+        String taskStatus = jdbc.queryForObject("select status from team_task where id=?", String.class, taskId);
+        if ("completed".equals(taskStatus)) {
+            jdbc.update("update reminder set status='cancelled' where target_type='team_task' and target_id=? and status in ('pending','paused')", taskId);
+        }
     }
 
     private static String statusLabel(String status) {
@@ -557,6 +650,10 @@ public class AdminService {
             m.put("startTime", iso(rs.getTimestamp("startTime")));
             m.put("deadlineTime", iso(rs.getTimestamp("deadlineTime")));
             m.put("status", rs.getString("status"));
+            m.put("approvalStatus", rs.getString("approvalStatus"));
+            m.put("reviewedBy", rs.getObject("reviewedBy"));
+            m.put("reviewedAt", iso(rs.getTimestamp("reviewedAt")));
+            m.put("unassignedCount", rs.getInt("unassignedCount"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };

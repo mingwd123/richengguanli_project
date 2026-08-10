@@ -12,6 +12,10 @@ const typeLabel: Record<string, string> = {
   team_task_assigned: '任务分配',
   team_task_status: '任务状态',
   team_member_joined: '成员加入',
+  task_approval_requested: '任务审批',
+  task_approved: '审批通过',
+  task_approval_rejected: '审批未通过',
+  task_unassigned: '任务待补位',
 }
 </script>
 

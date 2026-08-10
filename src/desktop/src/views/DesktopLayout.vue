@@ -68,9 +68,8 @@ function handleVisibilityChange() {
   if (document.visibilityState === 'visible') pollNotifications()
 }
 
-async function handleNotificationButton() {
-  if (await nativeNotificationGranted()) router.push('/notifications')
-  else shell.toggleSettings()
+function handleNotificationButton() {
+  router.push('/notifications')
 }
 
 onMounted(() => {

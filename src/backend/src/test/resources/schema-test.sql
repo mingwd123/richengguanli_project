@@ -7,6 +7,7 @@ DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
 DROP TABLE IF EXISTS notification_preference;
 DROP TABLE IF EXISTS reminder;
+DROP TABLE IF EXISTS team_task_reminder_plan;
 DROP TABLE IF EXISTS team_task_assignee;
 DROP TABLE IF EXISTS team_task;
 DROP TABLE IF EXISTS schedule;
@@ -128,6 +129,10 @@ CREATE TABLE team_task (
   start_time DATETIME,
   deadline_time DATETIME,
   status VARCHAR(30) NOT NULL DEFAULT 'active',
+  approval_status VARCHAR(20) NOT NULL DEFAULT 'approved',
+  reviewed_by BIGINT,
+  reviewed_at DATETIME,
+  unassigned_count INT NOT NULL DEFAULT 0,
   updated_by BIGINT,
   time_updated_at DATETIME,
   deleted_at DATETIME,
@@ -142,6 +147,7 @@ CREATE TABLE team_task_assignee (
   user_id BIGINT NOT NULL,
   assign_round INT NOT NULL DEFAULT 1,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  active_user_id BIGINT GENERATED ALWAYS AS (CASE WHEN is_active THEN user_id ELSE NULL END),
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
   accepted_at DATETIME,
   rejected_at DATETIME,
@@ -153,16 +159,25 @@ CREATE TABLE team_task_assignee (
   status_updated_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE (task_id, user_id, assign_round)
+  UNIQUE (task_id, user_id, assign_round),
+  UNIQUE (task_id, active_user_id)
 );
 
 CREATE TABLE team_task_event (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
   task_id BIGINT NOT NULL,
   actor_id BIGINT,
+  actor_type VARCHAR(20) NOT NULL DEFAULT 'user',
   event_type VARCHAR(50) NOT NULL,
   content VARCHAR(500),
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team_task_reminder_plan (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  remind_at DATETIME NOT NULL,
+  UNIQUE (task_id, remind_at)
 );
 
 CREATE TABLE notification (

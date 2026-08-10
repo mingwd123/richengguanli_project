@@ -2,9 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import type { TeamMember, TeamTask, TeamTaskAssignee } from '../types'
+import type { TeamMember, TeamTask, TeamTaskAssignee, TeamTaskReassignmentCandidate } from '../types'
 
-const props = defineProps<{ id: string; userId: string }>()
+const props = defineProps<{ id: string; assigneeId: string }>()
 const router = useRouter()
 const store = useAppStore()
 const task = ref<TeamTask | null>(null)
@@ -13,10 +13,13 @@ const selectedUserId = ref<number | null>(null)
 const loading = ref(false)
 const saving = ref(false)
 
-const originalAssignee = computed<TeamTaskAssignee | undefined>(() =>
-  task.value?.assignees.find(item => String(item.userId) === props.userId)
+const originalAssignee = computed<TeamTaskAssignee | TeamTaskReassignmentCandidate | undefined>(() =>
+  task.value?.assignees.find(item => String(item.assigneeId) === props.assigneeId)
+    || task.value?.reassignmentCandidates?.find(item => String(item.assigneeId) === props.assigneeId)
 )
-const selectableMembers = computed(() => members.value.filter(member => member.status === 'active' && member.userId !== Number(props.userId)))
+const currentAssigneeUserIds = computed(() => new Set(task.value?.assignees.filter(item => item.isCurrent).map(item => item.userId) || []))
+const selectableMembers = computed(() => members.value.filter(member => member.status === 'active' && !currentAssigneeUserIds.value.has(member.userId)))
+const fillingVacancy = computed(() => Boolean(task.value?.reassignmentCandidates?.some(item => String(item.assigneeId) === props.assigneeId)))
 
 async function loadData() {
   loading.value = true
@@ -42,8 +45,8 @@ async function submit() {
         newAssigneeUserId: selectedUserId.value
       })
     })
-    store.notify('任务已重新分配')
-    router.push(`/tasks/${props.id}`)
+    store.notify(fillingVacancy.value ? '任务补位完成' : '任务已重新分配')
+    await router.push(`/tasks/${props.id}`)
   } catch (e: any) {
     store.notify(e.message || '重新分配失败')
   } finally {
@@ -66,8 +69,8 @@ onMounted(loadData)
     <div v-else-if="!task || !originalAssignee" class="hint page-state">未找到需重新分配的执行人</div>
 
     <section v-else class="form-card reassign-editor">
-      <h2>重新分配任务</h2>
-      <p class="muted">原执行人 <strong>{{ originalAssignee.nickname }}</strong> 已拒绝任务，请从团队成员中选择新的执行人。</p>
+      <h2>{{ fillingVacancy ? '为任务补位' : '重新分配任务' }}</h2>
+      <p class="muted">原执行人 <strong>{{ originalAssignee.nickname }}</strong>{{ fillingVacancy ? ' 已离开团队' : ' 已拒绝任务' }}，请从团队成员中选择新的执行人。</p>
 
       <div class="member-options">
         <label v-for="member in selectableMembers" :key="member.userId" :class="['member-option', { selected: selectedUserId === member.userId }]">
@@ -84,7 +87,7 @@ onMounted(loadData)
       <div class="form-actions">
         <button @click="goBack">取消</button>
         <button class="primary" :disabled="saving || !selectedUserId" @click="submit">
-          {{ saving ? '提交中...' : '确认重新分配' }}
+          {{ saving ? '提交中...' : fillingVacancy ? '确认补位' : '确认重新分配' }}
         </button>
       </div>
     </section>

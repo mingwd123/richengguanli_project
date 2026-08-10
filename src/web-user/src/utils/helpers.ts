@@ -14,6 +14,70 @@ export function setDisplayTimezone(timezone: string) {
 
 export function getDisplayTimezone() { return displayTimezone }
 
+function dateTimePartsInTimezone(value: number | string | Date, timezone: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date)
+  const part = (type: string) => Number(parts.find(item => item.type === type)?.value || 0)
+  return {
+    year: part('year'),
+    month: part('month'),
+    day: part('day'),
+    hour: part('hour'),
+    minute: part('minute'),
+    second: part('second')
+  }
+}
+
+export function toDatetimeLocalInTimezone(value: string, timezone = displayTimezone) {
+  if (!value) return ''
+  const text = String(value).trim().replace(' ', 'T')
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) return text.slice(0, 16)
+  const parts = dateTimePartsInTimezone(text, timezone)
+  if (!parts) return String(value).trim().replace(' ', 'T').slice(0, 16)
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}`
+}
+
+function timezoneOffsetAt(timestamp: number, timezone: string) {
+  const parts = dateTimePartsInTimezone(timestamp, timezone)
+  if (!parts) return 0
+  const zonedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second)
+  return zonedAsUtc - Math.floor(timestamp / 1000) * 1000
+}
+
+export function zonedDateTimeToIso(value: string, timezone = displayTimezone) {
+  if (!value) return ''
+  const text = String(value).trim().replace(' ', 'T')
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) return new Date(text).toISOString()
+
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/)
+  if (!match) return new Date(text).toISOString()
+  const [, year, month, day, hour, minute, second = '0'] = match
+  const desiredAsUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second))
+  let timestamp = desiredAsUtc
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const adjusted = desiredAsUtc - timezoneOffsetAt(timestamp, timezone)
+    if (adjusted === timestamp) break
+    timestamp = adjusted
+  }
+
+  const localValue = `${year}-${month}-${day}T${hour}:${minute}`
+  if (toDatetimeLocalInTimezone(new Date(timestamp).toISOString(), timezone) !== localValue) {
+    throw new RangeError('该时间在当前用户时区不存在')
+  }
+  return new Date(timestamp).toISOString()
+}
+
 export function dateKeyInTimezone(value: number | string | Date = new Date(), timezone = displayTimezone) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
@@ -27,29 +91,30 @@ export function currentDateParts(timezone = displayTimezone) {
   return { year, month, day }
 }
 
-export function toSchedulePayload(input: ScheduleForm) {
+export function toSchedulePayload(input: ScheduleForm, timezone = displayTimezone) {
   const out: Record<string, any> = { title: input.title, description: input.description || '', groupId: Number(input.groupId) || null, groupName: input.groupName, timeType: input.timeType, startTime: '', endTime: '', deadlineTime: '' }
-  if (input.timeType === 'point_event') out.startTime = toIso(input.startTime)
-  if (input.timeType === 'deadline_task') out.deadlineTime = toIso(input.deadlineTime)
+  if (input.timeType === 'point_event') out.startTime = toIso(input.startTime, timezone)
+  if (input.timeType === 'deadline_task') out.deadlineTime = toIso(input.deadlineTime, timezone)
   if (input.timeType === 'duration_task') {
-    out.startTime = toIso(input.startTime)
-    out.endTime = toIso(input.endTime)
+    out.startTime = toIso(input.startTime, timezone)
+    out.endTime = toIso(input.endTime, timezone)
   }
-  if (input.remindAt) out.remindAt = toIso(input.remindAt)
+  if (input.remindAt) out.remindAt = toIso(input.remindAt, timezone)
   return out
 }
 
-export function toIso(value: string) { return value ? new Date(value).toISOString() : '' }
+export function toIso(value: string, timezone = displayTimezone) { return zonedDateTimeToIso(value, timezone) }
 
-export function reminderTimeForOffset(baseTime: string, offsetMinutes: number) {
-  const base = new Date(baseTime).getTime()
-  if (!baseTime || Number.isNaN(base) || !Number.isInteger(offsetMinutes) || offsetMinutes <= 0) return ''
+export function reminderTimeForOffset(baseTime: string, offsetMinutes: number, timezone = displayTimezone) {
+  if (!baseTime || !Number.isInteger(offsetMinutes) || offsetMinutes <= 0) return ''
+  const base = new Date(zonedDateTimeToIso(baseTime, timezone)).getTime()
+  if (Number.isNaN(base)) return ''
   return new Date(base - offsetMinutes * 60_000).toISOString()
 }
 
-export function toApiTimePayload(input: Record<string, any>) {
+export function toApiTimePayload(input: Record<string, any>, timezone = displayTimezone) {
   const out = { ...input }
-  for (const key of ['startTime', 'endTime', 'deadlineTime', 'remindAt']) if (out[key]) out[key] = new Date(out[key]).toISOString()
+  for (const key of ['startTime', 'endTime', 'deadlineTime', 'remindAt']) if (out[key]) out[key] = zonedDateTimeToIso(out[key], timezone)
   return out
 }
 
@@ -136,9 +201,19 @@ export function timeTypeLabel(t: string) {
 
 export function statusLabel(s: string) {
   const map: Record<string, string> = {
-    pending: '待办', completed: '已完成', cancelled: '已取消',
-    active: '进行中', all_rejected: '全部拒绝',
+    pending: '待办', paused: '已暂停', completed: '已完成', cancelled: '已取消',
+    active: '进行中', unassigned: '待重新分配', all_rejected: '全部拒绝',
+    pending_approval: '待管理员审批', approval_rejected: '审批未通过',
+    approved: '审批通过',
     accepted: '已接受', rejected: '已拒绝'
   }
   return map[s] || s
+}
+
+export function canDeleteTeamTask(task: { status: string } | null | undefined) {
+  return Boolean(task && task.status !== 'completed')
+}
+
+export function canCorrectTeamTaskAssignee(task: { status: string; approvalStatus?: string } | null | undefined) {
+  return Boolean(task && task.status !== 'completed' && task.approvalStatus === 'approved')
 }

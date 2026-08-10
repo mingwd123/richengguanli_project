@@ -25,11 +25,10 @@ public class RefreshTokenStore {
                 jti, userId, Timestamp.from(Instant.now().plusSeconds(REFRESH_TTL_SECONDS)));
     }
 
-    public boolean isValid(String jti, long userId) {
-        Integer count = jdbc.queryForObject(
-                "select count(*) from auth_refresh_token where jti=? and user_id=? and expires_at>utc_timestamp()",
-                Integer.class, jti, userId);
-        return count != null && count > 0;
+    public boolean consume(String jti, long userId) {
+        return jdbc.update(
+                "delete from auth_refresh_token where jti=? and user_id=? and expires_at>utc_timestamp()",
+                jti, userId) == 1;
     }
 
     public void invalidate(String jti) {

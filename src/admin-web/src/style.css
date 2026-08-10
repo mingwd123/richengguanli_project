@@ -507,6 +507,8 @@ input:focus, select:focus, textarea:focus {
 .resource-page .status-active, .resource-page .status-completed, .tag.blue { color: var(--admin-success) !important; background: var(--admin-success-soft) !important; }
 .resource-page .status-disabled, .resource-page .status-cancelled, .tag.danger { color: var(--admin-danger) !important; background: var(--admin-danger-soft) !important; }
 .resource-page .status-pending { color: var(--admin-amber) !important; background: var(--admin-amber-soft) !important; }
+.resource-page .status-pending_approval, .resource-page .status-unassigned { color: var(--admin-amber) !important; background: var(--admin-amber-soft) !important; }
+.resource-page .status-all_rejected, .resource-page .status-approval_rejected { color: var(--admin-danger) !important; background: var(--admin-danger-soft) !important; }
 
 .form-card, .create-panel {
   border-color: var(--admin-border-soft) !important;

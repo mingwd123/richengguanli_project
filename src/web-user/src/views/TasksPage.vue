@@ -7,12 +7,13 @@ import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
 import TaskTimeline from '../components/TaskTimeline.vue'
 import { MoreHorizontal, Plus, Sparkles } from 'lucide-vue-next'
-import { statusLabel, isOverdue, normalizeTimelineItem } from '../utils/helpers'
+import { canDeleteTeamTask, getDisplayTimezone, statusLabel, isOverdue, normalizeTimelineItem, toDatetimeLocalInTimezone, zonedDateTimeToIso } from '../utils/helpers'
 import type { MyTask, TeamMember } from '../types'
 
 const router = useRouter()
 const store = useAppStore()
 const teamMembers = ref<TeamMember[]>([])
+let teamMembersRequestVersion = 0
 const collapsedGroups = ref<string[]>([])
 const contextMenu = ref<any>(null)
 const draggingTask = ref<{ id: number; groupId: number | null; teamId: number } | null>(null)
@@ -23,6 +24,7 @@ const filterDateTo = ref('')
 const taskView = ref<'assigned' | 'created' | 'team'>('assigned')
 const teamScopeId = ref('')
 const selectedTeamGroups = computed(() => store.teamTaskGroups[Number(store.taskForm.teamId)] || [])
+const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
 const visibleTasks = computed(() => taskView.value === 'assigned' ? store.myTasks : taskView.value === 'created' ? store.createdTasks : store.teamTasks)
 const filteredMyTasks = computed(() => visibleTasks.value)
 const activeTaskPage = computed(() => taskView.value === 'assigned' ? store.assignedTaskPage : taskView.value === 'created' ? store.createdTaskPage : store.teamTaskPage)
@@ -65,7 +67,7 @@ const taskGroups = computed(() => {
 })
 
 const taskTimelineItems = computed(() => visibleTasks.value
-  .filter(task => !isDoneTask(task) && task.status !== 'cancelled')
+  .filter(task => !isDoneTask(task) && ['active', 'unassigned'].includes(task.status))
   .map(task => normalizeTimelineItem(task, 'team_task'))
   .filter(item => item.sortAt)
   .sort((a, b) => new Date(a.sortAt).getTime() - new Date(b.sortAt).getTime()))
@@ -80,8 +82,20 @@ const selectableMembers = computed(() => teamMembers.value.filter(member => memb
 const canManageTask = (task: MyTask) => task.creatorId === store.profile?.id || ['owner', 'admin'].includes(store.teams.find(team => team.id === task.teamId)?.myRole || '')
 const canManageTeam = (teamId: number) => ['owner', 'admin'].includes(store.teams.find(team => team.id === teamId)?.myRole || '')
 const canRestoreTask = (task: MyTask) => canManageTeam(task.teamId)
-const isDoneTask = (task: MyTask) => taskView.value === 'assigned' ? task.assignStatus === 'completed' : task.status === 'completed'
+const canCancelTask = (task: MyTask) => canManageTask(task) && ['pending_approval', 'active', 'unassigned', 'all_rejected'].includes(task.status)
+const canOperateAssignment = (task: MyTask) => ['active', 'unassigned'].includes(task.status)
+const isDoneTask = (task: MyTask) => task.status === 'completed' || (taskView.value === 'assigned' && task.assignStatus === 'completed')
 const canSortTask = (task: MyTask, group: any) => group.groupId === -1 ? task.status === 'completed' && canManageTeam(task.teamId) : canManageTask(task)
+const taskDisplayStatus = (task: MyTask) => {
+  if (taskView.value !== 'assigned') return task.status
+  return task.status === 'active' ? (task.assignStatus || task.status) : task.status
+}
+const taskStatusClass = (task: MyTask) => {
+  const status = taskDisplayStatus(task)
+  if (['rejected', 'all_rejected', 'approval_rejected', 'cancelled'].includes(status)) return 'danger'
+  if (['accepted', 'completed'].includes(status)) return 'blue'
+  return 'warning'
+}
 
 watch(() => store.teams.map(team => team.id).join(','), () => {
   if (!teamScopeId.value && store.teams[0]) teamScopeId.value = String(store.teams[0].id)
@@ -89,21 +103,26 @@ watch(() => store.teams.map(team => team.id).join(','), () => {
 
 watch([taskView, teamScopeId], async ([view, teamId]) => {
   filterStatus.value = ''
-  if (view === 'assigned') await store.loadAssignedTasks()
-  if (view === 'created') await store.loadCreatedTasks()
-  if (view === 'team' && teamId) await store.loadTeamTasks(teamId)
+  const patch = { page: 1, keyword: filterKeyword.value, status: '', dateFrom: filterDateFrom.value, dateTo: filterDateTo.value }
+  if (view === 'assigned') await store.loadAssignedTasks(patch)
+  if (view === 'created') await store.loadCreatedTasks(patch)
+  if (view === 'team' && teamId) await store.loadTeamTasks(teamId, patch)
 }, { immediate: true })
 
 watch(() => store.taskForm.teamId, async teamId => {
+  const requestVersion = ++teamMembersRequestVersion
   store.taskForm.assigneeUserIds = []
   store.taskForm.groupId = ''
   teamMembers.value = []
   if (!teamId) return
   await store.loadTeamTaskGroups(teamId)
+  if (requestVersion !== teamMembersRequestVersion) return
   try {
     const data = await store.request<{ list: TeamMember[] }>(`/teams/${teamId}/members`)
-    teamMembers.value = data.list || []
-  } catch (e: any) { store.notify(e.message || '加载成员失败') }
+    if (requestVersion === teamMembersRequestVersion) teamMembers.value = data.list || []
+  } catch (e: any) {
+    if (requestVersion === teamMembersRequestVersion) store.notify(e.message || '加载成员失败')
+  }
 }, { immediate: true })
 
 watch(() => [...new Set(visibleTasks.value.map(task => task.teamId))].join(','), teamIds => {
@@ -163,12 +182,7 @@ function cancelAiBreakdown() {
   aiBreakdownResult.value = ''
 }
 function toDatetimeLocal(value: string) {
-  const text = String(value).trim().replace(' ', 'T')
-  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) return text.slice(0, 16)
-  const date = new Date(text)
-  if (Number.isNaN(date.getTime())) return text.slice(0, 16)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return toDatetimeLocalInTimezone(value, userTimezone.value)
 }
 
 async function createTaskWithShortcut() {
@@ -302,15 +316,16 @@ async function moveTaskToGroup(task: MyTask) {
   await store.moveTeamTaskGroup(task, group.id)
 }
 async function deleteTask(task: MyTask) {
+  if (!canDeleteTeamTask(task)) { store.notify('已完成任务不能删除'); return }
   if (!window.confirm(`确定删除任务「${task.title}」吗？`)) return
   try { await store.request(`/team-tasks/${task.id}`, { method: 'DELETE' }); await store.loadAll(); store.notify('团队任务已删除') } catch (e: any) { store.notify(e.message || '删除失败') }
 }
 async function editTaskDeadline(task: MyTask) {
   const current = task.deadlineTime || ''
-  const userInput = window.prompt('请输入新截止时间 (格式: yyyy-MM-dd HH:mm)', current.slice(0, 16).replace('T', ' '))
+  const userInput = window.prompt('请输入新截止时间 (格式: yyyy-MM-dd HH:mm)', toDatetimeLocal(current).replace('T', ' '))
   if (userInput === null || !userInput.trim()) return
   try {
-    await store.request(`/team-tasks/${task.id}/time`, { method: 'PUT', body: JSON.stringify({ deadlineTime: new Date(userInput.trim()).toISOString() }) })
+    await store.request(`/team-tasks/${task.id}/time`, { method: 'PUT', body: JSON.stringify({ deadlineTime: zonedDateTimeToIso(userInput.trim(), userTimezone.value) }) })
     await store.loadAll()
     store.notify('截止时间已更新')
   } catch (e: any) { store.notify(e.message || '更新失败') }
@@ -338,17 +353,17 @@ const contextItems = computed(() => {
   return [
     { label: '查看详情', action: 'detail' },
     { label: '编辑任务', action: 'edit', disabled: !canManageTask(task) },
-    { label: '接受', action: 'accept', disabled: task.assignStatus !== 'pending' },
-    { label: '拒绝', action: 'reject', disabled: task.assignStatus !== 'pending' },
-    { label: '完成', action: 'complete', disabled: task.assignStatus !== 'accepted' },
-    { label: '取消任务', action: 'cancel', disabled: !canManageTask(task) || task.status !== 'active' },
+    { label: '接受', action: 'accept', disabled: !canOperateAssignment(task) || task.assignStatus !== 'pending' },
+    { label: '拒绝', action: 'reject', disabled: !canOperateAssignment(task) || task.assignStatus !== 'pending' },
+    { label: '完成', action: 'complete', disabled: !canOperateAssignment(task) || task.assignStatus !== 'accepted' },
+    { label: '取消任务', action: 'cancel', disabled: !canCancelTask(task) },
     { label: '恢复任务', action: 'restore', disabled: !canRestoreTask(task) || task.status !== 'cancelled' },
     { separator: true as any, label: '' },
     { label: '修改截止时间', action: 'edit-deadline', disabled: !canManageTask(task) },
     { label: '移除截止时间', action: 'remove-deadline', disabled: !canManageTask(task) },
     { label: '移动到分组', action: 'move-group', disabled: !canManageTask(task) || task.status === 'completed' },
     { separator: true as any, label: '' },
-    { label: '删除任务', action: 'delete', disabled: !canManageTask(task) }
+    { label: '删除任务', action: 'delete', disabled: !canManageTask(task) || !canDeleteTeamTask(task) }
   ]
 })
 </script>
@@ -369,7 +384,7 @@ const contextItems = computed(() => {
         <select v-model="filterStatus">
           <option value="">全部状态</option>
           <template v-if="taskView === 'assigned'"><option value="pending">待接受</option><option value="accepted">已接受</option><option value="rejected">已拒绝</option><option value="completed">已完成</option></template>
-          <template v-else><option value="active">进行中</option><option value="cancelled">已取消</option></template>
+          <template v-else><option value="pending_approval">待管理员审批</option><option value="active">进行中</option><option value="unassigned">待重新分配</option><option value="completed">已完成</option><option value="cancelled">已取消</option><option value="approval_rejected">审批未通过</option></template>
         </select>
         <input v-model="filterDateFrom" type="date" title="开始日期" />
         <input v-model="filterDateTo" type="date" title="截止日期" />
@@ -412,7 +427,7 @@ const contextItems = computed(() => {
       <section v-for="group in taskGroups" :key="`${group.teamId}:${group.groupId}`" class="group-block" @dragover.prevent @drop="dropTask(group)">
         <div class="group-title" @contextmenu.prevent="openTeamGroupMenu($event, group)">
           <button class="plain-button" @click="toggleGroup(`${group.teamId}:${group.groupId}`)"><span>{{ collapsedGroups.includes(`${group.teamId}:${group.groupId}`) ? '▸' : '▾' }} {{ group.teamName }} · {{ group.groupName }}</span></button>
-          <div class="group-actions"><em>{{ group.items.filter(item => !isDoneTask(item) && item.status === 'active').length }}</em><button v-if="group.groupId > 0 && canManageTeam(group.teamId)" class="icon-button row-menu-button mobile-only" title="更多分组操作" aria-label="更多分组操作" @click="openTeamGroupButtonMenu($event, group)"><MoreHorizontal :size="18" /></button></div>
+          <div class="group-actions"><em>{{ group.items.filter(item => !isDoneTask(item) && ['active', 'unassigned'].includes(item.status)).length }}</em><button v-if="group.groupId > 0 && canManageTeam(group.teamId)" class="icon-button row-menu-button mobile-only" title="更多分组操作" aria-label="更多分组操作" @click="openTeamGroupButtonMenu($event, group)"><MoreHorizontal :size="18" /></button></div>
         </div>
         <div v-if="!collapsedGroups.includes(`${group.teamId}:${group.groupId}`)">
           <article
@@ -435,14 +450,14 @@ const contextItems = computed(() => {
               </template>
               <small v-if="(task.assignees || []).length > 4">+{{ (task.assignees || []).length - 4 }}</small>
             </div>
-            <CountdownPill v-if="task.status === 'active' && !['completed', 'rejected'].includes(task.assignStatus || '')" :time="task.deadlineTime || task.startTime" :created-at="task.createdAt" :start-time="task.startTime" :deadline-time="task.deadlineTime" :remind-at="task.remindAt" />
-            <span :class="['tag', task.assignStatus === 'accepted' ? 'blue' : task.assignStatus === 'rejected' ? 'danger' : 'warning']">{{ statusLabel(task.assignStatus || task.status) }}</span>
+            <CountdownPill v-if="canOperateAssignment(task) && !['completed', 'rejected'].includes(task.assignStatus || '')" :time="task.deadlineTime || task.startTime" :created-at="task.createdAt" :start-time="task.startTime" :deadline-time="task.deadlineTime" :remind-at="task.remindAt" />
+            <span :class="['tag', taskStatusClass(task)]">{{ statusLabel(taskDisplayStatus(task)) }}</span>
             <div class="top-actions" @click.stop>
               <button class="icon-button row-menu-button mobile-only" title="更多操作" aria-label="更多操作" @click="openTaskButtonMenu($event, group, task)"><MoreHorizontal :size="18" /></button>
               <select v-if="canManageTask(task) && !isDoneTask(task)" :value="task.groupId || ''" aria-label="移动团队任务至分组" @click.stop @change="moveTask(task, $event)"><option value="" disabled>移动至</option><option v-for="target in taskGroupsFor(task.teamId)" :key="target.id" :value="target.id">{{ target.name }}</option></select>
               <button v-if="canSortTask(task, group) && group.groupId" :disabled="index === 0" @click="moveTaskOrder(group, task.id, -1)">上移</button>
               <button v-if="canSortTask(task, group) && group.groupId" :disabled="index === group.items.length - 1" @click="moveTaskOrder(group, task.id, 1)">下移</button>
-              <button v-if="task.assignStatus === 'pending'" @click="handleAction(task, 'accept')">接受</button><button v-if="task.assignStatus === 'pending'" @click="handleAction(task, 'reject')">拒绝</button><button v-if="task.assignStatus === 'accepted'" @click="handleAction(task, 'complete')">完成</button>
+              <button v-if="canOperateAssignment(task) && task.assignStatus === 'pending'" @click="handleAction(task, 'accept')">接受</button><button v-if="canOperateAssignment(task) && task.assignStatus === 'pending'" @click="handleAction(task, 'reject')">拒绝</button><button v-if="canOperateAssignment(task) && task.assignStatus === 'accepted'" @click="handleAction(task, 'complete')">完成</button>
             </div>
           </article>
         </div>
