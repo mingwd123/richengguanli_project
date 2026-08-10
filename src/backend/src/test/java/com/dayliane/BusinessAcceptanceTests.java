@@ -54,9 +54,10 @@ class BusinessAcceptanceTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("ai_usage_log", "ai_api_key", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
+        jdbc.update("update ai_key_pool_state set revision=0 where id=1");
     }
 
     @Test

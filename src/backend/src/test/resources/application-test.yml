@@ -17,4 +17,6 @@ app:
   reminder:
     scheduler-enabled: false
   ai:
+    api-key: environment-fallback-ai-key
+    api-key-encryption-secret: test-ai-config-encryption-secret
     allowed-hosts: 8.8.8.8,127.0.0.1

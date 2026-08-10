@@ -12,13 +12,20 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.net.IDN;
 import java.net.InetAddress;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -27,6 +34,8 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,41 +48,56 @@ import java.util.regex.Pattern;
 public class AiService {
     private static final int MAX_INPUT_LENGTH = 8000;
     private static final int MAX_LOG_LENGTH = 12000;
+    private static final int MAX_API_KEY_LENGTH = 4000;
+    private static final int MAX_API_KEYS = 10;
+    private static final int MAX_API_KEY_NAME_LENGTH = 100;
+    private static final int GCM_IV_LENGTH = 12;
+    private static final int GCM_TAG_LENGTH = 128;
+    private static final String API_KEY_CIPHERTEXT_VERSION = "v1:";
     private static final Pattern PHONE_PATTERN = Pattern.compile("(?<!\\d)(1\\d{2})\\d{4}(\\d{4})(?!\\d)");
     private static final Pattern EMAIL_PATTERN = Pattern.compile("([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})");
     private final JdbcTemplate jdbc;
     private final AdminService adminService;
     private final UserService userService;
     private final ObjectMapper objectMapper;
-    private final HttpClient httpClient;
+    private final AiHttpTransport aiHttpTransport;
     private final boolean defaultEnabled;
     private final String defaultProvider;
     private final String defaultModel;
     private final String defaultApiBaseUrl;
-    private final String apiKey;
+    private final String defaultApiKey;
     private final Set<String> allowedApiHosts;
+    private final SecretKey apiKeyEncryptionKey;
+    private final Duration requestTimeout;
+    private final Duration totalTimeout;
+    private final SecureRandom secureRandom = new SecureRandom();
 
     public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, ObjectMapper objectMapper,
+                     AiHttpTransport aiHttpTransport,
                      @Value("${app.ai.enabled:false}") boolean defaultEnabled,
                      @Value("${app.ai.provider:}") String defaultProvider,
                       @Value("${app.ai.model:}") String defaultModel,
                       @Value("${app.ai.api-base-url:}") String defaultApiBaseUrl,
                       @Value("${app.ai.api-key:}") String apiKey,
-                      @Value("${app.ai.allowed-hosts:}") String allowedHosts) {
+                      @Value("${app.ai.api-key-encryption-secret:}") String apiKeyEncryptionSecret,
+                      @Value("${app.jwt.secret:change-me-in-development}") String jwtSecret,
+                      @Value("${app.ai.allowed-hosts:}") String allowedHosts,
+                      @Value("${app.ai.request-timeout:15s}") Duration requestTimeout,
+                      @Value("${app.ai.total-timeout:45s}") Duration totalTimeout) {
         this.jdbc = jdbc;
         this.adminService = adminService;
         this.userService = userService;
         this.objectMapper = objectMapper;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build();
+        this.aiHttpTransport = aiHttpTransport;
         this.defaultEnabled = defaultEnabled;
         this.defaultProvider = defaultProvider;
         this.defaultModel = defaultModel;
         this.defaultApiBaseUrl = defaultApiBaseUrl;
-        this.apiKey = apiKey;
+        this.defaultApiKey = apiKey == null ? "" : apiKey.trim();
         this.allowedApiHosts = allowedApiHosts(allowedHosts, defaultApiBaseUrl);
+        this.apiKeyEncryptionKey = apiKeyEncryptionKey(blank(apiKeyEncryptionSecret) ? jwtSecret : apiKeyEncryptionSecret);
+        this.requestTimeout = positiveDuration(requestTimeout, Duration.ofSeconds(15));
+        this.totalTimeout = positiveDuration(totalTimeout, Duration.ofSeconds(45));
     }
 
     public Map<String, Object> parseSchedule(long userId, String text, boolean recordUsage) {
@@ -101,13 +125,23 @@ public class AiService {
 
     public Map<String, Object> configView() {
         Map<String, Object> config = latestConfig();
+        List<Map<String, Object>> keys = apiKeyViews();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("provider", config == null ? defaultProvider : config.get("provider"));
         out.put("modelName", config == null ? defaultModel : config.get("modelName"));
         out.put("apiBaseUrl", config == null ? defaultApiBaseUrl : config.get("apiBaseUrl"));
         out.put("enabled", config == null ? defaultEnabled : config.get("enabled"));
         out.put("remark", config == null ? "" : config.get("remark"));
-        out.put("apiKeyMasked", maskApiKey());
+        out.put("keys", keys);
+        out.put("environmentFallback", environmentFallbackView());
+        out.put("keyPoolRevision", keyPoolRevision());
+        String effectiveMasked = keys.stream()
+                .filter(key -> Boolean.TRUE.equals(key.get("enabled")))
+                .map(key -> stringValue(key.get("apiKeyMasked")))
+                .filter(value -> !blank(value))
+                .findFirst()
+                .orElse(maskApiKey(defaultApiKey));
+        out.put("apiKeyMasked", effectiveMasked);
         if (config != null) {
             out.put("id", config.get("id"));
             out.put("createdAt", config.get("createdAt"));
@@ -119,14 +153,18 @@ public class AiService {
     @Transactional
     public Map<String, Object> updateConfig(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
         Map<String, Object> before = configView();
+        Map<String, Object> persistedConfig = latestConfig();
         String provider = valueOr(req, "provider", String.valueOf(before.get("provider")));
         String modelName = valueOr(req, "modelName", String.valueOf(before.get("modelName")));
         String apiBaseUrl = valueOr(req, "apiBaseUrl", String.valueOf(before.get("apiBaseUrl")));
         boolean enabled = booleanOr(req, "enabled", Boolean.TRUE.equals(before.get("enabled")));
         String remark = valueOr(req, "remark", String.valueOf(before.get("remark")));
+        String apiKeyCiphertext = apiKeyCiphertextForUpdate(req, persistedConfig);
+        String effectiveApiKey = effectiveApiKey(apiKeyCiphertext);
         validateConfig(provider, modelName, apiBaseUrl);
-        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,enabled,remark) values (?,?,?,?,?,?)",
-                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(), enabled, limit(remark, 4000));
+        if (hasNonBlankApiKey(req)) upsertLegacyApiKey(req, apiKeyCiphertext);
+        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,api_key_ciphertext,enabled,remark) values (?,?,?,?,?,?,?)",
+                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(effectiveApiKey), apiKeyCiphertext, enabled, limit(remark, 4000));
         Map<String, Object> after = configView();
         adminService.writeAdminOperationLog(adminId, "update_ai_config", "ai_config", null, safeConfig(before), safeConfig(after), ipAddress, userAgent);
         return after;
@@ -135,15 +173,146 @@ public class AiService {
     @Transactional
     public Map<String, Object> updateEnabled(long adminId, boolean enabled, String ipAddress, String userAgent) {
         Map<String, Object> before = configView();
+        Map<String, Object> persistedConfig = latestConfig();
         String provider = String.valueOf(before.get("provider"));
         String modelName = String.valueOf(before.get("modelName"));
         String apiBaseUrl = String.valueOf(before.get("apiBaseUrl"));
+        String apiKeyCiphertext = persistedConfig == null ? null : stringValue(persistedConfig.get("apiKeyCiphertext"));
+        String effectiveApiKey = effectiveApiKey(apiKeyCiphertext);
         if (enabled) validateConfig(provider, modelName, apiBaseUrl);
-        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,enabled,remark) values (?,?,?,?,?,?)",
-                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(), enabled, limit(String.valueOf(before.get("remark")), 4000));
+        jdbc.update("insert into ai_config (provider,model_name,api_base_url,api_key_masked,api_key_ciphertext,enabled,remark) values (?,?,?,?,?,?,?)",
+                provider, modelName, trimBaseUrl(apiBaseUrl), maskApiKey(effectiveApiKey), apiKeyCiphertext, enabled, limit(String.valueOf(before.get("remark")), 4000));
         Map<String, Object> after = configView();
         adminService.writeAdminOperationLog(adminId, "set_ai_enabled", "ai_config", null, safeConfig(before), safeConfig(after), ipAddress, userAgent);
         return after;
+    }
+
+    public Map<String, Object> keyPoolView() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("keys", apiKeyViews());
+        out.put("environmentFallback", environmentFallbackView());
+        out.put("keyPoolRevision", keyPoolRevision());
+        return out;
+    }
+
+    @Transactional
+    public Map<String, Object> createApiKey(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
+        lockKeyPoolRevision();
+        Integer count = jdbc.queryForObject("select count(*) from ai_api_key", Integer.class);
+        if (count != null && count >= MAX_API_KEYS) throw new BusinessException(400, "at most 10 AI API keys are allowed");
+        String name = requiredKeyName(req.get("name"));
+        String apiKey = requiredApiKey(req.get("apiKey"));
+        ensureUniqueApiKey(apiKey, null);
+        boolean enabled = req.containsKey("enabled") ? booleanValue(req.get("enabled"), "enabled") : true;
+        String remark = optionalRemark(req.get("remark"));
+        Integer nextPriority = jdbc.queryForObject("select coalesce(max(priority),0)+1 from ai_api_key", Integer.class);
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement statement = connection.prepareStatement(
+                    "insert into ai_api_key (name,api_key_masked,api_key_ciphertext,priority,enabled,remark) values (?,?,?,?,?,?)",
+                    new String[]{"id"});
+            statement.setString(1, name);
+            statement.setString(2, maskApiKey(apiKey));
+            statement.setString(3, encryptApiKey(apiKey));
+            statement.setInt(4, nextPriority == null ? 1 : nextPriority);
+            statement.setBoolean(5, enabled);
+            statement.setString(6, remark);
+            return statement;
+        }, keyHolder);
+        long keyId = keyHolder.getKey().longValue();
+        incrementKeyPoolRevision();
+        Map<String, Object> after = requireApiKeyView(keyId);
+        adminService.writeAdminOperationLog(adminId, "create_ai_api_key", "ai_api_key", keyId, null, after, ipAddress, userAgent);
+        return configView();
+    }
+
+    @Transactional
+    public Map<String, Object> updateApiKey(long adminId, long keyId, Map<String, Object> req,
+                                             String ipAddress, String userAgent) {
+        lockKeyPoolRevision();
+        Map<String, Object> current = requireApiKeyRowForUpdate(keyId);
+        Map<String, Object> before = keyView(current);
+        String name = req.containsKey("name") ? requiredKeyName(req.get("name")) : stringValue(current.get("name"));
+        boolean enabled = req.containsKey("enabled") ? booleanValue(req.get("enabled"), "enabled") : Boolean.TRUE.equals(current.get("enabled"));
+        String remark = req.containsKey("remark") ? optionalRemark(req.get("remark")) : stringValue(current.get("remark"));
+        String ciphertext = stringValue(current.get("apiKeyCiphertext"));
+        String masked = stringValue(current.get("apiKeyMasked"));
+        boolean apiKeyChanged = false;
+        if (req.containsKey("apiKey") && req.get("apiKey") != null && !blank(String.valueOf(req.get("apiKey")))) {
+            String apiKey = requiredApiKey(req.get("apiKey"));
+            boolean unchanged = false;
+            try {
+                unchanged = sameSecret(apiKey, decryptApiKey(ciphertext));
+            } catch (BusinessException ignored) {
+                // Supplying a replacement is also the recovery path for a damaged ciphertext.
+            }
+            if (!unchanged) {
+                ensureUniqueApiKey(apiKey, keyId);
+                ciphertext = encryptApiKey(apiKey);
+                masked = maskApiKey(apiKey);
+                apiKeyChanged = true;
+            }
+        } else if (req.containsKey("apiKey") && req.get("apiKey") != null && !(req.get("apiKey") instanceof String)) {
+            throw new BusinessException(400, "apiKey is invalid");
+        }
+        if (apiKeyChanged) {
+            jdbc.update("update ai_api_key set name=?,api_key_masked=?,api_key_ciphertext=?,enabled=?,remark=?,last_test_status=null,last_tested_at=null,last_error=null where id=?",
+                    name, masked, ciphertext, enabled, remark, keyId);
+        } else {
+            jdbc.update("update ai_api_key set name=?,enabled=?,remark=? where id=?", name, enabled, remark, keyId);
+        }
+        incrementKeyPoolRevision();
+        Map<String, Object> after = requireApiKeyView(keyId);
+        adminService.writeAdminOperationLog(adminId, "update_ai_api_key", "ai_api_key", keyId, before, after, ipAddress, userAgent);
+        return configView();
+    }
+
+    @Transactional
+    public Map<String, Object> updateApiKeyEnabled(long adminId, long keyId, boolean enabled,
+                                                    String ipAddress, String userAgent) {
+        lockKeyPoolRevision();
+        Map<String, Object> current = requireApiKeyRowForUpdate(keyId);
+        Map<String, Object> before = keyView(current);
+        jdbc.update("update ai_api_key set enabled=? where id=?", enabled, keyId);
+        incrementKeyPoolRevision();
+        Map<String, Object> after = requireApiKeyView(keyId);
+        adminService.writeAdminOperationLog(adminId, "set_ai_api_key_enabled", "ai_api_key", keyId, before, after, ipAddress, userAgent);
+        return configView();
+    }
+
+    @Transactional
+    public Map<String, Object> deleteApiKey(long adminId, long keyId, String ipAddress, String userAgent) {
+        lockKeyPoolRevision();
+        Map<String, Object> current = requireApiKeyRowForUpdate(keyId);
+        Map<String, Object> before = keyView(current);
+        jdbc.update("delete from ai_api_key where id=?", keyId);
+        normalizeKeyPriorities();
+        incrementKeyPoolRevision();
+        adminService.writeAdminOperationLog(adminId, "delete_ai_api_key", "ai_api_key", keyId, before, null, ipAddress, userAgent);
+        return configView();
+    }
+
+    @Transactional
+    public Map<String, Object> reorderApiKeys(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
+        long currentRevision = lockKeyPoolRevision();
+        long requestedRevision = requiredLong(req.get("revision"), "revision");
+        if (requestedRevision != currentRevision) throw new BusinessException(409, "AI API key order has changed; refresh and try again");
+        List<Long> orderedIds = requiredOrderedIds(req.get("orderedIds"));
+        List<Long> existingIds = jdbc.queryForList("select id from ai_api_key order by priority,id for update", Long.class);
+        if (orderedIds.size() != existingIds.size() || !new HashSet<>(orderedIds).equals(new HashSet<>(existingIds))) {
+            throw new BusinessException(400, "orderedIds must contain every AI API key exactly once");
+        }
+        if (new HashSet<>(orderedIds).size() != orderedIds.size()) {
+            throw new BusinessException(400, "orderedIds contains duplicate values");
+        }
+        for (int i = 0; i < orderedIds.size(); i++) {
+            jdbc.update("update ai_api_key set priority=? where id=?", i + 1, orderedIds.get(i));
+        }
+        incrementKeyPoolRevision();
+        adminService.writeAdminOperationLog(adminId, "reorder_ai_api_keys", "ai_key_pool", null,
+                Map.of("orderedIds", existingIds, "revision", currentRevision),
+                Map.of("orderedIds", orderedIds, "revision", currentRevision + 1), ipAddress, userAgent);
+        return configView();
     }
 
     public Map<String, Object> usageLogs(int page, int size, String userId, String featureType, String status, String dateFrom, String dateTo) {
@@ -179,9 +348,31 @@ public class AiService {
         return Map.of("list", rows);
     }
 
-    public Map<String, Object> test() {
-        String raw = call("Reply with JSON only: {\"suggestion\":\"ok\"}");
-        return Map.of("ok", true, "rawText", limit(raw, MAX_LOG_LENGTH));
+    public Map<String, Object> test(long adminId, String ipAddress, String userAgent) {
+        try {
+            CallResult result = callWithCandidates("Reply with JSON only: {\"suggestion\":\"ok\"}", activeApiKeyCandidates(), false, true);
+            Map<String, Object> response = testResult(result);
+            adminService.writeAdminOperationLog(adminId, "test_ai_key_pool", "ai_key_pool", null, null, safeTestResult(response), ipAddress, userAgent);
+            return response;
+        } catch (BusinessException ex) {
+            adminService.writeAdminOperationLog(adminId, "test_ai_key_pool", "ai_key_pool", null, null,
+                    Map.of("ok", false, "error", "AI service is unavailable"), ipAddress, userAgent);
+            throw ex;
+        }
+    }
+
+    public Map<String, Object> testApiKey(long adminId, long keyId, String ipAddress, String userAgent) {
+        KeyCandidate candidate = requireApiKeyCandidate(keyId);
+        try {
+            CallResult result = callWithCandidates("Reply with JSON only: {\"suggestion\":\"ok\"}", List.of(candidate), false, true);
+            Map<String, Object> response = testResult(result);
+            adminService.writeAdminOperationLog(adminId, "test_ai_api_key", "ai_api_key", keyId, null, safeTestResult(response), ipAddress, userAgent);
+            return response;
+        } catch (BusinessException ex) {
+            adminService.writeAdminOperationLog(adminId, "test_ai_api_key", "ai_api_key", keyId, null,
+                    Map.of("ok", false, "error", "AI service is unavailable"), ipAddress, userAgent);
+            throw ex;
+        }
     }
 
     private Map<String, Object> suggest(long userId, String featureType, String input, String instruction, boolean recordUsage) {
@@ -198,22 +389,64 @@ public class AiService {
     }
 
     private String call(String prompt) {
+        return callWithCandidates(prompt, activeApiKeyCandidates(), true, false).content();
+    }
+
+    private CallResult callWithCandidates(String prompt, List<KeyCandidate> candidates, boolean requireEnabled, boolean recordTestStatus) {
         Map<String, Object> config = effectiveConfig();
-        if (!Boolean.TRUE.equals(config.get("enabled"))) throw new BusinessException(400, "AI service is disabled");
+        if (requireEnabled && !Boolean.TRUE.equals(config.get("enabled"))) throw new BusinessException(400, "AI service is disabled");
         String baseUrl = String.valueOf(config.get("apiBaseUrl"));
         String model = String.valueOf(config.get("modelName"));
-        if (blank(apiKey) || blank(baseUrl) || blank(model)) throw new BusinessException(400, "AI configuration is incomplete");
+        if (candidates.isEmpty() || blank(baseUrl) || blank(model)) throw new BusinessException(400, "AI configuration is incomplete");
         try {
             URI validatedBaseUrl = validateApiBaseUrl(baseUrl);
+            URI endpoint = URI.create(trimBaseUrl(validatedBaseUrl.toString()) + "/chat/completions");
             String body = objectMapper.writeValueAsString(Map.of("model", model, "messages", List.of(Map.of("role", "system", "content", "You are a helpful scheduling assistant. Follow the requested JSON schema exactly. All user-facing text in the JSON response must be written in Chinese."), Map.of("role", "user", "content", prompt)), "temperature", 0.2));
-            HttpRequest request = HttpRequest.newBuilder(URI.create(trimBaseUrl(validatedBaseUrl.toString()) + "/chat/completions"))
-                    .timeout(Duration.ofSeconds(30)).header("Content-Type", "application/json").header("Authorization", "Bearer " + apiKey)
-                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) throw new BusinessException(503, "AI service is unavailable");
-            JsonNode content = objectMapper.readTree(response.body()).path("choices").path(0).path("message").path("content");
-            if (!content.isTextual() || content.asText().isBlank()) throw new BusinessException(503, "AI service returned an invalid response");
-            return content.asText();
+            long deadline = System.nanoTime() + totalTimeout.toNanos();
+            int attempts = 0;
+            for (KeyCandidate candidate : candidates) {
+                Duration remaining = remainingDuration(deadline);
+                if (remaining == null) break;
+                Duration attemptTimeout = remaining.compareTo(requestTimeout) < 0 ? remaining : requestTimeout;
+                attempts++;
+                AiHttpTransport.Response response;
+                try {
+                    response = aiHttpTransport.send(endpoint, body, candidate.apiKey(), attemptTimeout);
+                } catch (java.net.http.HttpTimeoutException ex) {
+                    recordKeyTest(candidate, false, "Request timed out", recordTestStatus);
+                    continue;
+                } catch (java.io.IOException ex) {
+                    recordKeyTest(candidate, false, "Network error", recordTestStatus);
+                    continue;
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    recordKeyTest(candidate, false, "Request interrupted", recordTestStatus);
+                    throw new BusinessException(503, "AI service is unavailable");
+                }
+                int status = response.statusCode();
+                if (isRetryableStatus(status)) {
+                    recordKeyTest(candidate, false, "HTTP " + status, recordTestStatus);
+                    continue;
+                }
+                if (status < 200 || status >= 300) {
+                    recordKeyTest(candidate, false, "HTTP " + status, recordTestStatus);
+                    throw new BusinessException(503, "AI service is unavailable");
+                }
+                JsonNode content;
+                try {
+                    content = objectMapper.readTree(response.body()).path("choices").path(0).path("message").path("content");
+                } catch (Exception ex) {
+                    recordKeyTest(candidate, false, "Invalid response", recordTestStatus);
+                    throw new BusinessException(503, "AI service returned an invalid response");
+                }
+                if (!content.isTextual() || content.asText().isBlank()) {
+                    recordKeyTest(candidate, false, "Invalid response", recordTestStatus);
+                    throw new BusinessException(503, "AI service returned an invalid response");
+                }
+                recordKeyTest(candidate, true, null, recordTestStatus);
+                return new CallResult(content.asText(), candidate, attempts);
+            }
+            throw new BusinessException(503, "AI service is unavailable");
         } catch (BusinessException ex) {
             throw ex;
         } catch (Exception ex) {
@@ -261,17 +494,191 @@ public class AiService {
 
     private Map<String, Object> effectiveConfig() {
         Map<String, Object> config = latestConfig();
-        if (config != null) return config;
-        return Map.of("provider", defaultProvider, "modelName", defaultModel, "apiBaseUrl", defaultApiBaseUrl, "enabled", defaultEnabled);
+        Map<String, Object> effective = config == null ? new LinkedHashMap<>() : new LinkedHashMap<>(config);
+        if (config == null) {
+            effective.put("provider", defaultProvider);
+            effective.put("modelName", defaultModel);
+            effective.put("apiBaseUrl", defaultApiBaseUrl);
+            effective.put("enabled", defaultEnabled);
+        }
+        List<KeyCandidate> candidates = activeApiKeyCandidates();
+        effective.put("apiKey", candidates.isEmpty() ? "" : candidates.get(0).apiKey());
+        return effective;
     }
 
     private Map<String, Object> latestConfig() {
         try {
-            return jdbc.queryForObject("select id,provider,model_name modelName,api_base_url apiBaseUrl,enabled,remark,created_at createdAt,updated_at updatedAt from ai_config order by id desc limit 1", (rs, i) -> {
+            return jdbc.queryForObject("select id,provider,model_name modelName,api_base_url apiBaseUrl,api_key_ciphertext apiKeyCiphertext,enabled,remark,created_at createdAt,updated_at updatedAt from ai_config order by id desc limit 1", (rs, i) -> {
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id")); row.put("provider", rs.getString("provider")); row.put("modelName", rs.getString("modelName")); row.put("apiBaseUrl", rs.getString("apiBaseUrl")); row.put("enabled", rs.getBoolean("enabled")); row.put("remark", rs.getString("remark")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); row.put("updatedAt", iso(rs.getTimestamp("updatedAt"))); return row;
+                row.put("id", rs.getLong("id")); row.put("provider", rs.getString("provider")); row.put("modelName", rs.getString("modelName")); row.put("apiBaseUrl", rs.getString("apiBaseUrl")); row.put("apiKeyCiphertext", rs.getString("apiKeyCiphertext")); row.put("enabled", rs.getBoolean("enabled")); row.put("remark", rs.getString("remark")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); row.put("updatedAt", iso(rs.getTimestamp("updatedAt"))); return row;
             });
         } catch (EmptyResultDataAccessException ex) { return null; }
+    }
+
+    private List<Map<String, Object>> apiKeyViews() {
+        return apiKeyRows(false).stream().map(this::keyView).toList();
+    }
+
+    private List<Map<String, Object>> apiKeyRows(boolean enabledOnly) {
+        return apiKeyRows(enabledOnly, false);
+    }
+
+    private List<Map<String, Object>> apiKeyRows(boolean enabledOnly, boolean forUpdate) {
+        String sql = "select id,name,api_key_masked apiKeyMasked,api_key_ciphertext apiKeyCiphertext,priority,enabled,remark," +
+                "last_test_status lastTestStatus,last_tested_at lastTestedAt,last_error lastError,created_at createdAt,updated_at updatedAt " +
+                "from ai_api_key" + (enabledOnly ? " where enabled=true" : "") + " order by priority,id" + (forUpdate ? " for update" : "");
+        return jdbc.query(sql, (rs, i) -> {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", rs.getLong("id"));
+            row.put("name", rs.getString("name"));
+            row.put("apiKeyMasked", rs.getString("apiKeyMasked"));
+            row.put("apiKeyCiphertext", rs.getString("apiKeyCiphertext"));
+            row.put("priority", rs.getInt("priority"));
+            row.put("enabled", rs.getBoolean("enabled"));
+            row.put("remark", rs.getString("remark"));
+            row.put("lastTestStatus", rs.getString("lastTestStatus"));
+            row.put("lastTestedAt", iso(rs.getTimestamp("lastTestedAt")));
+            row.put("lastError", rs.getString("lastError"));
+            row.put("createdAt", iso(rs.getTimestamp("createdAt")));
+            row.put("updatedAt", iso(rs.getTimestamp("updatedAt")));
+            return row;
+        });
+    }
+
+    private Map<String, Object> keyView(Map<String, Object> row) {
+        Map<String, Object> view = new LinkedHashMap<>(row);
+        view.remove("apiKeyCiphertext");
+        return view;
+    }
+
+    private Map<String, Object> requireApiKeyView(long keyId) {
+        return keyView(requireApiKeyRow(keyId, false));
+    }
+
+    private Map<String, Object> requireApiKeyRowForUpdate(long keyId) {
+        return requireApiKeyRow(keyId, true);
+    }
+
+    private Map<String, Object> requireApiKeyRow(long keyId, boolean forUpdate) {
+        try {
+            String suffix = forUpdate ? " for update" : "";
+            return jdbc.queryForObject("select id,name,api_key_masked apiKeyMasked,api_key_ciphertext apiKeyCiphertext,priority,enabled,remark," +
+                    "last_test_status lastTestStatus,last_tested_at lastTestedAt,last_error lastError,created_at createdAt,updated_at updatedAt " +
+                    "from ai_api_key where id=?" + suffix, (rs, i) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("name", rs.getString("name"));
+                row.put("apiKeyMasked", rs.getString("apiKeyMasked"));
+                row.put("apiKeyCiphertext", rs.getString("apiKeyCiphertext"));
+                row.put("priority", rs.getInt("priority"));
+                row.put("enabled", rs.getBoolean("enabled"));
+                row.put("remark", rs.getString("remark"));
+                row.put("lastTestStatus", rs.getString("lastTestStatus"));
+                row.put("lastTestedAt", iso(rs.getTimestamp("lastTestedAt")));
+                row.put("lastError", rs.getString("lastError"));
+                row.put("createdAt", iso(rs.getTimestamp("createdAt")));
+                row.put("updatedAt", iso(rs.getTimestamp("updatedAt")));
+                return row;
+            }, keyId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "AI API key not found");
+        }
+    }
+
+    private List<KeyCandidate> activeApiKeyCandidates() {
+        List<KeyCandidate> candidates = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Map<String, Object> row : apiKeyRows(true)) {
+            try {
+                String apiKey = decryptApiKey(stringValue(row.get("apiKeyCiphertext")));
+                if (!blank(apiKey) && seen.add(apiKey)) {
+                    candidates.add(new KeyCandidate(((Number) row.get("id")).longValue(), stringValue(row.get("name")), apiKey,
+                            "database", stringValue(row.get("apiKeyCiphertext"))));
+                }
+            } catch (BusinessException ignored) {
+                // A damaged stored key must not prevent later keys or the environment fallback from serving requests.
+            }
+        }
+        if (!blank(defaultApiKey) && seen.add(defaultApiKey)) {
+            candidates.add(new KeyCandidate(null, "Environment fallback", defaultApiKey, "environment", null));
+        }
+        return candidates;
+    }
+
+    private KeyCandidate requireApiKeyCandidate(long keyId) {
+        Map<String, Object> row = requireApiKeyRow(keyId, false);
+        String ciphertext = stringValue(row.get("apiKeyCiphertext"));
+        return new KeyCandidate(keyId, stringValue(row.get("name")), decryptApiKey(ciphertext), "database", ciphertext);
+    }
+
+    private Map<String, Object> environmentFallbackView() {
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("configured", !blank(defaultApiKey));
+        fallback.put("masked", maskApiKey(defaultApiKey));
+        fallback.put("apiKeyMasked", maskApiKey(defaultApiKey));
+        fallback.put("source", "environment");
+        return fallback;
+    }
+
+    private long keyPoolRevision() {
+        Long revision = jdbc.queryForObject("select revision from ai_key_pool_state where id=1", Long.class);
+        return revision == null ? 0 : revision;
+    }
+
+    private long lockKeyPoolRevision() {
+        try {
+            Long revision = jdbc.queryForObject("select revision from ai_key_pool_state where id=1 for update", Long.class);
+            return revision == null ? 0 : revision;
+        } catch (EmptyResultDataAccessException ex) {
+            jdbc.update("insert into ai_key_pool_state (id,revision) values (1,0)");
+            return 0;
+        }
+    }
+
+    private void incrementKeyPoolRevision() {
+        jdbc.update("update ai_key_pool_state set revision=revision+1 where id=1");
+    }
+
+    private void normalizeKeyPriorities() {
+        List<Long> ids = jdbc.queryForList("select id from ai_api_key order by priority,id", Long.class);
+        for (int i = 0; i < ids.size(); i++) jdbc.update("update ai_api_key set priority=? where id=?", i + 1, ids.get(i));
+    }
+
+    private void upsertLegacyApiKey(Map<String, Object> req, String ciphertext) {
+        String apiKey = decryptApiKey(ciphertext);
+        lockKeyPoolRevision();
+        List<Long> ids = jdbc.queryForList("select id from ai_api_key order by priority,id limit 1 for update", Long.class);
+        ensureUniqueApiKey(apiKey, ids.isEmpty() ? null : ids.get(0));
+        if (ids.isEmpty()) {
+            jdbc.update("insert into ai_api_key (name,api_key_masked,api_key_ciphertext,priority,enabled,remark) values (?,?,?,?,?,?)",
+                    "Primary key", maskApiKey(apiKey), ciphertext, 1, true, optionalRemark(req.get("remark")));
+        } else {
+            jdbc.update("update ai_api_key set api_key_masked=?,api_key_ciphertext=?,last_test_status=null,last_tested_at=null,last_error=null where id=?",
+                    maskApiKey(apiKey), ciphertext, ids.get(0));
+        }
+        incrementKeyPoolRevision();
+    }
+
+    private void ensureUniqueApiKey(String apiKey, Long excludedKeyId) {
+        if (!blank(defaultApiKey) && sameSecret(apiKey, defaultApiKey)) {
+            throw new BusinessException(409, "AI API key duplicates the environment fallback");
+        }
+        for (Map<String, Object> row : apiKeyRows(false, true)) {
+            long rowId = ((Number) row.get("id")).longValue();
+            if (excludedKeyId != null && rowId == excludedKeyId) continue;
+            try {
+                if (sameSecret(apiKey, decryptApiKey(stringValue(row.get("apiKeyCiphertext"))))) {
+                    throw new BusinessException(409, "AI API key already exists");
+                }
+            } catch (BusinessException ex) {
+                if (ex.getCode() == 409) throw ex;
+                // A separate damaged row is ignored here and remains visible for an administrator to replace.
+            }
+        }
+    }
+
+    private static boolean sameSecret(String left, String right) {
+        return MessageDigest.isEqual(left.getBytes(StandardCharsets.UTF_8), right.getBytes(StandardCharsets.UTF_8));
     }
 
     private void log(long userId, String featureType, String input, String output, String status, String error, boolean recordContent) {
@@ -372,9 +779,173 @@ public class AiService {
         }
         return raw.length == 16 && ((raw[0] & 0xfe) == 0xfc);
     }
+
+    private Map<String, Object> testResult(CallResult result) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("ok", true);
+        response.put("source", result.candidate().source());
+        response.put("keyId", result.candidate().id());
+        response.put("keyName", result.candidate().name());
+        response.put("attempts", result.attempts());
+        response.put("rawText", limit(result.content(), MAX_LOG_LENGTH));
+        return response;
+    }
+
+    private Map<String, Object> safeTestResult(Map<String, Object> result) {
+        Map<String, Object> safe = new LinkedHashMap<>(result);
+        safe.remove("rawText");
+        return safe;
+    }
+
+    private void recordKeyTest(KeyCandidate candidate, boolean success, String error, boolean enabled) {
+        if (!enabled || candidate.id() == null) return;
+        jdbc.update("update ai_api_key set last_test_status=?,last_tested_at=utc_timestamp(),last_error=? where id=? and api_key_ciphertext=?",
+                success ? "success" : "failed", success ? null : limit(error, 500), candidate.id(), candidate.ciphertext());
+    }
+
+    private static boolean isRetryableStatus(int status) {
+        return status >= 500 && status <= 599
+                || status == 401 || status == 402 || status == 403 || status == 408
+                || status == 409 || status == 425 || status == 429;
+    }
+
+    private static Duration remainingDuration(long deadlineNanos) {
+        long remaining = deadlineNanos - System.nanoTime();
+        return remaining <= 0 ? null : Duration.ofNanos(remaining);
+    }
+
+    private static Duration positiveDuration(Duration value, Duration fallback) {
+        if (value == null || value.isZero() || value.isNegative()) return fallback;
+        Duration maximum = Duration.ofMinutes(5);
+        return value.compareTo(maximum) > 0 ? maximum : value;
+    }
+
+    private static String requiredKeyName(Object value) {
+        if (!(value instanceof String name) || blank(name)) throw new BusinessException(400, "name is required");
+        String normalized = name.trim();
+        if (normalized.length() > MAX_API_KEY_NAME_LENGTH) throw new BusinessException(400, "name is too long");
+        return normalized;
+    }
+
+    private static String requiredApiKey(Object value) {
+        if (!(value instanceof String apiKey) || blank(apiKey)) throw new BusinessException(400, "apiKey is required");
+        String normalized = apiKey.trim();
+        if (normalized.length() > MAX_API_KEY_LENGTH) throw new BusinessException(400, "apiKey is too long");
+        return normalized;
+    }
+
+    private static String optionalRemark(Object value) {
+        if (value == null) return "";
+        if (!(value instanceof String remark)) throw new BusinessException(400, "remark is invalid");
+        return limit(remark.trim(), 4000);
+    }
+
+    private static boolean booleanValue(Object value, String field) {
+        if (value instanceof Boolean bool) return bool;
+        if (value instanceof String text && ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text))) {
+            return Boolean.parseBoolean(text);
+        }
+        throw new BusinessException(400, field + " is invalid");
+    }
+
+    private static long requiredLong(Object value, String field) {
+        try {
+            long result = value instanceof Number number ? number.longValue() : Long.parseLong(String.valueOf(value));
+            if (result < 0) throw new NumberFormatException();
+            return result;
+        } catch (Exception ex) {
+            throw new BusinessException(400, field + " is invalid");
+        }
+    }
+
+    private static List<Long> requiredOrderedIds(Object value) {
+        if (!(value instanceof List<?> values)) throw new BusinessException(400, "orderedIds is required");
+        List<Long> ids = new ArrayList<>();
+        for (Object item : values) {
+            long id = requiredLong(item, "orderedIds");
+            if (id <= 0) throw new BusinessException(400, "orderedIds is invalid");
+            ids.add(id);
+        }
+        return ids;
+    }
+
+    private static boolean hasNonBlankApiKey(Map<String, Object> req) {
+        return req.containsKey("apiKey") && req.get("apiKey") instanceof String value && !blank(value);
+    }
+
     private void addDateFilters(StringBuilder sql, List<Object> params, String dateFrom, String dateTo) { if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); } if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); } }
-    private Map<String, Object> safeConfig(Map<String, Object> config) { Map<String, Object> out = new LinkedHashMap<>(config); out.remove("apiKey"); out.put("apiKeyMasked", maskApiKey()); return out; }
-    private String maskApiKey() { if (blank(apiKey)) return ""; return apiKey.length() <= 8 ? "****" : apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4); }
+    private String apiKeyCiphertextForUpdate(Map<String, Object> req, Map<String, Object> persistedConfig) {
+        String currentCiphertext = persistedConfig == null ? null : stringValue(persistedConfig.get("apiKeyCiphertext"));
+        if (!req.containsKey("apiKey") || req.get("apiKey") == null) return currentCiphertext;
+        if (!(req.get("apiKey") instanceof String value)) throw new BusinessException(400, "apiKey is invalid");
+        String requestedApiKey = value.trim();
+        if (blank(requestedApiKey)) return currentCiphertext;
+        if (requestedApiKey.length() > MAX_API_KEY_LENGTH) throw new BusinessException(400, "apiKey is too long");
+        return encryptApiKey(requestedApiKey);
+    }
+
+    private String effectiveApiKey(Map<String, Object> config) {
+        return effectiveApiKey(config == null ? null : stringValue(config.get("apiKeyCiphertext")));
+    }
+
+    private String effectiveApiKey(String apiKeyCiphertext) {
+        String configuredApiKey = blank(apiKeyCiphertext) ? "" : decryptApiKey(apiKeyCiphertext);
+        return blank(configuredApiKey) ? defaultApiKey : configuredApiKey;
+    }
+
+    private String encryptApiKey(String apiKey) {
+        try {
+            byte[] iv = new byte[GCM_IV_LENGTH];
+            secureRandom.nextBytes(iv);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, apiKeyEncryptionKey, new GCMParameterSpec(GCM_TAG_LENGTH, iv));
+            byte[] encrypted = cipher.doFinal(apiKey.getBytes(StandardCharsets.UTF_8));
+            byte[] payload = new byte[iv.length + encrypted.length];
+            System.arraycopy(iv, 0, payload, 0, iv.length);
+            System.arraycopy(encrypted, 0, payload, iv.length, encrypted.length);
+            return API_KEY_CIPHERTEXT_VERSION + Base64.getUrlEncoder().withoutPadding().encodeToString(payload);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unable to encrypt AI API key", ex);
+        }
+    }
+
+    private String decryptApiKey(String ciphertext) {
+        try {
+            if (!ciphertext.startsWith(API_KEY_CIPHERTEXT_VERSION)) throw new IllegalArgumentException("Unsupported AI API key encryption format");
+            byte[] payload = Base64.getUrlDecoder().decode(ciphertext.substring(API_KEY_CIPHERTEXT_VERSION.length()));
+            if (payload.length <= GCM_IV_LENGTH) throw new IllegalArgumentException("Invalid AI API key ciphertext");
+            byte[] iv = Arrays.copyOfRange(payload, 0, GCM_IV_LENGTH);
+            byte[] encrypted = Arrays.copyOfRange(payload, GCM_IV_LENGTH, payload.length);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, apiKeyEncryptionKey, new GCMParameterSpec(GCM_TAG_LENGTH, iv));
+            return new String(cipher.doFinal(encrypted), StandardCharsets.UTF_8);
+        } catch (Exception ex) {
+            throw new BusinessException(500, "AI API key configuration cannot be read");
+        }
+    }
+
+    private static SecretKey apiKeyEncryptionKey(String secret) {
+        try {
+            byte[] material = MessageDigest.getInstance("SHA-256").digest(secret.getBytes(StandardCharsets.UTF_8));
+            return new SecretKeySpec(material, "AES");
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unable to initialize AI API key encryption", ex);
+        }
+    }
+
+    private Map<String, Object> safeConfig(Map<String, Object> config) {
+        Map<String, Object> out = new LinkedHashMap<>(config);
+        Object apiKey = out.remove("apiKey");
+        out.remove("apiKeyCiphertext");
+        if (apiKey != null) out.put("apiKeyMasked", maskApiKey(String.valueOf(apiKey)));
+        else out.putIfAbsent("apiKeyMasked", "");
+        return out;
+    }
+
+    private static String maskApiKey(String apiKey) {
+        if (blank(apiKey)) return "";
+        return apiKey.length() <= 8 ? "****" : apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4);
+    }
     private static String stripCodeFence(String value) { String text = value.trim(); if (text.startsWith("```")) { int firstNewline = text.indexOf('\n'); int end = text.lastIndexOf("```"); return firstNewline >= 0 && end > firstNewline ? text.substring(firstNewline + 1, end).trim() : text; } return text; }
     private static String valueOr(Map<String, Object> req, String key, String fallback) { Object value = req.get(key); return value == null ? fallback : String.valueOf(value).trim(); }
     private static boolean booleanOr(Map<String, Object> req, String key, boolean fallback) { Object value = req.get(key); return value == null ? fallback : value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value)); }
@@ -384,4 +955,7 @@ public class AiService {
     private static boolean blank(String value) { return value == null || value.isBlank(); }
     private static String nullToEmpty(String value) { return value == null ? "" : value; }
     private static String iso(java.sql.Timestamp timestamp) { return timestamp == null ? "" : OffsetDateTime.ofInstant(timestamp.toInstant(), ZoneOffset.UTC).toString(); }
+
+    private record KeyCandidate(Long id, String name, String apiKey, String source, String ciphertext) {}
+    private record CallResult(String content, KeyCandidate candidate, int attempts) {}
 }

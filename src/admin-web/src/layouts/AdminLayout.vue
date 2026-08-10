@@ -25,7 +25,8 @@ const allMenuItems = [
   { path: '/ai-config', label: 'AI 配置', icon: Connection },
   { path: '/ai-logs', label: 'AI 调用记录', icon: DataAnalysis },
 ]
-const menuItems = computed(() => allMenuItems.filter(item => item.path !== '/admin-users' || store.isSuperAdmin))
+const superAdminOnlyPaths = new Set(['/admin-users', '/ai-config'])
+const menuItems = computed(() => allMenuItems.filter(item => !superAdminOnlyPaths.has(item.path) || store.isSuperAdmin))
 const routeMeta = computed(() => {
   const descriptions = {
     '/': '查看系统资源和管理入口',
@@ -62,7 +63,7 @@ onMounted(async () => {
   if (store.token && !store.profile) {
     try { await store.loadProfile() } catch { return }
   }
-  if (route.path === '/admin-users' && !store.isSuperAdmin) await router.replace('/')
+  if (route.meta.superAdmin && !store.isSuperAdmin) await router.replace('/')
 })
 onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
 </script>
@@ -112,6 +113,6 @@ onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
         </router-view>
       </el-main>
     </el-container>
-    <el-alert v-if="store.toast" class="global-toast" :title="store.toast" type="success" :closable="false" show-icon />
+    <el-alert v-if="store.toast" class="global-toast" :title="store.toast" :type="store.toastType" :closable="false" show-icon />
   </el-container>
 </template>

@@ -13,8 +13,11 @@ app:
     enabled: ${DEMO_DATA_ENABLED:false}
   ai:
     enabled: ${AI_ENABLED:false}
-    provider: ${AI_PROVIDER}
-    model: ${AI_MODEL}
-    api-base-url: ${AI_API_BASE_URL}
-    api-key: ${AI_API_KEY}
+    provider: ${AI_PROVIDER:}
+    model: ${AI_MODEL:}
+    api-base-url: ${AI_API_BASE_URL:}
+    api-key: ${AI_API_KEY:}
+    api-key-encryption-secret: ${AI_API_KEY_ENCRYPTION_SECRET:${JWT_SECRET}}
     allowed-hosts: ${AI_ALLOWED_HOSTS:}
+    request-timeout: ${AI_REQUEST_TIMEOUT:15s}
+    total-timeout: ${AI_TOTAL_TIMEOUT:45s}

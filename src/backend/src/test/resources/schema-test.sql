@@ -1,4 +1,6 @@
 DROP TABLE IF EXISTS ai_config;
+DROP TABLE IF EXISTS ai_api_key;
+DROP TABLE IF EXISTS ai_key_pool_state;
 DROP TABLE IF EXISTS ai_usage_log;
 DROP TABLE IF EXISTS auth_revoked_access_token;
 DROP TABLE IF EXISTS auth_refresh_token;
@@ -6,8 +8,10 @@ DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
 DROP TABLE IF EXISTS notification_preference;
+DROP TABLE IF EXISTS reminder_preset;
 DROP TABLE IF EXISTS reminder;
 DROP TABLE IF EXISTS team_task_reminder_plan;
+DROP TABLE IF EXISTS team_task_event;
 DROP TABLE IF EXISTS team_task_assignee;
 DROP TABLE IF EXISTS team_task;
 DROP TABLE IF EXISTS schedule;
@@ -257,8 +261,35 @@ CREATE TABLE ai_config (
   model_name VARCHAR(50) NOT NULL,
   api_base_url VARCHAR(500),
   api_key_masked VARCHAR(100),
+  api_key_ciphertext TEXT,
   enabled BOOLEAN NOT NULL DEFAULT FALSE,
   remark TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE ai_api_key (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  api_key_masked VARCHAR(100) NOT NULL,
+  api_key_ciphertext TEXT NOT NULL,
+  priority INT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  remark TEXT,
+  last_test_status VARCHAR(20),
+  last_tested_at DATETIME,
+  last_error VARCHAR(500),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_ai_api_key_order ON ai_api_key(priority, id);
+CREATE INDEX idx_ai_api_key_enabled ON ai_api_key(enabled);
+
+CREATE TABLE ai_key_pool_state (
+  id TINYINT NOT NULL PRIMARY KEY,
+  revision BIGINT NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO ai_key_pool_state (id, revision) VALUES (1, 0);

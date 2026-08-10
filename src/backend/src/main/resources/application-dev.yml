@@ -21,4 +21,7 @@ app:
     model: ${AI_MODEL:deepseek-chat}
     api-base-url: ${AI_API_BASE_URL:https://api.deepseek.com/v1}
     api-key: ${AI_API_KEY:}
+    api-key-encryption-secret: ${AI_API_KEY_ENCRYPTION_SECRET:${JWT_SECRET:change-me-in-development}}
     allowed-hosts: ${AI_ALLOWED_HOSTS:api.deepseek.com}
+    request-timeout: ${AI_REQUEST_TIMEOUT:15s}
+    total-timeout: ${AI_TOTAL_TIMEOUT:45s}

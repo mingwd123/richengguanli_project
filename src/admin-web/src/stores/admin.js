@@ -13,6 +13,7 @@ export const useAdminStore = defineStore('admin', () => {
   const loading = ref(false)
   const detailLoading = ref(false)
   const toast = ref('')
+  const toastType = ref('success')
   const profile = ref(null)
   const isSuperAdmin = computed(() => profile.value?.role === 'super_admin')
   const page = ref({ list: [], total: 0, page: 1, size: 20 })
@@ -21,7 +22,13 @@ export const useAdminStore = defineStore('admin', () => {
   const adminCreateForm = reactive({ username: '', password: '', role: 'admin' })
   const aiConfig = ref(null)
   const aiConfigLoading = ref(false)
-  const aiTestResult = ref('')
+  const aiKeys = ref([])
+  const aiEnvironmentFallback = ref({ configured: false, apiKeyMasked: '' })
+  const aiKeyPoolRevision = ref(0)
+  const aiKeyActionId = ref(null)
+  const aiKeyTestResults = ref({})
+  const aiTestLoading = ref(false)
+  const aiTestResult = ref(null)
   const dashboardStats = ref({ users: 0, activeUsers: 0, teams: 0, pendingSchedules: 0, activeTeamTasks: 0, pendingReminders: 0, unreadNotifications: 0, aiCallsToday: 0 })
 
   // Search/filter state
@@ -288,12 +295,34 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
+  function applyAiKeyPool(data) {
+    if (!data) return
+    aiKeys.value = Array.isArray(data.keys)
+      ? [...data.keys].sort((left, right) => {
+          const priorityDiff = Number(left.priority || 0) - Number(right.priority || 0)
+          return priorityDiff || Number(left.id || 0) - Number(right.id || 0)
+        })
+      : []
+    aiEnvironmentFallback.value = data.environmentFallback || { configured: false, apiKeyMasked: '' }
+    aiKeyPoolRevision.value = Number(data.keyPoolRevision || 0)
+  }
+
+  function applyAiConfigResponse(data) {
+    if (!data) return null
+    const { keys, environmentFallback, keyPoolRevision, ...config } = data
+    aiConfig.value = config
+    applyAiKeyPool({ keys, environmentFallback, keyPoolRevision })
+    return data
+  }
+
   async function fetchAiConfig() {
     aiConfigLoading.value = true
     try {
-      aiConfig.value = await request('/admin/ai/config')
+      const data = await request('/admin/ai/config')
+      return applyAiConfigResponse(data)
     } catch (error) {
-      notify(error.message)
+      notify(error.message, 'error')
+      return null
     } finally {
       aiConfigLoading.value = false
     }
@@ -302,10 +331,13 @@ export const useAdminStore = defineStore('admin', () => {
   async function updateAiConfig(payload) {
     aiConfigLoading.value = true
     try {
-      aiConfig.value = await request('/admin/ai/config', { method: 'PUT', body: JSON.stringify(payload) })
+      const data = await request('/admin/ai/config', { method: 'PUT', body: JSON.stringify(payload) })
+      applyAiConfigResponse(data)
       notify('AI 配置已更新')
+      return data
     } catch (error) {
-      notify(error.message)
+      notify(error.message, 'error')
+      return null
     } finally {
       aiConfigLoading.value = false
     }
@@ -314,12 +346,118 @@ export const useAdminStore = defineStore('admin', () => {
   async function updateAiEnabled(enabled) {
     aiConfigLoading.value = true
     try {
-      aiConfig.value = await request('/admin/ai/enabled', { method: 'PUT', body: JSON.stringify({ enabled }) })
+      const data = await request('/admin/ai/enabled', { method: 'PUT', body: JSON.stringify({ enabled }) })
+      applyAiConfigResponse(data)
       notify(enabled ? 'AI 已启用' : 'AI 已关闭')
+      return data
     } catch (error) {
-      notify(error.message)
+      notify(error.message, 'error')
+      return null
     } finally {
       aiConfigLoading.value = false
+    }
+  }
+
+  async function mutateAiKey(actionId, path, options, successMessage) {
+    aiKeyActionId.value = actionId
+    try {
+      const data = await request(path, options)
+      applyAiKeyPool(data)
+      notify(successMessage)
+      return data
+    } catch (error) {
+      notify(error.message, 'error')
+      return null
+    } finally {
+      aiKeyActionId.value = null
+    }
+  }
+
+  function createAiKey(payload) {
+    return mutateAiKey('create', '/admin/ai/keys', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, 'API Key 已添加')
+  }
+
+  async function updateAiKey(keyId, payload) {
+    const data = await mutateAiKey(`update:${keyId}`, `/admin/ai/keys/${keyId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, 'API Key 已更新')
+    if (data) {
+      const nextResults = { ...aiKeyTestResults.value }
+      delete nextResults[keyId]
+      aiKeyTestResults.value = nextResults
+    }
+    return data
+  }
+
+  async function deleteAiKey(keyId) {
+    const data = await mutateAiKey(`delete:${keyId}`, `/admin/ai/keys/${keyId}`, {
+      method: 'DELETE',
+    }, 'API Key 已删除')
+    if (data) {
+      const nextResults = { ...aiKeyTestResults.value }
+      delete nextResults[keyId]
+      aiKeyTestResults.value = nextResults
+    }
+    return data
+  }
+
+  function setAiKeyEnabled(keyId, enabled) {
+    return mutateAiKey(`enabled:${keyId}`, `/admin/ai/keys/${keyId}/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }, enabled ? 'API Key 已启用' : 'API Key 已停用')
+  }
+
+  async function updateAiKeyOrder(orderedIds, revision) {
+    aiKeyActionId.value = 'order'
+    try {
+      const data = await request('/admin/ai/keys/order', {
+        method: 'PUT',
+        body: JSON.stringify({ orderedIds, revision }),
+      })
+      applyAiKeyPool(data)
+      notify('Key 优先级已更新')
+      return data
+    } catch (error) {
+      if (Number(error.code) === 409) {
+        notify('Key 顺序已被其他管理员更新，正在刷新最新配置', 'warning')
+        await fetchAiConfig()
+      } else {
+        notify(error.message, 'error')
+      }
+      return null
+    } finally {
+      aiKeyActionId.value = null
+    }
+  }
+
+  async function refreshAiKeyPoolSilently() {
+    try {
+      applyAiKeyPool(await request('/admin/ai/keys'))
+    } catch {
+      // The test result remains useful even if the follow-up status refresh fails.
+    }
+  }
+
+  async function testAiKey(keyId) {
+    aiKeyActionId.value = `test:${keyId}`
+    aiKeyTestResults.value = { ...aiKeyTestResults.value, [keyId]: null }
+    try {
+      const data = await request(`/admin/ai/keys/${keyId}/test`, { method: 'POST' })
+      aiKeyTestResults.value = { ...aiKeyTestResults.value, [keyId]: data }
+      notify(data?.ok ? 'API Key 连接正常' : 'API Key 测试失败', data?.ok ? 'success' : 'error')
+      return data
+    } catch (error) {
+      aiKeyTestResults.value = { ...aiKeyTestResults.value, [keyId]: { ok: false, error: error.message } }
+      notify(error.message, 'error')
+      return null
+    } finally {
+      await refreshAiKeyPoolSilently()
+      aiKeyActionId.value = null
     }
   }
 
@@ -343,16 +481,20 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   async function testAi() {
-    aiConfigLoading.value = true
+    aiTestLoading.value = true
+    aiTestResult.value = null
     try {
       const data = await request('/admin/ai/test', { method: 'POST' })
-      aiTestResult.value = data.ok ? 'AI 连接正常: ' + (data.rawText || '') : 'AI 测试失败'
-      notify('AI 测试完成')
+      aiTestResult.value = data
+      notify(data?.ok ? 'AI 容错链路测试通过' : 'AI 容错链路测试失败', data?.ok ? 'success' : 'error')
+      return data
     } catch (error) {
-      aiTestResult.value = 'AI 测试失败: ' + error.message
-      notify(error.message)
+      aiTestResult.value = { ok: false, error: error.message }
+      notify(error.message, 'error')
+      return null
     } finally {
-      aiConfigLoading.value = false
+      await refreshAiKeyPoolSilently()
+      aiTestLoading.value = false
     }
   }
 
@@ -365,10 +507,14 @@ export const useAdminStore = defineStore('admin', () => {
     sortOrder.value = 'desc'
   }
 
-  function notify(message) {
+  function notify(message, type = 'success') {
     toast.value = message
+    toastType.value = type
     clearTimeout(notify.timer)
-    notify.timer = setTimeout(() => { toast.value = '' }, 2600)
+    notify.timer = setTimeout(() => {
+      toast.value = ''
+      toastType.value = 'success'
+    }, 2600)
   }
 
   function formatValue(value) {
@@ -385,16 +531,19 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   return {
-    token, theme, activeResource, loading, detailLoading, toast, profile, isSuperAdmin, page, currentDetail,
+    token, theme, activeResource, loading, detailLoading, toast, toastType, profile, isSuperAdmin, page, currentDetail,
     loginForm, adminCreateForm, resources, currentResource, stats,
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
-    aiConfig, aiConfigLoading, aiTestResult, dashboardStats, sortKey, sortOrder,
+    aiConfig, aiConfigLoading, aiKeys, aiEnvironmentFallback, aiKeyPoolRevision,
+    aiKeyActionId, aiKeyTestResults, aiTestLoading, aiTestResult, dashboardStats, sortKey, sortOrder,
     login, logout, loadProfile, fetchList, fetchDetail,
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,
     createAdminUser, adminSetScheduleStatus, adminTeamTaskAction,
     resetFilters, notify, formatValue, toggleTheme,
-    fetchAiConfig, updateAiConfig, updateAiEnabled, fetchAiUsageLogs, testAi, fetchDashboardStats,
+    fetchAiConfig, updateAiConfig, updateAiEnabled,
+    createAiKey, updateAiKey, deleteAiKey, setAiKeyEnabled, updateAiKeyOrder, testAiKey,
+    fetchAiUsageLogs, testAi, fetchDashboardStats,
   }
 })

@@ -1,6 +1,7 @@
 package com.dayliane.security;
 
 import com.dayliane.ai.AdminAiController;
+import com.dayliane.ai.AiHttpTransport;
 import com.dayliane.ai.AiService;
 import com.dayliane.auth.AuthService;
 import com.dayliane.common.BusinessException;
@@ -55,6 +56,7 @@ class SecurityRegressionTests {
     @Autowired UserService userService;
     @Autowired AdminAiController adminAiController;
     @Autowired AiService aiService;
+    @Autowired AiHttpTransport aiHttpTransport;
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
     @Autowired PlatformTransactionManager transactionManager;
@@ -63,12 +65,13 @@ class SecurityRegressionTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_config", "team_task_event", "team_task_reminder_plan",
+        for (String table : List.of("ai_usage_log", "ai_api_key", "ai_config", "team_task_event", "team_task_reminder_plan",
                 "team_task_assignee", "team_task",
                 "auth_revoked_access_token", "auth_refresh_token",
                 "admin_operation_log", "admin_user", "task_group", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
+        jdbc.update("update ai_key_pool_state set revision=0 where id=1");
     }
 
     @Test
@@ -201,6 +204,14 @@ class SecurityRegressionTests {
                 "provider", "test", "modelName", "test-model", "apiBaseUrl", "https://8.8.8.8/v1", "enabled", false);
 
         assertBusinessCode(403, () -> adminAiController.config(operatorRequest));
+        assertBusinessCode(403, () -> adminAiController.keys(operatorRequest));
+        assertBusinessCode(403, () -> adminAiController.createKey(operatorRequest, Map.of(
+                "name", "blocked", "apiKey", "blocked-secret")));
+        assertBusinessCode(403, () -> adminAiController.updateKey(operatorRequest, 1, Map.of("name", "blocked")));
+        assertBusinessCode(403, () -> adminAiController.updateKeyEnabled(operatorRequest, 1, Map.of("enabled", true)));
+        assertBusinessCode(403, () -> adminAiController.deleteKey(operatorRequest, 1));
+        assertBusinessCode(403, () -> adminAiController.reorderKeys(operatorRequest, Map.of("orderedIds", List.of(), "revision", 0)));
+        assertBusinessCode(403, () -> adminAiController.testKey(operatorRequest, 1));
         assertBusinessCode(403, () -> adminAiController.updateConfig(operatorRequest, config));
         assertBusinessCode(403, () -> adminAiController.updateEnabled(operatorRequest, Map.of("enabled", true)));
         assertBusinessCode(403, () -> adminAiController.test(operatorRequest));
@@ -219,9 +230,54 @@ class SecurityRegressionTests {
                 .containsEntry("apiBaseUrl", "https://8.8.8.8:443/v1");
         assertThat(adminAiController.updateConfig(rootRequest, config).data())
                 .containsEntry("apiBaseUrl", "https://8.8.8.8/v1");
-        HttpClient httpClient = (HttpClient) ReflectionTestUtils.getField(aiService, "httpClient");
+        HttpClient httpClient = aiHttpTransport.httpClient();
         assertThat(httpClient).isNotNull();
         assertThat(httpClient.followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
+    }
+
+    @Test
+    void superAdminCanPersistEncryptedAiApiKeyWithoutLeakingIt() {
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values (?,?,?,?)",
+                "root", passwordEncoder.encode("Admin12345"), "super_admin", "active");
+        MockHttpServletRequest rootRequest = authorizedAdminRequest("root");
+        String configuredApiKey = "admin-direct-ai-key-9876";
+        Map<String, Object> request = Map.of(
+                "provider", "test", "modelName", "test-model", "apiBaseUrl", "https://8.8.8.8/v1",
+                "apiKey", configuredApiKey, "enabled", false, "remark", "configured from admin");
+
+        Map<String, Object> response = adminAiController.updateConfig(rootRequest, request).data();
+        assertThat(response)
+                .containsEntry("apiKeyMasked", "admi****9876")
+                .doesNotContainKeys("apiKey", "apiKeyCiphertext");
+
+        Map<String, Object> stored = jdbc.queryForMap("select api_key_masked apiKeyMasked,api_key_ciphertext apiKeyCiphertext from ai_config order by id desc limit 1");
+        String ciphertext = String.valueOf(stored.get("apiKeyCiphertext"));
+        assertThat(stored).containsEntry("apiKeyMasked", "admi****9876");
+        assertThat(ciphertext).startsWith("v1:").doesNotContain(configuredApiKey);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> effectiveConfig = (Map<String, Object>) ReflectionTestUtils.invokeMethod(aiService, "effectiveConfig");
+        assertThat(effectiveConfig).containsEntry("apiKey", configuredApiKey);
+
+        Map<String, Object> retainedResponse = adminAiController.updateConfig(rootRequest, Map.of(
+                "provider", "test", "modelName", "changed-model", "apiBaseUrl", "https://8.8.8.8/v1",
+                "apiKey", "   ", "enabled", false, "remark", "updated without replacing key")).data();
+        assertThat(retainedResponse).containsEntry("apiKeyMasked", "admi****9876");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> retainedEffectiveConfig = (Map<String, Object>) ReflectionTestUtils.invokeMethod(aiService, "effectiveConfig");
+        assertThat(retainedEffectiveConfig).containsEntry("apiKey", configuredApiKey);
+
+        String audit = jdbc.queryForObject("select after_data from admin_operation_log order by id desc limit 1", String.class);
+        assertThat(audit).contains("apiKeyMasked").doesNotContain(configuredApiKey).doesNotContain("apiKeyCiphertext");
+    }
+
+    @Test
+    void aiConfigurationFallsBackToEnvironmentApiKeyWhenNoAdminKeyWasSaved() {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> effectiveConfig = (Map<String, Object>) ReflectionTestUtils.invokeMethod(aiService, "effectiveConfig");
+
+        assertThat(effectiveConfig).containsEntry("apiKey", "environment-fallback-ai-key");
+        assertThat(aiService.configView()).containsEntry("apiKeyMasked", "envi****-key");
     }
 
     @Test
