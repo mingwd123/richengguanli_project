@@ -20,6 +20,9 @@ const notificationTypeLabels: Record<string, string> = {
   task_approved: '审批通过',
   task_approval_rejected: '审批未通过',
   task_unassigned: '任务待补位',
+  fatigue_plan_warning: '计划疲劳提醒',
+  fatigue_actual_warning: '实际疲劳提醒',
+  fatigue_survey: '疲劳调查',
 }
 
 function notificationTypeLabel(type: string) {
@@ -36,6 +39,10 @@ function handleReadAll() {
 
 function handleClick(n: Notification) {
   store.markNotificationRead(n)
+  if (n.targetRoute) {
+    router.push(n.targetRoute)
+    return
+  }
   if (n.relatedType === 'schedule' && n.relatedId) {
     router.push(`/schedules/${n.relatedId}`)
     return

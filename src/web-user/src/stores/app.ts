@@ -1,10 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive } from 'vue'
-import { apiRequest } from '../api/http'
+import { apiDownload, apiRequest } from '../api/http'
 import type {
   UserProfile, Schedule, TaskGroup, Team, MyTask, Notification,
   TodayOverview, TimelineItem, CalendarDay, ScheduleForm, TaskForm,
-  LoginForm, RegisterForm, PageResult, UpcomingOverview, NotificationPreference
+  LoginForm, RegisterForm, PageResult, UpcomingOverview, NotificationPreference,
+  ScheduleListResult, ScheduleViewMode, SectionSummary, FatigueProfile,
+  FatigueDailySummary, FatigueHistory, FatiguePreview, FatigueSurveyComparison,
+  FatigueSurveyToday
 } from '../types'
 import { toSchedulePayload, toApiTimePayload, normalizeTimelineItem, buildMonthDays, primaryTime, setDisplayTimezone } from '../utils/helpers'
 import { buildTimelineStats, isTimelineItemOpen } from '../utils/timeline'
@@ -14,6 +17,7 @@ const REFRESH_TOKEN_KEY = 'dayliane_refresh_token'
 const AI_RECORD_KEY = 'dayliane_ai_record_enabled'
 const THEME_KEY = 'dayliane_theme'
 const BROWSER_NOTICE_IDS_KEY = 'dayliane_browser_notice_ids'
+const SCHEDULE_VIEW_KEY_PREFIX = 'dayliane_schedule_view_'
 
 type ListState = {
   page: number
@@ -68,13 +72,22 @@ export const useAppStore = defineStore('app', () => {
   const notificationPage = listState(12, 'created_desc', { isRead: '' })
   const today = ref<TodayOverview>({ personalSchedules: [], teamTasks: [], unreadNotificationCount: 0, groups: [] })
   const upcomingSeven = ref<UpcomingOverview>({ timezone: '', dateFrom: '', dateTo: '', personalSchedules: [], teamTasks: [], list: [] })
+  const viewMode = ref<ScheduleViewMode>('time')
+  const urgencyLevelFilter = ref<number | null>(null)
+  const fatigueLevelFilter = ref<number | null>(null)
+  const sectionSummaries = ref<SectionSummary[]>([])
+  const fatigueProfile = ref<FatigueProfile | null>(null)
+  const fatigueDaily = ref<FatigueDailySummary | null>(null)
+  const fatigueSurveyToday = ref<FatigueSurveyToday | null>(null)
+  const fatigueSurveyComparison = ref<FatigueSurveyComparison | null>(null)
+  const fatigueHistory = ref<FatigueHistory | null>(null)
   const notificationDetail = ref<Notification | null>(null)
-  const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, reminderPresetMinutes: [15, 30, 60, 1440] })
+  const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, fatigueAlertEnabled: true, fatigueSurveyEnabled: true, quietStartTime: '', quietEndTime: '', reminderPresetMinutes: [15, 30, 60, 1440] })
   const selectedDate = ref('')
 
   const loginForm = reactive<LoginForm>({ phone: '13800138000', password: 'Abc12345' })
   const registerForm = reactive<RegisterForm>({ phone: '', password: '', confirmPassword: '', nickname: '' })
-  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '' })
+  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
   const groupForm = reactive({ name: '' })
   const teamForm = reactive({ name: '' })
   const taskForm = reactive<TaskForm>({ teamId: '', groupId: '', title: '', description: '', deadlineTime: '', startTime: '', remindAt: '', assigneeUserIds: [] })
@@ -135,7 +148,7 @@ export const useAppStore = defineStore('app', () => {
     localStorage.removeItem(REFRESH_TOKEN_KEY)
     profile.value = null
     schedules.value = []; taskGroups.value = []; teamTaskGroups.value = {}; teams.value = []; myTasks.value = []; createdTasks.value = []; teamTasks.value = []; notifications.value = []
-    notificationPreferences.value = { browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, reminderPresetMinutes: [15, 30, 60, 1440] }
+    notificationPreferences.value = { browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, fatigueAlertEnabled: true, fatigueSurveyEnabled: true, quietStartTime: '', quietEndTime: '', reminderPresetMinutes: [15, 30, 60, 1440] }
     calendarSchedules.value = []; calendarTasks.value = []
     ;[schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage].forEach(state => {
       state.page = 1
@@ -144,6 +157,15 @@ export const useAppStore = defineStore('app', () => {
     })
     today.value = { personalSchedules: [], teamTasks: [], unreadNotificationCount: 0, groups: [] }
     upcomingSeven.value = { timezone: '', dateFrom: '', dateTo: '', personalSchedules: [], teamTasks: [], list: [] }
+    viewMode.value = 'time'
+    urgencyLevelFilter.value = null
+    fatigueLevelFilter.value = null
+    sectionSummaries.value = []
+    fatigueProfile.value = null
+    fatigueDaily.value = null
+    fatigueSurveyToday.value = null
+    fatigueSurveyComparison.value = null
+    fatigueHistory.value = null
   }
 
   async function refreshSession() {
@@ -248,14 +270,19 @@ export const useAppStore = defineStore('app', () => {
     const isCurrentRequest = () => requestVersion === loadAllRequestVersion && requestSession === sessionRevision
     loading.value = true
     try {
-      const [me, groupPage, todayData, upcomingData, preferences] = await Promise.all([
+      const [me, groupPage, todayData, upcomingData, preferences, fatigueProfileData, fatigueSurveyData] = await Promise.all([
         request<UserProfile>('/user/profile'), request<PageResult<TaskGroup>>('/task-groups?scope=personal'),
         request<TodayOverview>('/home/today'), request<UpcomingOverview>('/home/upcoming'),
-        request<NotificationPreference>('/notifications/preferences')
+        request<NotificationPreference>('/notifications/preferences'),
+        request<FatigueProfile>('/fatigue/profile'), request<FatigueSurveyToday>('/fatigue/survey/today')
       ])
       if (!isCurrentRequest()) return
       profile.value = me; setDisplayTimezone(me.timezone); profileForm.nickname = me.nickname; profileForm.avatarUrl = me.avatarUrl || ''; profileForm.timezone = me.timezone; timezoneForm.timezone = me.timezone
+      loadStoredScheduleView(me.id)
       notificationPreferences.value = preferences
+      fatigueProfile.value = fatigueProfileData
+      fatigueSurveyToday.value = fatigueSurveyData
+      fatigueDaily.value = fatigueSurveyData.daily || todayData.fatigue || null
       taskGroups.value = (groupPage.list || []).sort((a, b) => a.sortOrder - b.sortOrder)
       if (!scheduleForm.groupId && taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       today.value = todayData; upcomingSeven.value = upcomingData
@@ -308,15 +335,161 @@ export const useAppStore = defineStore('app', () => {
     Object.assign(schedulePage, patch)
     const listRequest = beginListRequest(schedulePage)
     try {
-      const data = await request<PageResult<Schedule>>(queryPath('/schedules', listParams(schedulePage)))
+      const data = await request<ScheduleListResult>(queryPath('/schedules', {
+        ...listParams(schedulePage),
+        viewMode: viewMode.value,
+        urgencyLevel: urgencyLevelFilter.value,
+        fatigueLevel: fatigueLevelFilter.value
+      }))
       if (!isCurrentListRequest(schedulePage, listRequest)) return data.list || []
       schedules.value = data.list || []
       syncPage(schedulePage, data)
+      sectionSummaries.value = data.sectionSummaries || []
       return schedules.value
     } catch (e: any) {
       if (isCurrentListRequest(schedulePage, listRequest)) notify(e.message || '加载日程失败')
       return []
     } finally { finishListRequest(schedulePage, listRequest) }
+  }
+
+  function scheduleViewStorageKey(userId = profile.value?.id) {
+    return userId ? `${SCHEDULE_VIEW_KEY_PREFIX}${userId}` : ''
+  }
+
+  function loadStoredScheduleView(userId: number) {
+    const raw = localStorage.getItem(scheduleViewStorageKey(userId))
+    if (raw && ['time', 'group', 'urgency', 'fatigue'].includes(raw)) viewMode.value = raw as ScheduleViewMode
+  }
+
+  async function setScheduleViewMode(mode: ScheduleViewMode) {
+    viewMode.value = mode
+    if (profile.value?.id) localStorage.setItem(scheduleViewStorageKey(profile.value.id), mode)
+    schedulePage.sort = mode === 'group' ? 'manual' : mode === 'urgency' ? 'urgency_desc' : mode === 'fatigue' ? 'fatigue_desc' : 'time_asc'
+    await loadSchedules({ page: 1 })
+  }
+
+  async function loadFatigueDaily(date?: string) {
+    try {
+      fatigueDaily.value = await request<FatigueDailySummary>(`/fatigue/daily${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+      return fatigueDaily.value
+    } catch (e: any) { notify(e.message || '加载疲劳汇总失败'); return null }
+  }
+
+  async function loadFatigueProfile() {
+    try {
+      fatigueProfile.value = await request<FatigueProfile>('/fatigue/profile')
+      return fatigueProfile.value
+    } catch (e: any) { notify(e.message || '加载疲劳设置失败'); return null }
+  }
+
+  async function loadFatigueSurveyToday(date?: string) {
+    try {
+      fatigueSurveyToday.value = await request<FatigueSurveyToday>(`/fatigue/survey/today${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+      fatigueDaily.value = fatigueSurveyToday.value.daily
+      fatigueProfile.value = fatigueSurveyToday.value.profile
+      const comparison = fatigueSurveyToday.value.comparison
+      fatigueSurveyComparison.value = comparison && 'predictedScore' in comparison ? comparison as FatigueSurveyComparison : null
+      return fatigueSurveyToday.value
+    } catch (e: any) { notify(e.message || '加载疲劳调查失败'); return null }
+  }
+
+  async function submitFatigueSurvey(payload: { localDate?: string; score: number; externalFactorLevel?: number; externalFactorTags?: string[] }) {
+    try {
+      const result = await request<{ daily: FatigueDailySummary; profile: FatigueProfile; comparison: FatigueSurveyComparison }>('/fatigue/surveys', { method: 'POST', body: JSON.stringify(payload) })
+      fatigueDaily.value = result.daily
+      fatigueProfile.value = result.profile
+      fatigueSurveyComparison.value = result.comparison
+      await loadFatigueSurveyToday(payload.localDate)
+      notify('疲劳调查已保存')
+      return true
+    } catch (e: any) { notify(e.message || '保存疲劳调查失败'); return false }
+  }
+
+  async function updateFatiguePreferences(payload: Partial<Pick<FatigueProfile, 'fatigueTrackingEnabled' | 'fatigueAlertEnabled' | 'surveyEnabled' | 'surveyTime' | 'capacityLocked'>>) {
+    try {
+      fatigueProfile.value = await request<FatigueProfile>('/fatigue/preferences', { method: 'PUT', body: JSON.stringify(payload) })
+      await loadFatigueDaily()
+      notify('疲劳设置已保存')
+      return true
+    } catch (e: any) { notify(e.message || '保存疲劳设置失败'); return false }
+  }
+
+  async function resetFatigueProfile() {
+    try {
+      fatigueProfile.value = await request<FatigueProfile>('/fatigue/profile/reset', { method: 'POST' })
+      await loadFatigueDaily()
+      notify('个性化疲劳模型已重置')
+      return true
+    } catch (e: any) { notify(e.message || '重置疲劳模型失败'); return false }
+  }
+
+  async function loadFatigueHistory(dateFrom: string, dateTo: string) {
+    try {
+      fatigueHistory.value = await request<FatigueHistory>(queryPath('/fatigue/history', { dateFrom, dateTo }))
+      fatigueProfile.value = fatigueHistory.value.profile
+      return fatigueHistory.value
+    } catch (e: any) { notify(e.message || '加载疲劳历史失败'); return null }
+  }
+
+  async function previewFatigue(payload: Record<string, unknown>) {
+    try {
+      return await request<FatiguePreview>('/fatigue/preview', { method: 'POST', body: JSON.stringify(payload) })
+    } catch {
+      return null
+    }
+  }
+
+  async function snoozeFatigueSurvey(minutes = 30) {
+    try {
+      fatigueSurveyToday.value = await request<FatigueSurveyToday>('/fatigue/survey/snooze', { method: 'POST', body: JSON.stringify({ minutes }) })
+      notify(`已稍后 ${minutes} 分钟提醒`)
+      return true
+    } catch (e: any) { notify(e.message || '暂缓提醒失败'); return false }
+  }
+
+  async function skipFatigueSurvey(localDate?: string) {
+    try {
+      fatigueSurveyToday.value = await request<FatigueSurveyToday>('/fatigue/survey/skip', { method: 'POST', body: JSON.stringify({ localDate }) })
+      notify('今天已跳过疲劳调查')
+      return true
+    } catch (e: any) { notify(e.message || '跳过调查失败'); return false }
+  }
+
+  async function suppressFatigueAlertsToday(thresholdBand?: string) {
+    try {
+      await request('/fatigue/alerts/suppress-today', { method: 'POST', body: JSON.stringify({ thresholdBand }) })
+      await loadFatigueProfile()
+      notify('今天不再提醒当前及更低负荷档位')
+      return true
+    } catch (e: any) { notify(e.message || '设置提醒抑制失败'); return false }
+  }
+
+  async function deleteFatigueSurveyHistory() {
+    try {
+      const result = await request<{ deletedCount: number; profile: FatigueProfile }>('/fatigue/surveys/history', { method: 'DELETE' })
+      fatigueProfile.value = result.profile
+      fatigueHistory.value = null
+      fatigueSurveyComparison.value = null
+      await loadFatigueSurveyToday()
+      notify(`已删除 ${result.deletedCount} 条疲劳调查记录`)
+      return true
+    } catch (e: any) { notify(e.message || '删除疲劳历史失败'); return false }
+  }
+
+  async function exportFatigueHistory(dateFrom: string, dateTo: string) {
+    try {
+      const blob = await apiDownload(queryPath('/fatigue/history/export', { dateFrom, dateTo }), token.value)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `fatigue-history-${dateFrom}-${dateTo}.csv`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      notify('疲劳历史已导出')
+      return true
+    } catch (e: any) { notify(e.message || '导出疲劳历史失败'); return false }
   }
 
   async function loadTeams(patch: Partial<ListState> = {}) {
@@ -478,7 +651,7 @@ export const useAppStore = defineStore('app', () => {
     if (!scheduleForm.groupId) return notify('请先创建分组')
     try {
       await request('/schedules', { method: 'POST', body: JSON.stringify(toSchedulePayload(scheduleForm, profile.value?.timezone)) })
-      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '' })
+      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
       if (taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       await loadAll(); scheduleModalOpen.value = false; notify('日程已创建')
     } catch (e: any) { notify(e.message) }
@@ -644,6 +817,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function notificationUrl(item: Notification) {
+    if (item.targetRoute) return item.targetRoute
     if (item.relatedType === 'schedule' && item.relatedId) return `/schedules/${item.relatedId}`
     if (item.relatedType === 'team_task' && item.relatedId) return `/tasks/${item.relatedId}`
     return '/notifications'
@@ -692,11 +866,11 @@ export const useAppStore = defineStore('app', () => {
   applyTheme()
 
   return {
-    token, refreshToken, theme, browserNoticePermission, toast, loading, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, notificationDetail, selectedDate,
+    token, refreshToken, theme, browserNoticePermission, toast, loading, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, notificationDetail, selectedDate,
     schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
-    request, aiRequest, openScheduleModal, closeScheduleModal, login, register, logout, loadAll, loadSchedules, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
+    request, aiRequest, openScheduleModal, closeScheduleModal, login, register, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
     createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,

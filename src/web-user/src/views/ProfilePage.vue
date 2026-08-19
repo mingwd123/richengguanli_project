@@ -56,6 +56,10 @@ function goToSettings() {
       通知设置 ›
     </article>
 
+    <article @click="router.push('/profile/fatigue')" style="cursor: pointer; color: #2f80ed;">
+      疲劳评估设置 ›
+    </article>
+
     <article @click="handleLogout" style="cursor: pointer; color: #e11d48;">
       退出登录
     </article>

@@ -3,6 +3,7 @@ package com.dayliane.user;
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.PermissionService;
 import com.dayliane.common.RefreshTokenStore;
+import com.dayliane.fatigue.FatigueService;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -23,12 +24,14 @@ public class UserService {
     private final JdbcTemplate jdbc;
     private final PermissionService permissionService;
     private final RefreshTokenStore refreshTokenStore;
+    private final FatigueService fatigueService;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public UserService(JdbcTemplate jdbc, PermissionService permissionService, RefreshTokenStore refreshTokenStore) {
+    public UserService(JdbcTemplate jdbc, PermissionService permissionService, RefreshTokenStore refreshTokenStore, FatigueService fatigueService) {
         this.jdbc = jdbc;
         this.permissionService = permissionService;
         this.refreshTokenStore = refreshTokenStore;
+        this.fatigueService = fatigueService;
     }
 
     public Map<String, Object> userView(long userId) {
@@ -72,7 +75,10 @@ public class UserService {
     public void updateTimezone(long userId, String timezone) {
         String next = blank(timezone) ? "Asia/Shanghai" : timezone;
         try { ZoneId.of(next); } catch (DateTimeException ex) { throw new BusinessException(400, "timezone is invalid"); }
+        String previous = jdbc.queryForObject("select timezone from `user` where id=? and deleted_at is null", String.class, userId);
         jdbc.update("update `user` set timezone = ? where id = ?", next, userId);
+        if (!Objects.equals(previous, next)) fatigueService.timezoneChanged(userId, previous, next);
+        else fatigueService.recalculateDates(userId, java.util.List.of(java.time.LocalDate.now(java.time.ZoneId.of(next))));
     }
 
     // Private helpers

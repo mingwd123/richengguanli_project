@@ -7,6 +7,12 @@ DROP TABLE IF EXISTS auth_refresh_token;
 DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
+DROP TABLE IF EXISTS fatigue_alert_log;
+DROP TABLE IF EXISTS fatigue_survey_prompt_log;
+DROP TABLE IF EXISTS fatigue_survey_skip;
+DROP TABLE IF EXISTS fatigue_survey;
+DROP TABLE IF EXISTS fatigue_daily_summary;
+DROP TABLE IF EXISTS user_fatigue_profile;
 DROP TABLE IF EXISTS notification_preference;
 DROP TABLE IF EXISTS reminder_preset;
 DROP TABLE IF EXISTS reminder;
@@ -102,10 +108,19 @@ CREATE TABLE schedule (
   end_time DATETIME,
   deadline_time DATETIME,
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  urgency_level TINYINT NOT NULL DEFAULT 3,
+  fatigue_level TINYINT NOT NULL DEFAULT 3,
+  completed_at DATETIME,
+  completed_fatigue_level TINYINT,
+  completed_fatigue_weight DECIMAL(8,3),
   deleted_at DATETIME,
   deleted_by BIGINT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_schedule_urgency_level CHECK (urgency_level BETWEEN 1 AND 5),
+  CONSTRAINT chk_schedule_fatigue_level CHECK (fatigue_level BETWEEN 1 AND 5),
+  CONSTRAINT chk_schedule_completed_fatigue_level CHECK (completed_fatigue_level IS NULL OR completed_fatigue_level BETWEEN 1 AND 5),
+  CONSTRAINT chk_schedule_completed_fatigue_weight CHECK (completed_fatigue_weight IS NULL OR completed_fatigue_weight > 0)
 );
 
 CREATE TABLE reminder (
@@ -195,6 +210,9 @@ CREATE TABLE notification (
   reminder_id BIGINT,
   is_read BOOLEAN NOT NULL DEFAULT FALSE,
   read_at DATETIME,
+  local_date DATE,
+  target_route VARCHAR(200),
+  data_revision BIGINT,
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -205,8 +223,107 @@ CREATE TABLE notification_preference (
   task_assigned_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   task_status_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   reminder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  fatigue_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  fatigue_survey_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  quiet_start_time TIME,
+  quiet_end_time TIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE user_fatigue_profile (
+  user_id BIGINT NOT NULL PRIMARY KEY,
+  level_1_weight DECIMAL(8,3) NOT NULL DEFAULT 1,
+  level_2_weight DECIMAL(8,3) NOT NULL DEFAULT 2,
+  level_3_weight DECIMAL(8,3) NOT NULL DEFAULT 3,
+  level_4_weight DECIMAL(8,3) NOT NULL DEFAULT 5,
+  level_5_weight DECIMAL(8,3) NOT NULL DEFAULT 8,
+  capacity_75 DECIMAL(8,3) NOT NULL DEFAULT 18,
+  model_stage VARCHAR(20) NOT NULL DEFAULT 'default',
+  valid_survey_days INT NOT NULL DEFAULT 0,
+  algorithm_version INT NOT NULL DEFAULT 1,
+  fatigue_tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  fatigue_alert_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  survey_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  survey_time TIME NOT NULL DEFAULT '21:30:00',
+  capacity_locked BOOLEAN NOT NULL DEFAULT FALSE,
+  data_revision BIGINT NOT NULL DEFAULT 0,
+  last_calibrated_at DATETIME,
+  last_weight_calibrated_at DATETIME,
+  survey_snoozed_until DATETIME,
+  survey_skipped_date DATE,
+  alert_suppressed_date DATE,
+  alert_suppressed_band VARCHAR(20),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE fatigue_daily_summary (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  local_date DATE NOT NULL,
+  timezone_snapshot VARCHAR(64) NOT NULL,
+  planned_load DECIMAL(10,3) NOT NULL DEFAULT 0,
+  completed_load DECIMAL(10,3) NOT NULL DEFAULT 0,
+  predicted_score SMALLINT NOT NULL DEFAULT 0,
+  pending_count INT NOT NULL DEFAULT 0,
+  completed_count INT NOT NULL DEFAULT 0,
+  algorithm_version INT NOT NULL DEFAULT 1,
+  data_revision BIGINT NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, local_date)
+);
+
+CREATE TABLE fatigue_survey (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  local_date DATE NOT NULL,
+  timezone_snapshot VARCHAR(64) NOT NULL,
+  score TINYINT NOT NULL,
+  external_factor_level TINYINT NOT NULL DEFAULT 0,
+  external_factor_tags VARCHAR(2000),
+  completed_load_snapshot DECIMAL(10,3) NOT NULL DEFAULT 0,
+  weights_snapshot VARCHAR(500) NOT NULL,
+  capacity_before DECIMAL(10,3) NOT NULL DEFAULT 18,
+  capacity_after DECIMAL(10,3),
+  model_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+  ineligible_reason VARCHAR(100),
+  learning_weight DECIMAL(4,3) NOT NULL DEFAULT 1,
+  completed_level_counts JSON,
+  algorithm_version INT NOT NULL DEFAULT 1,
+  submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, local_date)
+);
+
+CREATE TABLE fatigue_survey_skip (
+  user_id BIGINT NOT NULL,
+  local_date DATE NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, local_date)
+);
+
+CREATE TABLE fatigue_survey_prompt_log (
+  user_id BIGINT NOT NULL,
+  local_date DATE NOT NULL,
+  algorithm_version INT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, local_date)
+);
+
+CREATE TABLE fatigue_alert_log (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  local_date DATE NOT NULL,
+  source_type VARCHAR(20) NOT NULL,
+  threshold_band VARCHAR(20) NOT NULL,
+  score_snapshot SMALLINT NOT NULL,
+  algorithm_version INT NOT NULL DEFAULT 1,
+  notified_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, local_date, source_type, threshold_band, algorithm_version)
 );
 
 CREATE TABLE reminder_preset (

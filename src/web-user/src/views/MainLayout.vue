@@ -46,9 +46,11 @@ const routeMeta = computed(() => {
     '/teams': { title: '团队', description: '查看成员、权限和协作空间' },
     '/tasks': { title: '团队任务', description: '跟进指派、截止时间与执行状态' },
     '/notifications': { title: '通知', description: '集中处理提醒和团队动态' },
+    '/fatigue/survey': { title: '疲劳调查', description: '记录今天的实际疲劳感受' },
     '/reminders': { title: '提醒记录', description: '查看待发送与历史提醒' },
     '/profile': { title: '个人中心', description: '管理偏好、模块和账号信息' },
     '/profile/settings': { title: '个人设置', description: '更新资料、安全与时区' },
+    '/profile/fatigue': { title: '疲劳评估', description: '管理负荷模型、调查与历史' },
   }
   if (map[route.path]) return map[route.path]
   if (route.path.startsWith('/schedules/')) return { title: '日程详情', description: '查看和调整日程信息' }

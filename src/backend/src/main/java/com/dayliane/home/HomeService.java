@@ -1,6 +1,7 @@
 package com.dayliane.home;
 
 import com.dayliane.notification.NotificationService;
+import com.dayliane.fatigue.FatigueService;
 import com.dayliane.schedule.ScheduleService;
 import com.dayliane.teamtask.TeamTaskService;
 import com.dayliane.user.UserService;
@@ -24,13 +25,15 @@ public class HomeService {
     private final TeamTaskService teamTaskService;
     private final NotificationService notificationService;
     private final UserService userService;
+    private final FatigueService fatigueService;
 
     public HomeService(ScheduleService scheduleService, TeamTaskService teamTaskService,
-                       NotificationService notificationService, UserService userService) {
+                       NotificationService notificationService, UserService userService, FatigueService fatigueService) {
         this.scheduleService = scheduleService;
         this.teamTaskService = teamTaskService;
         this.notificationService = notificationService;
         this.userService = userService;
+        this.fatigueService = fatigueService;
     }
 
     public Map<String, Object> today(long userId) {
@@ -50,7 +53,8 @@ public class HomeService {
                 "personalSchedules", todaySchedules,
                 "teamTasks", todayTasks,
                 "unreadNotificationCount", notificationService.unreadCount(userId),
-                "groups", buildGroups(todaySchedules, todayTasks)
+                "groups", buildGroups(todaySchedules, todayTasks),
+                "fatigue", fatigueService.daily(userId, localToday)
         );
     }
 

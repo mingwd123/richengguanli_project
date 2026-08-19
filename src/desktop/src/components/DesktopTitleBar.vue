@@ -17,10 +17,14 @@ const routeTitle = computed(() => shell.quickTimeline.value ? '快捷时间轴' 
 function handleDrag(event: MouseEvent) {
   if (event.buttons === 1) startWindowDrag()
 }
+
+function handleDoubleClick() {
+  if (!shell.quickTimeline.value) toggleMaximizeWindow()
+}
 </script>
 
 <template>
-  <header class="desktop-titlebar" data-tauri-drag-region @mousedown="handleDrag" @dblclick="toggleMaximizeWindow">
+  <header class="desktop-titlebar" data-tauri-drag-region @mousedown="handleDrag" @dblclick="handleDoubleClick">
     <div class="desktop-titlebar-brand" data-tauri-drag-region>
       <span class="desktop-app-mark">D</span>
       <strong>Dayliane</strong>
@@ -42,7 +46,7 @@ function handleDrag(event: MouseEvent) {
       </button>
       <span class="desktop-action-divider"></span>
       <button type="button" title="最小化" aria-label="最小化" @click="minimizeWindow"><Minus :size="16" /></button>
-      <button type="button" title="最大化" aria-label="最大化" @click="toggleMaximizeWindow"><Square :size="13" /></button>
+      <button type="button" title="最大化" aria-label="最大化" :disabled="shell.quickTimeline.value" @click="toggleMaximizeWindow"><Square :size="13" /></button>
       <button type="button" class="desktop-close-button" title="隐藏到托盘" aria-label="隐藏到托盘" @click="closeWindow"><X :size="16" /></button>
     </div>
   </header>

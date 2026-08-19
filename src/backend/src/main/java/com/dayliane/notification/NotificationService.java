@@ -8,7 +8,9 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -46,7 +48,7 @@ public class NotificationService {
         int safePage = Math.max(1, page);
         int safeSize = Math.min(100, Math.max(1, size));
         p.addValue("limit", safeSize).addValue("offset", (safePage - 1) * safeSize);
-        String select = "select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,is_read isRead,read_at readAt,created_at createdAt";
+        String select = "select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,local_date localDate,target_route targetRoute,data_revision dataRevision,is_read isRead,read_at readAt,created_at createdAt";
         List<Map<String, Object>> rows = named.query(select + where + " order by " + order + " limit :limit offset :offset", p, notificationMapper());
         return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
     }
@@ -66,12 +68,20 @@ public class NotificationService {
     }
 
     public Map<String, Object> preferences(long userId) {
-        List<Map<String, Object>> rows = jdbc.query("select browser_enabled browserEnabled,task_assigned_enabled taskAssignedEnabled,task_status_enabled taskStatusEnabled,reminder_enabled reminderEnabled from notification_preference where user_id=?", (rs, i) -> Map.of(
-                "browserEnabled", rs.getBoolean("browserEnabled"),
-                "taskAssignedEnabled", rs.getBoolean("taskAssignedEnabled"),
-                "taskStatusEnabled", rs.getBoolean("taskStatusEnabled"),
-                "reminderEnabled", rs.getBoolean("reminderEnabled")
-        ), userId);
+        List<Map<String, Object>> rows = jdbc.query("select browser_enabled browserEnabled,task_assigned_enabled taskAssignedEnabled,task_status_enabled taskStatusEnabled,reminder_enabled reminderEnabled,fatigue_alert_enabled fatigueAlertEnabled,fatigue_survey_enabled fatigueSurveyEnabled,quiet_start_time quietStartTime,quiet_end_time quietEndTime from notification_preference where user_id=?", (rs, i) -> {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("browserEnabled", rs.getBoolean("browserEnabled"));
+            row.put("taskAssignedEnabled", rs.getBoolean("taskAssignedEnabled"));
+            row.put("taskStatusEnabled", rs.getBoolean("taskStatusEnabled"));
+            row.put("reminderEnabled", rs.getBoolean("reminderEnabled"));
+            row.put("fatigueAlertEnabled", rs.getBoolean("fatigueAlertEnabled"));
+            row.put("fatigueSurveyEnabled", rs.getBoolean("fatigueSurveyEnabled"));
+            Time quietStart = rs.getTime("quietStartTime");
+            Time quietEnd = rs.getTime("quietEndTime");
+            row.put("quietStartTime", quietStart == null ? "" : quietStart.toString());
+            row.put("quietEndTime", quietEnd == null ? "" : quietEnd.toString());
+            return row;
+        }, userId);
         Map<String, Object> preferences = new LinkedHashMap<>(rows.isEmpty() ? defaultPreferences() : rows.get(0));
         preferences.put("reminderPresetMinutes", reminderPresetMinutes(userId));
         return preferences;
@@ -84,13 +94,17 @@ public class NotificationService {
         boolean taskAssignedEnabled = bool(req, "taskAssignedEnabled", current);
         boolean taskStatusEnabled = bool(req, "taskStatusEnabled", current);
         boolean reminderEnabled = bool(req, "reminderEnabled", current);
+        boolean fatigueAlertEnabled = bool(req, "fatigueAlertEnabled", current);
+        boolean fatigueSurveyEnabled = bool(req, "fatigueSurveyEnabled", current);
+        Time quietStartTime = parseOptionalTime(req.containsKey("quietStartTime") ? req.get("quietStartTime") : current.get("quietStartTime"));
+        Time quietEndTime = parseOptionalTime(req.containsKey("quietEndTime") ? req.get("quietEndTime") : current.get("quietEndTime"));
         List<Integer> reminderPresetMinutes = reminderPresetMinutes(req, current);
         if (count("select count(*) from notification_preference where user_id=?", userId) == 0) {
-            jdbc.update("insert into notification_preference (user_id,browser_enabled,task_assigned_enabled,task_status_enabled,reminder_enabled) values (?,?,?,?,?)",
-                    userId, browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled);
+            jdbc.update("insert into notification_preference (user_id,browser_enabled,task_assigned_enabled,task_status_enabled,reminder_enabled,fatigue_alert_enabled,fatigue_survey_enabled,quiet_start_time,quiet_end_time) values (?,?,?,?,?,?,?,?,?)",
+                    userId, browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled, fatigueAlertEnabled, fatigueSurveyEnabled, quietStartTime, quietEndTime);
         } else {
-            jdbc.update("update notification_preference set browser_enabled=?,task_assigned_enabled=?,task_status_enabled=?,reminder_enabled=?,updated_at=utc_timestamp() where user_id=?",
-                    browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled, userId);
+            jdbc.update("update notification_preference set browser_enabled=?,task_assigned_enabled=?,task_status_enabled=?,reminder_enabled=?,fatigue_alert_enabled=?,fatigue_survey_enabled=?,quiet_start_time=?,quiet_end_time=?,updated_at=utc_timestamp() where user_id=?",
+                    browserEnabled, taskAssignedEnabled, taskStatusEnabled, reminderEnabled, fatigueAlertEnabled, fatigueSurveyEnabled, quietStartTime, quietEndTime, userId);
         }
         jdbc.update("delete from reminder_preset where user_id=?", userId);
         for (int index = 0; index < reminderPresetMinutes.size(); index++) {
@@ -102,16 +116,29 @@ public class NotificationService {
 
     public boolean createNotification(long userId, String type, String title, String content,
                                       String relatedType, long relatedId, Long reminderId) {
+        return createNotification(userId, type, title, content, relatedType, relatedId, reminderId, null, null, 0L);
+    }
+
+    public boolean createNotification(long userId, String type, String title, String content,
+                                      String relatedType, Long relatedId, Long reminderId,
+                                      LocalDate localDate, String targetRoute, long dataRevision) {
         Map<String, Object> preference = preferences(userId);
         boolean enabled = switch (type) {
             case "reminder" -> (boolean) preference.get("reminderEnabled");
             case "task_assigned" -> (boolean) preference.get("taskAssignedEnabled");
+            case "fatigue_plan_warning", "fatigue_actual_warning" -> (boolean) preference.get("fatigueAlertEnabled");
+            case "fatigue_survey" -> (boolean) preference.get("fatigueSurveyEnabled");
             default -> !type.startsWith("task_") || (boolean) preference.get("taskStatusEnabled");
         };
         if (!enabled) return false;
-        jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,reminder_id,is_read) values (?,?,?,?,?,?,?,false)",
-                userId, type, title, content, relatedType, relatedId, reminderId);
+        jdbc.update("insert into notification (user_id,type,title,content,related_type,related_id,reminder_id,local_date,target_route,data_revision,is_read) values (?,?,?,?,?,?,?,?,?,?,false)",
+                userId, type, title, content, relatedType, relatedId, reminderId, localDate, targetRoute, dataRevision == 0L ? null : dataRevision);
         return true;
+    }
+
+    public boolean hasNotificationForDate(long userId, String type, LocalDate localDate) {
+        Integer count = jdbc.queryForObject("select count(*) from notification where user_id=? and type=? and local_date=? and deleted_at is null", Integer.class, userId, type, localDate);
+        return count != null && count > 0;
     }
 
     public void readNotification(long id, long userId) {
@@ -134,6 +161,10 @@ public class NotificationService {
             m.put("relatedType", rs.getString("relatedType"));
             m.put("relatedId", rs.getObject("relatedId"));
             m.put("reminderId", rs.getObject("reminderId"));
+            Object localDate = rs.getObject("localDate");
+            m.put("localDate", localDate == null ? "" : localDate.toString());
+            m.put("targetRoute", rs.getString("targetRoute"));
+            m.put("dataRevision", rs.getObject("dataRevision"));
             m.put("isRead", rs.getBoolean("isRead"));
             m.put("readAt", iso(rs.getTimestamp("readAt")));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
@@ -150,7 +181,11 @@ public class NotificationService {
                 "browserEnabled", false,
                 "taskAssignedEnabled", true,
                 "taskStatusEnabled", true,
-                "reminderEnabled", true
+                "reminderEnabled", true,
+                "fatigueAlertEnabled", true,
+                "fatigueSurveyEnabled", true,
+                "quietStartTime", "",
+                "quietEndTime", ""
         );
     }
 
@@ -193,6 +228,17 @@ public class NotificationService {
     private static boolean bool(Map<String, Object> req, String key, Map<String, Object> current) {
         Object value = req.get(key);
         return value == null ? (boolean) current.get(key) : value instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private static Time parseOptionalTime(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) return null;
+        try {
+            String text = String.valueOf(value);
+            if (text.length() == 5) text += ":00";
+            return Time.valueOf(text);
+        } catch (IllegalArgumentException ex) {
+            throw new BusinessException(400, "quiet time is invalid");
+        }
     }
 
     private int count(String sql, Object... args) {

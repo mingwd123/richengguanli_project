@@ -92,7 +92,18 @@ export function currentDateParts(timezone = displayTimezone) {
 }
 
 export function toSchedulePayload(input: ScheduleForm, timezone = displayTimezone) {
-  const out: Record<string, any> = { title: input.title, description: input.description || '', groupId: Number(input.groupId) || null, groupName: input.groupName, timeType: input.timeType, startTime: '', endTime: '', deadlineTime: '' }
+  const out: Record<string, any> = {
+    title: input.title,
+    description: input.description || '',
+    groupId: Number(input.groupId) || null,
+    groupName: input.groupName,
+    timeType: input.timeType,
+    urgencyLevel: Number.isInteger(input.urgencyLevel) ? input.urgencyLevel : 3,
+    fatigueLevel: Number.isInteger(input.fatigueLevel) ? input.fatigueLevel : 3,
+    startTime: '',
+    endTime: '',
+    deadlineTime: ''
+  }
   if (input.timeType === 'point_event') out.startTime = toIso(input.startTime, timezone)
   if (input.timeType === 'deadline_task') out.deadlineTime = toIso(input.deadlineTime, timezone)
   if (input.timeType === 'duration_task') {

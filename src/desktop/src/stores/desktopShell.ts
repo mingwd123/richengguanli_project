@@ -16,6 +16,9 @@ const storage = typeof localStorage === 'undefined' ? null : localStorage
 
 type NotificationPermissionState = 'unknown' | 'granted' | 'denied' | 'unavailable'
 type QuickTimelineExitGuard = 'none' | 'confirm' | 'blocked'
+export type QuickTimelineTarget =
+  | { kind: 'timeline' }
+  | { kind: 'fatigue-survey'; localDate?: string }
 
 const settingsOpen = ref(false)
 const opacity = ref(clampOpacity(Number(storage?.getItem(OPACITY_KEY) || 96)))
@@ -24,6 +27,8 @@ const nativeNotificationsEnabled = ref(storage?.getItem(NATIVE_NOTIFICATIONS_KEY
 const quickTimeline = ref(storage?.getItem(QUICK_TIMELINE_KEY) === 'true')
 const quickTimelineExitGuard = ref<QuickTimelineExitGuard>('none')
 const quickTimelineExitMessage = ref('')
+const pendingQuickTarget = ref<QuickTimelineTarget | null>(null)
+const quickRefreshRevision = ref(0)
 const notificationPermission = ref<NotificationPermissionState>(runningInTauri ? 'unknown' : 'unavailable')
 let initialized = false
 
@@ -96,6 +101,18 @@ export function useDesktopShell() {
     quickTimelineExitMessage.value = message
   }
 
+  function requestQuickTarget(target: QuickTimelineTarget) {
+    pendingQuickTarget.value = target
+  }
+
+  function consumeQuickTarget(target: QuickTimelineTarget) {
+    if (pendingQuickTarget.value === target) pendingQuickTarget.value = null
+  }
+
+  function requestQuickRefresh() {
+    quickRefreshRevision.value += 1
+  }
+
   async function requestNotificationPermission() {
     notificationPermission.value = await requestNativeNotificationPermission()
     if (notificationPermission.value === 'granted') setNativeNotificationsEnabled(true)
@@ -114,6 +131,8 @@ export function useDesktopShell() {
     nativeNotificationsEnabled,
     quickTimeline,
     quickTimelineExitGuard,
+    pendingQuickTarget,
+    quickRefreshRevision,
     notificationPermission,
     runningInTauri: computed(() => runningInTauri),
     initialize,
@@ -124,6 +143,9 @@ export function useDesktopShell() {
     setQuickTimeline,
     toggleQuickTimeline,
     setQuickTimelineExitGuard,
+    requestQuickTarget,
+    consumeQuickTarget,
+    requestQuickRefresh,
     requestNotificationPermission,
     setNativeNotificationsEnabled,
   }

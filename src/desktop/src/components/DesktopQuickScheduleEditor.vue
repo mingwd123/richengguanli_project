@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CalendarClock, Flag, Save, Sparkles, Timer } from 'lucide-vue-next'
+import { BatteryMedium, CalendarClock, Flag, Save, Sparkles, Timer, TriangleAlert } from 'lucide-vue-next'
 import type { ScheduleForm, TaskGroup, TimeType } from '@web/types'
 import DesktopQuickReminderPicker from './DesktopQuickReminderPicker.vue'
 
@@ -29,6 +29,11 @@ const modes: Array<{ value: TimeType; label: string }> = [
   { value: 'deadline_task', label: '截止' },
   { value: 'duration_task', label: '持续' },
 ]
+
+const levelLabels = {
+  urgency: ['不紧急', '较低', '普通', '紧急', '非常紧急'],
+  fatigue: ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累'],
+}
 
 const reminderBaseTime = computed(() => form.value.timeType === 'deadline_task'
   ? form.value.deadlineTime
@@ -67,6 +72,21 @@ const reminderBaseLabel = computed(() => form.value.timeType === 'deadline_task'
         <option v-for="group in groups" :key="group.id" :value="String(group.id)">{{ group.name }}</option>
       </select>
     </label>
+
+    <div class="quick-level-grid">
+      <fieldset class="quick-editor-field quick-level-field">
+        <legend><TriangleAlert :size="14" />紧急度</legend>
+        <div class="quick-level-options">
+          <button v-for="level in 5" :key="`quick-urgency-${level}`" type="button" :class="{ active: form.urgencyLevel === level }" :aria-label="`紧急度 ${level} ${levelLabels.urgency[level - 1]}`" @click="form.urgencyLevel = level"><strong>{{ level }}</strong><small>{{ levelLabels.urgency[level - 1] }}</small></button>
+        </div>
+      </fieldset>
+      <fieldset class="quick-editor-field quick-level-field">
+        <legend><BatteryMedium :size="14" />预计疲劳</legend>
+        <div class="quick-level-options fatigue">
+          <button v-for="level in 5" :key="`quick-fatigue-${level}`" type="button" :class="{ active: form.fatigueLevel === level }" :aria-label="`预计疲劳度 ${level} ${levelLabels.fatigue[level - 1]}`" @click="form.fatigueLevel = level"><strong>{{ level }}</strong><small>{{ levelLabels.fatigue[level - 1] }}</small></button>
+        </div>
+      </fieldset>
+    </div>
 
     <label v-if="form.timeType === 'point_event'" class="quick-editor-field">
       <span>发生时间</span>

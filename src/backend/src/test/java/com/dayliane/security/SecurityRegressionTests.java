@@ -65,7 +65,7 @@ class SecurityRegressionTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("ai_usage_log", "ai_api_key", "ai_config", "team_task_event", "team_task_reminder_plan",
+        for (String table : List.of("fatigue_alert_log", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "ai_usage_log", "ai_api_key", "ai_config", "team_task_event", "team_task_reminder_plan",
                 "team_task_assignee", "team_task",
                 "auth_revoked_access_token", "auth_refresh_token",
                 "admin_operation_log", "admin_user", "task_group", "user")) {

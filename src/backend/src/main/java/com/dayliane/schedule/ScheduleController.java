@@ -33,9 +33,13 @@ public class ScheduleController {
                                                   @RequestParam(required = false) String keyword,
                                                   @RequestParam(required = false) String dateFrom,
                                                   @RequestParam(required = false) String dateTo,
-                                                  @RequestParam(defaultValue = "manual") String sort) {
+                                                  @RequestParam(defaultValue = "manual") String sort,
+                                                  @RequestParam(defaultValue = "time") String viewMode,
+                                                  @RequestParam(required = false) Integer urgencyLevel,
+                                                  @RequestParam(required = false) Integer fatigueLevel,
+                                                  @RequestParam(defaultValue = "false") boolean quickScope) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo, sort));
+        return ApiResponse.success(scheduleService.listSchedules(userId, page, size, status, groupName, keyword, dateFrom, dateTo, sort, viewMode, urgencyLevel, fatigueLevel, quickScope));
     }
 
     @GetMapping("/{id}")

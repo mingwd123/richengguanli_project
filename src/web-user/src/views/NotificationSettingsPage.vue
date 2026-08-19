@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { Bell, BellRing, CheckCircle2, Clock3, Monitor, Plus, X } from 'lucide-vue-next'
+import { BatteryMedium, Bell, BellRing, CheckCircle2, Clock3, Monitor, Plus, X } from 'lucide-vue-next'
 
 const router = useRouter()
 const store = useAppStore()
@@ -82,6 +82,16 @@ async function changeBrowserSetting() {
         <span class="setting-icon"><Bell :size="18" /></span>
         <span><strong>到期提醒</strong><small>日程与团队任务提醒</small></span>
         <input v-model="store.notificationPreferences.reminderEnabled" type="checkbox" @change="store.saveNotificationPreferences()" />
+      </label>
+      <label class="setting-switch">
+        <span class="setting-icon"><BatteryMedium :size="18" /></span>
+        <span><strong>疲劳负荷提醒</strong><small>计划负荷进入较高区间时提醒</small></span>
+        <input v-model="store.notificationPreferences.fatigueAlertEnabled" type="checkbox" @change="store.saveNotificationPreferences()" />
+      </label>
+      <label class="setting-switch">
+        <span class="setting-icon"><Clock3 :size="18" /></span>
+        <span><strong>日终疲劳调查</strong><small>按本地时间提醒填写当天感受</small></span>
+        <input v-model="store.notificationPreferences.fatigueSurveyEnabled" type="checkbox" @change="store.saveNotificationPreferences()" />
       </label>
       <section class="reminder-preset-settings">
         <div class="reminder-preset-heading">

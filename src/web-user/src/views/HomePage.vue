@@ -4,10 +4,13 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
 import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
-import type { Schedule, TimelineItem } from '../types'
+import type { Schedule, ScheduleViewMode, TimelineItem } from '../types'
+import { buildTodayScheduleSections } from '../utils/scheduleViews'
 import { timelinePresentationStatus, timelineTimeRange } from '../utils/timeline'
 import {
   ArrowRight,
+  AlertTriangle,
+  BatteryMedium,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -16,6 +19,7 @@ import {
   Clock3,
   Inbox,
   LoaderCircle,
+  Layers3,
   Plus,
   Sparkles,
   UsersRound,
@@ -29,7 +33,28 @@ const collapsedModules = ref<string[]>([])
 const collapsedTeamModules = ref<string[]>([])
 const completingScheduleId = ref<number | null>(null)
 
+const scheduleViewOptions = [
+  { value: 'time' as ScheduleViewMode, label: '时间', icon: Clock3 },
+  { value: 'group' as ScheduleViewMode, label: '分组', icon: Layers3 },
+  { value: 'urgency' as ScheduleViewMode, label: '紧急度', icon: AlertTriangle },
+  { value: 'fatigue' as ScheduleViewMode, label: '疲劳度', icon: BatteryMedium },
+]
+
 const TIMELINE_LIMIT = 12
+
+const fatigueSummary = computed(() => store.fatigueDaily)
+const fatigueSurveyPending = computed(() => Boolean(store.fatigueSurveyToday?.pending))
+const fatigueNeedsAlertAction = computed(() => Number(fatigueSummary.value?.predictedScore || 0) >= 70 || Number(fatigueSummary.value?.actualLoadScore || 0) >= 70)
+const fatigueStateLabel = computed(() => {
+  const labels: Record<string, string> = {
+    comfortable: '舒适',
+    full: '较满',
+    tired: '较疲劳',
+    high: '高负荷',
+    overloaded: '可能过载',
+  }
+  return labels[fatigueSummary.value?.level || ''] || '暂无估算'
+})
 
 const greeting = computed(() => {
   const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: store.profile?.timezone || getDisplayTimezone(), hour: 'numeric', hourCycle: 'h23' }).format(new Date()))
@@ -79,9 +104,11 @@ function toggleTeamModule(name: string) {
     : [...collapsedTeamModules.value, name]
 }
 
-const scheduleModules = computed(() => groupByTaskState(
-  store.today.personalSchedules.filter(schedule => !['completed', 'cancelled'].includes(schedule.status)),
-  schedule => schedule.groupName || '未分组'
+const scheduleModules = computed(() => buildTodayScheduleSections(
+  store.today.personalSchedules,
+  store.viewMode,
+  store.taskGroups,
+  nowTs.value
 ))
 
 const teamTaskModules = computed(() => groupByTaskState(
@@ -243,6 +270,24 @@ function openCreateSchedule() {
   store.openScheduleModal()
   router.push('/schedules')
 }
+
+function openFatigueSurvey() {
+  router.push('/fatigue/survey')
+}
+
+async function suppressFatigueAlerts() {
+  await store.suppressFatigueAlertsToday(fatigueSummary.value?.level)
+}
+
+async function applyScheduleView(mode: ScheduleViewMode) {
+  if (store.viewMode === mode) return
+  collapsedModules.value = []
+  await store.setScheduleViewMode(mode)
+}
+
+function openSchedules() {
+  router.push({ path: '/schedules', query: { view: store.viewMode } })
+}
 </script>
 
 <template>
@@ -287,7 +332,25 @@ function openCreateSchedule() {
         <div><span>未读通知</span><strong>{{ store.today.unreadNotificationCount }}</strong></div>
         <button class="stat-link" title="查看通知" @click="router.push('/notifications')"><ArrowRight :size="16" /></button>
       </article>
+      <article class="stat-card fatigue-stat-card">
+        <span class="stat-icon fatigue"><BatteryMedium :size="19" /></span>
+        <div><span>个人预计负荷</span><strong>{{ fatigueSummary?.predictedScore ?? '--' }}</strong><small>{{ fatigueStateLabel }} · {{ fatigueSummary?.plannedLoad ?? 0 }} / {{ fatigueSummary?.capacity75 ?? store.fatigueProfile?.capacity75 ?? 18 }}</small></div>
+        <button class="stat-link" :title="fatigueSurveyPending ? '填写疲劳调查' : '查看疲劳调查'" @click="openFatigueSurvey"><ArrowRight :size="16" /></button>
+      </article>
     </div>
+
+    <section class="home-fatigue-strip" :class="{ pending: fatigueSurveyPending }">
+      <span class="home-fatigue-icon"><BatteryMedium :size="18" /></span>
+      <div class="home-fatigue-copy">
+        <strong>{{ fatigueSurveyPending ? '今天的实际疲劳还没有记录' : '个人日程负荷摘要' }}</strong>
+        <span v-if="fatigueSurveyPending">完成一项个人日程后，记录你的真实感受可以帮助模型逐步校准。</span>
+        <span v-else>预计 {{ fatigueSummary?.predictedScore ?? 0 }} 分 · 已完成负荷 {{ fatigueSummary?.completedLoad ?? 0 }} · {{ fatigueSummary?.modelStage === 'default' ? '默认模型' : fatigueSummary?.modelStage || '校准中' }}</span>
+      </div>
+      <div class="home-fatigue-actions">
+        <button v-if="fatigueNeedsAlertAction && !fatigueSurveyPending" class="plain-button" @click="suppressFatigueAlerts">今天不再提醒</button>
+        <button class="plain-button" @click="openFatigueSurvey">{{ fatigueSurveyPending ? '填写调查' : '查看详情' }} <ArrowRight :size="15" /></button>
+      </div>
+    </section>
 
     <section :class="['ai-plan-section', { empty: !aiPlan, loading: aiLoadingPlan }]" @click="!aiPlan && loadAiPlan()">
       <span class="ai-plan-icon"><Sparkles :size="20" /></span>
@@ -325,19 +388,33 @@ function openCreateSchedule() {
             <span class="section-icon"><CheckCircle2 :size="18" /></span>
             <div><h2>今天要做</h2><p>个人日程与团队任务</p></div>
           </div>
-          <button class="plain-button section-more" @click="router.push('/schedules')">查看全部 <ArrowRight :size="15" /></button>
+          <button class="plain-button section-more" @click="openSchedules">查看全部 <ArrowRight :size="15" /></button>
         </div>
-        <p class="content-caption">个人日程</p>
-        <section v-for="module in scheduleModules" :key="module.name" class="home-module">
-          <div class="module-title" @click="toggleModule(module.name)">
+        <div class="home-schedule-view-toolbar">
+          <p class="content-caption">个人日程</p>
+          <div class="segmented-control home-schedule-view-control" aria-label="首页个人日程视图">
+            <button
+              v-for="option in scheduleViewOptions"
+              :key="option.value"
+              type="button"
+              :class="{ active: store.viewMode === option.value }"
+              :aria-pressed="store.viewMode === option.value"
+              @click="applyScheduleView(option.value)"
+            >
+              <component :is="option.icon" :size="15" />{{ option.label }}
+            </button>
+          </div>
+        </div>
+        <section v-for="module in scheduleModules" :key="module.key" class="home-module">
+          <div class="module-title" @click="toggleModule(module.key)">
             <button class="plain-button module-toggle">
-              <ChevronRight v-if="collapsedModules.includes(module.name)" :size="15" />
+              <ChevronRight v-if="collapsedModules.includes(module.key)" :size="15" />
               <ChevronDown v-else :size="15" />
               <span>{{ module.name }}</span>
             </button>
-            <span>{{ module.items.filter(item => item.status === 'pending').length }} 项</span>
+            <span>{{ module.items.length }} 项</span>
           </div>
-          <template v-if="!collapsedModules.includes(module.name)">
+          <template v-if="!collapsedModules.includes(module.key)">
             <article
               v-for="schedule in module.items.slice(0, 3)"
               :key="schedule.id"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -8,8 +8,11 @@ import {
   ChevronRight,
   CircleDot,
   Clock3,
+  AlertTriangle,
+  BatteryMedium,
   Edit3,
   Flag,
+  Layers3,
   ListTodo,
   PanelTopOpen,
   Plus,
@@ -24,6 +27,9 @@ import type {
   PageResult,
   Schedule,
   ScheduleForm,
+  ScheduleListResult,
+  ScheduleViewMode,
+  SectionSummary,
   TaskForm,
   TaskGroup,
   TeamMember,
@@ -41,12 +47,23 @@ import {
 } from '@web/utils/timeline'
 import { useDesktopShell } from '../stores/desktopShell'
 import DesktopQuickScheduleEditor from './DesktopQuickScheduleEditor.vue'
+import DesktopQuickFatigueSurvey from './DesktopQuickFatigueSurvey.vue'
 import DesktopQuickTeamBreakdown, { type QuickTeamBreakdownTask } from './DesktopQuickTeamBreakdown.vue'
 import DesktopQuickTeamTaskCreator from './DesktopQuickTeamTaskCreator.vue'
 import DesktopQuickTaskEditor from './DesktopQuickTaskEditor.vue'
 import type { QuickTaskEditForm } from './desktopQuickTypes'
 import { isoToZonedDatetimeLocal, zonedDatetimeLocalToIso } from '../utils/timezone'
 import { inferAiGroupId, normalizeAiDateTime, normalizeAiScheduleDraft, resolveAiTimeType } from '../utils/aiSchedule'
+import {
+  defaultQuickScrollPositions,
+  entriesForQuickSource,
+  quickPreferenceKeys,
+  quickScheduleQuery,
+  scheduleDataRevision,
+  shouldAcceptScheduleRevision,
+  shouldDeferQuickTarget,
+  type QuickSource,
+} from '../utils/desktopQuickScheduleViews'
 
 type SourceType = 'schedule' | 'team_task'
 type RawTimelineItem = Schedule | MyTask
@@ -59,6 +76,7 @@ type QuickView =
   | { kind: 'schedule-edit'; id: number; scrollTop: number }
   | { kind: 'task-detail'; id: number; scrollTop: number }
   | { kind: 'task-edit'; id: number; scrollTop: number }
+  | { kind: 'fatigue-survey'; localDate: string; scrollTop: number }
 
 type QuickEntry = {
   key: string
@@ -71,6 +89,16 @@ type QuickEntry = {
 
 type QuickTeamBreakdownBase = Pick<TaskForm, 'teamId' | 'groupId' | 'startTime' | 'remindAt'>
 const BREAKDOWN_EXIT_MESSAGE = 'AI 子任务草稿尚未创建，切换到完整工作台会丢失这些草稿，仍要继续吗？'
+type QuickSection = SectionSummary & { items: QuickEntry[] }
+
+function quickModeRecord<T>(create: () => T): Record<ScheduleViewMode, T> {
+  return {
+    time: create(),
+    group: create(),
+    urgency: create(),
+    fatigue: create(),
+  }
+}
 
 const store = useAppStore()
 const shell = useDesktopShell()
@@ -91,10 +119,30 @@ const teamAiError = ref('')
 const teamAiNotice = ref('')
 const aiBreakdownTasks = ref<QuickTeamBreakdownTask[]>([])
 const aiBreakdownBase = ref<QuickTeamBreakdownBase | null>(null)
-const quickDataLoading = ref(false)
-const quickDataLoaded = ref(false)
-const quickSchedules = ref<Schedule[]>([])
+const quickSource = ref<QuickSource>('personal')
+const quickViewMode = ref<ScheduleViewMode>('time')
+const quickScheduleResults = ref<Record<ScheduleViewMode, ScheduleListResult | null>>(quickModeRecord(() => null))
+const quickPersonalLoading = ref<Record<ScheduleViewMode, boolean>>(quickModeRecord(() => false))
+const quickPersonalErrors = ref<Record<ScheduleViewMode, string>>(quickModeRecord(() => ''))
+const quickAcceptedScheduleRevision = ref<number | null>(null)
 const quickTasks = ref<MyTask[]>([])
+const quickTeamLoading = ref(false)
+const quickTeamLoaded = ref(false)
+const quickTeamError = ref('')
+const quickScheduleResult = computed(() => quickScheduleResults.value[quickViewMode.value])
+const quickSchedules = computed(() => quickScheduleResult.value?.list || [])
+const quickDataLoading = computed(() => quickSource.value === 'personal'
+  ? quickPersonalLoading.value[quickViewMode.value]
+  : quickTeamLoading.value)
+const quickDataLoaded = computed(() => quickSource.value === 'personal'
+  ? quickScheduleResult.value !== null
+  : quickTeamLoaded.value)
+const quickDataError = computed(() => quickSource.value === 'personal'
+  ? quickPersonalErrors.value[quickViewMode.value]
+  : quickTeamError.value)
+const quickRefreshLoading = computed(() => quickTeamLoading.value
+  || Object.values(quickPersonalLoading.value).some(Boolean))
+const quickScrollPositions = ref<Record<ScheduleViewMode, number>>(defaultQuickScrollPositions())
 const scheduleDetail = ref<Schedule | null>(null)
 const teamTaskDetail = ref<TeamTask | null>(null)
 const teamTaskGroups = ref<TaskGroup[]>([])
@@ -108,7 +156,8 @@ const initialTaskReminder = ref('')
 let createFormInitialized = false
 let teamCreateContextRequest = 0
 let detailRequest = 0
-let quickDataRequest = 0
+const quickPersonalRequests = quickModeRecord(() => 0)
+let quickTeamRequest = 0
 let aiParseRequest = 0
 let aiBreakdownRequest = 0
 let aiOptimizeRequest = 0
@@ -120,13 +169,22 @@ const createForm = ref<ScheduleForm>(newScheduleForm())
 const teamCreateForm = ref<TaskForm>(newTeamTaskForm())
 const scheduleEditForm = ref<ScheduleForm>(newScheduleForm())
 const taskEditForm = ref<QuickTaskEditForm>(newTaskEditForm())
-const todayKey = computed(() => dateKeyInTimezone(now.value, timezone.value))
+const todayKey = computed(() => store.fatigueDaily?.localDate
+  || store.fatigueSurveyToday?.localDate
+  || dateKeyInTimezone(now.value, timezone.value))
 const todayLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
-  timeZone: timezone.value,
+  timeZone: 'UTC',
   month: 'long',
   day: 'numeric',
   weekday: 'long',
-}).format(now.value))
+}).format(new Date(`${todayKey.value}T12:00:00Z`)))
+
+const quickViewOptions = [
+  { value: 'time' as ScheduleViewMode, label: '时间', icon: Clock3 },
+  { value: 'group' as ScheduleViewMode, label: '分组', icon: Layers3 },
+  { value: 'urgency' as ScheduleViewMode, label: '紧急', icon: AlertTriangle },
+  { value: 'fatigue' as ScheduleViewMode, label: '疲劳', icon: BatteryMedium },
+]
 
 const nestedViewTitle = computed(() => {
   if (activeView.value.kind === 'create') return '新建任务'
@@ -135,6 +193,7 @@ const nestedViewTitle = computed(() => {
   if (activeView.value.kind === 'schedule-edit') return '编辑个人日程'
   if (activeView.value.kind === 'task-detail') return teamTaskDetail.value?.title || '团队任务详情'
   if (activeView.value.kind === 'task-edit') return '编辑团队任务'
+  if (activeView.value.kind === 'fatigue-survey') return '个人日程疲劳调查'
   return '快捷时间轴'
 })
 
@@ -143,6 +202,7 @@ const nestedViewKicker = computed(() => {
   if (activeView.value.kind === 'team-breakdown') return '团队任务 · AI 拆解'
   if (activeView.value.kind.startsWith('schedule')) return '个人日程'
   if (activeView.value.kind.startsWith('task')) return '团队任务'
+  if (activeView.value.kind === 'fatigue-survey') return activeView.value.localDate
   return '今天'
 })
 
@@ -154,20 +214,24 @@ function sourceItem(item: RawTimelineItem, sourceType: SourceType) {
   return { ...item, sourceType }
 }
 
-const allItems = computed(() => {
-  const unique = new Map<string, { raw: RawTimelineItem; sourceType: SourceType }>()
-  const add = (items: RawTimelineItem[], sourceType: SourceType) => {
-    for (const item of items) unique.set(itemKey(sourceType, item), { raw: item, sourceType })
+const personalEntries = computed<QuickEntry[]>(() => quickSchedules.value.map(raw => {
+  const sourceType: SourceType = 'schedule'
+  const item = sourceItem(raw, sourceType)
+  const presentation = raw.status === 'pending' && raw.isOverdue
+    ? 'overdue'
+    : timelinePresentationStatus(item, now.value)
+  return {
+    key: itemKey(sourceType, raw),
+    sourceType,
+    raw,
+    range: timelineTimeRange(item),
+    presentation,
+    sourceLabel: raw.groupName || '个人日程',
   }
+}))
 
-  add(store.today.personalSchedules, 'schedule')
-  add(store.today.teamTasks, 'team_task')
-  add(quickDataLoaded.value ? quickSchedules.value : store.schedules, 'schedule')
-  add(quickDataLoaded.value ? quickTasks.value : store.myTasks, 'team_task')
-  return [...unique.values()]
-})
-
-const entries = computed<QuickEntry[]>(() => allItems.value.map(({ raw, sourceType }) => {
+const teamEntries = computed<QuickEntry[]>(() => quickTasks.value.map(raw => {
+  const sourceType: SourceType = 'team_task'
   const item = sourceItem(raw, sourceType)
   return {
     key: itemKey(sourceType, raw),
@@ -175,11 +239,34 @@ const entries = computed<QuickEntry[]>(() => allItems.value.map(({ raw, sourceTy
     raw,
     range: timelineTimeRange(item),
     presentation: timelinePresentationStatus(item, now.value),
-    sourceLabel: sourceType === 'schedule'
-      ? ((raw as Schedule).groupName || '个人日程')
-      : ((raw as MyTask).teamName || '团队任务'),
+    sourceLabel: raw.teamName || '团队任务',
   }
 }))
+
+const entries = computed<QuickEntry[]>(() => entriesForQuickSource(quickSource.value, personalEntries.value, teamEntries.value))
+
+const personalSections = computed<QuickSection[]>(() => {
+  const loaded = new Map<string, QuickEntry[]>()
+  for (const entry of personalEntries.value) {
+    const schedule = entry.raw as Schedule
+    const key = schedule.sectionKey || `${quickViewMode.value}:${schedule.sectionLabel || schedule.groupName || '未分组'}`
+    const items = loaded.get(key) || []
+    items.push(entry)
+    loaded.set(key, items)
+  }
+  const summaries = quickScheduleResult.value?.sectionSummaries || []
+  if (!summaries.length) {
+    return [...loaded.entries()].map(([key, items]) => ({
+      key,
+      label: (items[0]?.raw as Schedule)?.sectionLabel || (items[0]?.raw as Schedule)?.groupName || '未分组',
+      total: items.length,
+      pendingCount: items.length,
+      plannedLoad: items.reduce((sum, item) => sum + Number((item.raw as Schedule).fatigueWeight || 3), 0),
+      items,
+    }))
+  }
+  return summaries.map(summary => ({ ...summary, items: loaded.get(summary.key) || [] }))
+})
 
 const openEntries = computed(() => entries.value.filter(entry =>
   !['completed', 'cancelled', 'rejected'].includes(entry.presentation)))
@@ -194,8 +281,10 @@ const timelineEntries = computed(() => openEntries.value
   .filter(entry => timelineOccursOnDate(sourceItem(entry.raw, entry.sourceType), todayKey.value, timezone.value))
   .sort((left, right) => timeValue(left.range.sortAt) - timeValue(right.range.sortAt)))
 
+const visibleTimelineEntries = computed(() => timelineEntries.value.slice(0, 8))
+
 const timelineRows = computed<QuickRow[]>(() => {
-  const rows: QuickRow[] = timelineEntries.value.map(entry => ({ type: 'item', entry }))
+  const rows: QuickRow[] = visibleTimelineEntries.value.map(entry => ({ type: 'item', entry }))
   const firstUpcoming = rows.findIndex(row => row.type === 'item' && timeValue(row.entry.range.sortAt) >= now.value)
   rows.splice(firstUpcoming < 0 ? rows.length : firstUpcoming, 0, { type: 'now' })
   return rows
@@ -206,9 +295,47 @@ const unscheduledEntries = computed(() => openEntries.value
   .sort((left, right) => left.raw.title.localeCompare(right.raw.title, 'zh-CN')))
 
 const stats = computed(() => buildTimelineStats(
-  allItems.value.map(({ raw, sourceType }) => sourceItem(raw, sourceType)),
+  entries.value.map(entry => sourceItem(entry.raw, entry.sourceType)),
   { now: now.value, timezone: timezone.value },
 ))
+
+const quickHeaderCount = computed(() => quickSource.value === 'personal'
+  ? Number(quickScheduleResult.value?.total || 0)
+  : stats.value.today)
+
+const fatigueStateLabel = computed(() => {
+  const labels: Record<string, string> = {
+    comfortable: '舒适',
+    full: '较满',
+    tired: '较疲劳',
+    high: '高负荷',
+    overloaded: '可能过载',
+  }
+  return labels[store.fatigueDaily?.level || ''] || '暂无估算'
+})
+
+const quickLoadPercent = computed(() => {
+  const planned = Number(store.fatigueDaily?.plannedLoad || 0)
+  const capacity = Number(store.fatigueDaily?.capacity75 || store.fatigueProfile?.capacity75 || 0)
+  return capacity > 0 ? Math.min(100, Math.round(planned / capacity * 100)) : 0
+})
+
+const fatigueAlertText = computed(() => {
+  const level = store.fatigueDaily?.level
+  if (level === 'overloaded') return '预计负荷已超过个人承受上限，建议调整今天的个人日程'
+  if (level === 'high') return '预计负荷接近上限，可以优先处理高紧急度日程'
+  if (level === 'tired') return '今天的个人日程负荷偏高，记得预留休息时间'
+  return ''
+})
+
+const fatigueSurveyStatus = computed(() => {
+  const surveyState = store.fatigueSurveyToday
+  if (surveyState?.pending) return '待填写'
+  if (surveyState?.survey && 'score' in surveyState.survey) return '已记录'
+  if (surveyState?.profile?.surveySkippedDate === surveyState.localDate) return '已跳过'
+  if (surveyState?.profile?.surveySnoozedUntil && new Date(surveyState.profile.surveySnoozedUntil).getTime() > now.value) return '稍后提醒'
+  return '暂无待办'
+})
 
 const schedulePresentation = computed(() => scheduleDetail.value
   ? timelinePresentationStatus(sourceItem(scheduleDetail.value, 'schedule'), now.value)
@@ -255,6 +382,8 @@ function newScheduleForm(): ScheduleForm {
     endTime: roundedFuture(90),
     deadlineTime: roundedFuture(60),
     remindAt: '',
+    urgencyLevel: 3,
+    fatigueLevel: 3,
   }
 }
 
@@ -287,51 +416,167 @@ function timeValue(value: string) {
   return Number.isNaN(timestamp) ? Number.MAX_SAFE_INTEGER : timestamp
 }
 
-async function fetchAllPages<T>(path: string, params: Record<string, string>) {
-  const items: T[] = []
-  const size = 100
-  let page = 1
-  let total = Number.POSITIVE_INFINITY
-
-  while (items.length < total) {
-    const query = new URLSearchParams({ ...params, page: String(page), size: String(size) })
-    const data = await store.request<PageResult<T>>(`${path}?${query.toString()}`)
-    const pageItems = data.list || []
-    items.push(...pageItems)
-    total = Number(data.total || items.length)
-    if (!pageItems.length || items.length >= total) break
-    page += 1
+function loadQuickPreferences() {
+  const userId = store.profile?.id
+  if (!userId) return
+  const keys = quickPreferenceKeys(userId)
+  const mode = localStorage.getItem(keys.view)
+  if (['time', 'group', 'urgency', 'fatigue'].includes(mode || '')) quickViewMode.value = mode as ScheduleViewMode
+  const source = localStorage.getItem(keys.source)
+  if (source === 'personal' || source === 'team') quickSource.value = source
+  try {
+    const saved = JSON.parse(localStorage.getItem(keys.scroll) || '{}')
+    quickScrollPositions.value = {
+      time: Math.max(0, Number(saved.time) || 0),
+      group: Math.max(0, Number(saved.group) || 0),
+      urgency: Math.max(0, Number(saved.urgency) || 0),
+      fatigue: Math.max(0, Number(saved.fatigue) || 0),
+    }
+  } catch {
+    quickScrollPositions.value = defaultQuickScrollPositions()
   }
-  return items
 }
 
-async function loadQuickTimelineData(notifyOnError = true) {
-  const requestId = ++quickDataRequest
-  quickDataLoading.value = true
+function persistQuickPreferences() {
+  const userId = store.profile?.id
+  if (!userId) return
+  const keys = quickPreferenceKeys(userId)
+  localStorage.setItem(keys.view, quickViewMode.value)
+  localStorage.setItem(keys.source, quickSource.value)
+  localStorage.setItem(keys.scroll, JSON.stringify(quickScrollPositions.value))
+}
+
+async function loadQuickPersonalSchedules(mode: ScheduleViewMode, notifyOnError: boolean) {
+  const userId = store.profile?.id
+  if (!userId) return
+  const requestId = ++quickPersonalRequests[mode]
+  quickPersonalLoading.value[mode] = true
+  quickPersonalErrors.value[mode] = ''
   try {
-    const [schedules, pendingTasks, acceptedTasks] = await Promise.all([
-      fetchAllPages<Schedule>('/schedules', { status: 'pending', sort: 'time_asc' }),
-      fetchAllPages<MyTask>('/team-tasks/my', { status: 'pending', sort: 'time_asc' }),
-      fetchAllPages<MyTask>('/team-tasks/my', { status: 'accepted', sort: 'time_asc' }),
+    const scheduleQuery = quickScheduleQuery(mode)
+    const schedules = await store.request<ScheduleListResult>(`/schedules?${scheduleQuery.toString()}`)
+    if (requestId !== quickPersonalRequests[mode] || userId !== store.profile?.id) return
+    const revision = scheduleDataRevision(schedules)
+    if (!shouldAcceptScheduleRevision(quickAcceptedScheduleRevision.value, revision)) {
+      quickPersonalErrors.value[mode] = '个人日程响应版本过旧，已保留最近一次有效结果'
+      if (notifyOnError) store.notify(quickPersonalErrors.value[mode])
+      return
+    }
+    quickScheduleResults.value[mode] = schedules
+    if (revision !== null) quickAcceptedScheduleRevision.value = revision
+  } catch (error: any) {
+    if (requestId === quickPersonalRequests[mode] && userId === store.profile?.id) {
+      quickPersonalErrors.value[mode] = error.message || '加载个人日程失败'
+      if (notifyOnError) store.notify(quickPersonalErrors.value[mode])
+    }
+  } finally {
+    if (requestId === quickPersonalRequests[mode]) quickPersonalLoading.value[mode] = false
+  }
+}
+
+async function loadQuickTeamTasks(notifyOnError: boolean) {
+  const userId = store.profile?.id
+  if (!userId) return
+  const requestId = ++quickTeamRequest
+  quickTeamLoading.value = true
+  quickTeamError.value = ''
+  try {
+    const taskQuery = (status: string) => new URLSearchParams({ page: '1', size: '40', status, sort: 'time_asc' })
+    const [pendingTasks, acceptedTasks] = await Promise.all([
+      store.request<PageResult<MyTask>>(`/team-tasks/my?${taskQuery('pending').toString()}`),
+      store.request<PageResult<MyTask>>(`/team-tasks/my?${taskQuery('accepted').toString()}`),
     ])
-    if (requestId !== quickDataRequest) return
+    if (requestId !== quickTeamRequest || userId !== store.profile?.id) return
     const tasks = new Map<number, MyTask>()
-    for (const task of [...pendingTasks, ...acceptedTasks]) {
+    for (const task of [...(pendingTasks.list || []), ...(acceptedTasks.list || [])]) {
       if (!isActionableTeamTask(task) || !['pending', 'accepted'].includes(task.assignStatus || '')) continue
       tasks.set(task.id, task)
     }
-    quickSchedules.value = schedules
     quickTasks.value = [...tasks.values()]
-    quickDataLoaded.value = true
+    quickTeamLoaded.value = true
   } catch (error: any) {
-    if (requestId === quickDataRequest && notifyOnError) store.notify(error.message || '加载快捷时间轴失败')
+    if (requestId === quickTeamRequest && userId === store.profile?.id) {
+      quickTeamError.value = error.message || '加载团队任务失败'
+      if (notifyOnError) store.notify(quickTeamError.value)
+    }
   } finally {
-    if (requestId === quickDataRequest) quickDataLoading.value = false
+    if (requestId === quickTeamRequest) quickTeamLoading.value = false
   }
+}
+
+async function loadQuickTimelineData(
+  notifyOnError = true,
+  mode = quickViewMode.value,
+  source?: QuickSource,
+) {
+  const selectedSource = source || quickSource.value
+  const jobs: Promise<void>[] = []
+  if (!source || source === 'personal') {
+    jobs.push(loadQuickPersonalSchedules(mode, notifyOnError && selectedSource === 'personal'))
+  }
+  if (!source || source === 'team') {
+    jobs.push(loadQuickTeamTasks(notifyOnError && selectedSource === 'team'))
+  }
+  await Promise.all(jobs)
 }
 
 async function refreshQuickWorkspace() {
   await Promise.all([store.loadAll(), loadQuickTimelineData()])
+}
+
+async function selectQuickSource(source: QuickSource) {
+  rememberTimelineScroll()
+  quickSource.value = source
+  persistQuickPreferences()
+  if (source === 'personal') await restoreScroll(quickScrollPositions.value[quickViewMode.value])
+  if (!quickDataLoaded.value && !quickDataLoading.value) {
+    await loadQuickTimelineData(true, quickViewMode.value, source)
+  }
+}
+
+async function selectQuickView(mode: ScheduleViewMode) {
+  if (quickViewMode.value === mode) return
+  rememberTimelineScroll()
+  quickViewMode.value = mode
+  persistQuickPreferences()
+  await loadQuickTimelineData(true, mode, 'personal')
+  await restoreScroll(quickScrollPositions.value[mode])
+}
+
+async function openFatigueSurvey() {
+  const localDate = store.fatigueSurveyToday?.localDate || store.fatigueDaily?.localDate || todayKey.value
+  await pushView({ kind: 'fatigue-survey', localDate, scrollTop: 0 })
+}
+
+function quickViewHasUnsavedWork() {
+  return shouldDeferQuickTarget(activeView.value.kind)
+}
+
+async function processPendingQuickTarget() {
+  const target = shell.pendingQuickTarget.value
+  if (!target || quickViewHasUnsavedWork()) return
+  shell.consumeQuickTarget(target)
+  if (target.kind === 'timeline') {
+    await returnToTimeline()
+    return
+  }
+  const localDate = target.localDate || store.fatigueSurveyToday?.localDate || store.fatigueDaily?.localDate || todayKey.value
+  if (activeView.value.kind === 'fatigue-survey' && activeView.value.localDate === localDate) return
+  await pushView({ kind: 'fatigue-survey', localDate, scrollTop: 0 })
+}
+
+async function openFullScheduleView() {
+  await router.push({ path: '/schedules', query: { view: quickViewMode.value } })
+  await shell.setQuickTimeline(false)
+}
+
+async function openCreateForSource() {
+  if (quickSource.value === 'personal') {
+    await openCreateSchedule()
+    return
+  }
+  await router.push('/tasks')
+  await shell.setQuickTimeline(false)
 }
 
 function formatClock(value: string) {
@@ -361,6 +606,17 @@ function kindLabel(kind: TimeType) {
   return '截止任务'
 }
 
+function scheduleLevelLabel(level: number, kind: 'urgency' | 'fatigue') {
+  const labels = kind === 'urgency'
+    ? ['不紧急', '较低', '普通', '紧急', '非常紧急']
+    : ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
+  return labels[Math.max(0, Math.min(4, Number(level || 3) - 1))]
+}
+
+function scheduleTime(schedule: Schedule) {
+  return schedule.effectiveTime || schedule.deadlineTime || schedule.endTime || schedule.startTime || ''
+}
+
 function presentationLabel(presentation: TimelinePresentationStatus) {
   const labels: Record<TimelinePresentationStatus, string> = {
     upcoming: '待处理',
@@ -386,6 +642,15 @@ function actionLabel(entry: QuickEntry) {
 
 function canAct(entry: QuickEntry) {
   return Boolean(actionLabel(entry))
+}
+
+function rememberTimelineScroll() {
+  if (activeView.value.kind !== 'timeline' || quickSource.value !== 'personal' || !workspaceRoot.value) return
+  quickScrollPositions.value[quickViewMode.value] = workspaceRoot.value.scrollTop
+}
+
+function handleWorkspaceScroll() {
+  rememberTimelineScroll()
 }
 
 function rememberScroll() {
@@ -855,6 +1120,8 @@ async function openScheduleEdit() {
     endTime: isoToZonedDatetimeLocal(item.endTime, timezone.value),
     deadlineTime: isoToZonedDatetimeLocal(item.deadlineTime, timezone.value),
     remindAt: isoToZonedDatetimeLocal(item.pendingReminders?.[0]?.remindAt || item.remindAt || '', timezone.value),
+    urgencyLevel: item.urgencyLevel || 3,
+    fatigueLevel: item.fatigueLevel || 3,
   }
   initialScheduleReminder.value = scheduleEditForm.value.remindAt
   await pushView({ kind: 'schedule-edit', id: item.id, scrollTop: 0 })
@@ -969,7 +1236,7 @@ async function saveTaskEdit() {
 
 async function openFullWorkspace() {
   if (aiBreakdownSaving.value) return
-  let target = '/'
+  let target = quickSource.value === 'personal' ? `/schedules?view=${encodeURIComponent(quickViewMode.value)}` : '/tasks'
   if (activeView.value.kind === 'create') {
     if (createKind.value === 'schedule') {
       Object.assign(store.scheduleForm, createForm.value)
@@ -985,6 +1252,8 @@ async function openFullWorkspace() {
     target = `/schedules/${activeView.value.id}`
   } else if (activeView.value.kind === 'task-detail' || activeView.value.kind === 'task-edit') {
     target = `/tasks/${activeView.value.id}`
+  } else if (activeView.value.kind === 'fatigue-survey') {
+    target = `/fatigue/survey?date=${encodeURIComponent(activeView.value.localDate)}`
   }
   await router.push(target)
   await shell.setQuickTimeline(false)
@@ -996,13 +1265,45 @@ function handleEscape(event: KeyboardEvent) {
   goBack()
 }
 
-onMounted(() => {
+watch(() => store.profile?.id, (id, previousId) => {
+  if (id !== previousId) {
+    for (const mode of ['time', 'group', 'urgency', 'fatigue'] as ScheduleViewMode[]) {
+      quickPersonalRequests[mode] += 1
+      quickScheduleResults.value[mode] = null
+      quickPersonalLoading.value[mode] = false
+      quickPersonalErrors.value[mode] = ''
+    }
+    quickTeamRequest += 1
+    quickTasks.value = []
+    quickTeamLoading.value = false
+    quickTeamLoaded.value = false
+    quickTeamError.value = ''
+    quickAcceptedScheduleRevision.value = null
+    viewStack.value = [{ kind: 'timeline', scrollTop: 0 }]
+    quickViewMode.value = 'time'
+    quickSource.value = 'personal'
+    quickScrollPositions.value = defaultQuickScrollPositions()
+  }
+  if (!id) return
+  loadQuickPreferences()
   loadQuickTimelineData()
+}, { immediate: true })
+
+watch(() => shell.pendingQuickTarget.value, () => processPendingQuickTarget(), { immediate: true })
+watch(() => activeView.value.kind, () => processPendingQuickTarget())
+watch(() => shell.quickRefreshRevision.value, () => refreshQuickWorkspace())
+watch(todayKey, (value, previous) => {
+  if (value !== previous) refreshQuickWorkspace()
+})
+
+onMounted(() => {
   timer = window.setInterval(() => { now.value = Date.now() }, 60_000)
   window.addEventListener('keydown', handleEscape)
 })
 
 onUnmounted(() => {
+  rememberTimelineScroll()
+  persistQuickPreferences()
   shell.setQuickTimelineExitGuard('none')
   invalidateAiRequests()
   if (timer) window.clearInterval(timer)
@@ -1011,36 +1312,86 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section ref="workspaceRoot" class="desktop-quick-timeline" aria-label="快捷任务工作区">
+  <section ref="workspaceRoot" class="desktop-quick-timeline" aria-label="快捷任务工作区" @scroll.passive="handleWorkspaceScroll">
     <template v-if="activeView.kind === 'timeline'">
       <header class="quick-timeline-header">
         <div>
-          <p>今天</p>
+          <p>{{ quickSource === 'personal' ? '个人日程' : '团队任务' }}</p>
           <h1>{{ todayLabel }}</h1>
-          <span>{{ stats.active ? `${stats.active} 项进行中` : `${stats.today} 项已安排` }}<b v-if="stats.overdue">{{ stats.overdue }} 项逾期</b></span>
+          <span>{{ stats.active ? `${stats.active} 项进行中` : `${quickHeaderCount} 项已安排` }}<b v-if="stats.overdue">{{ stats.overdue }} 项逾期</b></span>
         </div>
         <div class="quick-header-actions">
-          <button type="button" class="icon-button" title="刷新数据" aria-label="刷新数据" :disabled="store.loading || quickDataLoading" @click="refreshQuickWorkspace"><RefreshCw :class="{ spinning: store.loading || quickDataLoading }" :size="17" /></button>
-          <button type="button" class="icon-button" title="新建个人日程" aria-label="新建个人日程" @click="openCreateSchedule"><Plus :size="18" /></button>
+          <button type="button" class="icon-button" title="刷新数据" aria-label="刷新数据" :disabled="store.loading || quickRefreshLoading" @click="refreshQuickWorkspace"><RefreshCw :class="{ spinning: store.loading || quickRefreshLoading }" :size="17" /></button>
+          <button type="button" class="icon-button" :title="quickSource === 'personal' ? '新建个人日程' : '打开团队任务'" :aria-label="quickSource === 'personal' ? '新建个人日程' : '打开团队任务'" @click="openCreateForSource"><Plus :size="18" /></button>
           <button type="button" class="icon-button" title="打开完整工作台" aria-label="打开完整工作台" @click="openFullWorkspace"><PanelTopOpen :size="17" /></button>
         </div>
       </header>
 
+      <div class="quick-source-switch" role="tablist" aria-label="快捷窗口来源">
+        <button type="button" :class="{ active: quickSource === 'personal' }" role="tab" :aria-selected="quickSource === 'personal'" @click="selectQuickSource('personal')"><CalendarClock :size="14" />个人日程</button>
+        <button type="button" :class="{ active: quickSource === 'team' }" role="tab" :aria-selected="quickSource === 'team'" @click="selectQuickSource('team')"><UserRound :size="14" />团队任务</button>
+      </div>
+
+      <div v-if="quickDataError" class="quick-data-warning">
+        <span>{{ quickDataLoaded ? '数据刷新失败，当前显示上次成功结果' : quickDataError }}</span>
+        <button type="button" @click="loadQuickTimelineData(true, quickViewMode, quickSource)">重试</button>
+      </div>
+
+      <template v-if="quickSource === 'personal'">
+        <div class="quick-view-switch" role="tablist" aria-label="个人日程查看方式">
+          <button v-for="option in quickViewOptions" :key="option.value" type="button" :class="{ active: quickViewMode === option.value }" role="tab" :aria-selected="quickViewMode === option.value" @click="selectQuickView(option.value)"><component :is="option.icon" :size="13" />{{ option.label }}</button>
+        </div>
+
+        <section class="quick-fatigue-summary" role="button" tabindex="0" @click="openFatigueSurvey" @keydown.enter="openFatigueSurvey" @keydown.space.prevent="openFatigueSurvey">
+          <div><span>个人预计负荷</span><strong>{{ store.fatigueDaily?.predictedScore ?? '--' }}<small> 分 · {{ fatigueStateLabel }}</small></strong></div>
+          <div><span>计划 / 上限</span><strong>{{ store.fatigueDaily?.plannedLoad ?? 0 }} / {{ store.fatigueDaily?.capacity75 ?? store.fatigueProfile?.capacity75 ?? 18 }}</strong></div>
+          <div><span>调查</span><strong>{{ fatigueSurveyStatus }}</strong></div>
+          <ChevronRight :size="16" />
+          <span class="quick-load-track"><i :style="{ width: `${quickLoadPercent}%` }"></i></span>
+        </section>
+
+        <div v-if="fatigueAlertText" class="quick-load-alert"><AlertTriangle :size="15" /><span>{{ fatigueAlertText }}</span></div>
+
+        <section v-if="store.fatigueSurveyToday?.pending" class="quick-survey-banner">
+          <div><BatteryMedium :size="16" /><span><strong>今日日终调查待填写</strong><small>记录实际感受，帮助校准个人承受上限</small></span></div>
+          <button type="button" @click="openFatigueSurvey">填写</button>
+        </section>
+
+        <template v-if="quickViewMode !== 'time'">
+          <section v-if="quickDataLoading && !quickDataLoaded" class="quick-empty-state"><RefreshCw class="spinning" :size="22" /><span>正在加载个人日程...</span></section>
+          <section v-else-if="quickDataError && !quickDataLoaded" class="quick-empty-state"><AlertTriangle :size="24" /><strong>暂时无法加载个人日程</strong><button type="button" @click="loadQuickTimelineData(true, quickViewMode, 'personal')">重试</button></section>
+          <section v-else-if="!personalSections.length" class="quick-empty-state"><CalendarClock :size="24" /><strong>当前视图没有个人日程</strong><button type="button" @click="openCreateSchedule">新建日程</button></section>
+          <section v-for="section in personalSections" v-else :key="section.key" class="quick-personal-section">
+            <div class="quick-section-heading"><component :is="quickViewMode === 'group' ? Layers3 : quickViewMode === 'urgency' ? AlertTriangle : BatteryMedium" :size="15" /><span>{{ section.label }}</span><em>{{ section.total }} · {{ section.plannedLoad }} 点</em></div>
+            <article v-for="entry in section.items.slice(0, 8)" :key="entry.key" class="quick-unscheduled-item quick-personal-item" @click="openEntry(entry)">
+              <div><strong>{{ entry.raw.title }}</strong><small>{{ formatTime(scheduleTime(entry.raw as Schedule)) }} · 紧急 {{ (entry.raw as Schedule).urgencyLevel }} · 疲劳 {{ (entry.raw as Schedule).fatigueLevel }} / {{ (entry.raw as Schedule).fatigueWeight }} 点</small></div>
+              <button v-if="canAct(entry)" type="button" class="quick-action" title="完成日程" aria-label="完成日程" @click.stop="performAction(entry)"><Check :size="15" /></button>
+              <ChevronRight v-else :size="16" />
+            </article>
+            <button v-if="section.total > Math.min(section.items.length, 8)" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ section.total }} 项</button>
+          </section>
+        </template>
+      </template>
+
+      <template v-if="quickSource === 'team' || quickViewMode === 'time'">
       <section v-if="overdueEntries.length" class="quick-overdue-section" aria-label="已逾期任务">
         <div class="quick-section-heading"><Flag :size="15" /><span>已逾期</span><em>{{ overdueEntries.length }}</em></div>
-        <article v-for="entry in overdueEntries" :key="entry.key" class="quick-overdue-item" @click="openEntry(entry)">
+        <article v-for="entry in overdueEntries.slice(0, 8)" :key="entry.key" class="quick-overdue-item" @click="openEntry(entry)">
           <span class="quick-overdue-time">{{ formatClock(entry.range.endAt) }}</span>
           <div><strong>{{ entry.raw.title }}</strong><small>{{ entry.sourceLabel }}</small></div>
           <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><Check :size="15" /></button>
           <ChevronRight v-else :size="16" />
         </article>
+        <button v-if="overdueEntries.length > 8 && quickSource === 'personal'" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ overdueEntries.length }} 项</button>
       </section>
 
       <section class="quick-timeline-track" aria-label="今日时间轴">
-        <div v-if="timelineRows.length === 1" class="quick-empty-state">
+        <div v-if="quickDataLoading && !quickDataLoaded" class="quick-empty-state"><RefreshCw class="spinning" :size="22" /><span>正在加载{{ quickSource === 'personal' ? '个人日程' : '团队任务' }}...</span></div>
+        <div v-else-if="quickDataError && !quickDataLoaded" class="quick-empty-state"><AlertTriangle :size="24" /><strong>暂时无法加载{{ quickSource === 'personal' ? '个人日程' : '团队任务' }}</strong><button type="button" @click="loadQuickTimelineData(true, quickViewMode, quickSource)">重试</button></div>
+        <div v-else-if="timelineRows.length === 1" class="quick-empty-state">
           <CalendarClock :size="25" />
           <strong>今天没有定时安排</strong>
-          <button type="button" @click="openCreateSchedule">新建日程</button>
+           <button type="button" @click="openCreateForSource">{{ quickSource === 'personal' ? '新建日程' : '打开团队任务' }}</button>
         </div>
         <template v-else>
           <article v-for="(row, index) in timelineRows" :key="row.type === 'now' ? `now-${index}` : row.entry.key" :class="['quick-timeline-row', row.type === 'now' ? 'now' : `kind-${row.entry.range.kind}`, row.type === 'item' ? `state-${row.entry.presentation}` : '']">
@@ -1063,16 +1414,21 @@ onUnmounted(() => {
             </template>
           </article>
         </template>
+        <button v-if="timelineEntries.length > visibleTimelineEntries.length && quickSource === 'personal'" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ timelineEntries.length }} 项定时安排</button>
       </section>
 
       <section v-if="unscheduledEntries.length" class="quick-unscheduled-section" aria-label="待安排任务">
         <div class="quick-section-heading"><ListTodo :size="15" /><span>待安排</span><em>{{ unscheduledEntries.length }}</em></div>
-        <article v-for="entry in unscheduledEntries" :key="entry.key" class="quick-unscheduled-item" @click="openEntry(entry)">
+        <article v-for="entry in unscheduledEntries.slice(0, 8)" :key="entry.key" class="quick-unscheduled-item" @click="openEntry(entry)">
           <div><strong>{{ entry.raw.title }}</strong><small>{{ entry.sourceLabel }}</small></div>
           <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><Check :size="15" /></button>
           <ChevronRight v-else :size="16" />
         </article>
+        <button v-if="unscheduledEntries.length > 8 && quickSource === 'personal'" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ unscheduledEntries.length }} 项</button>
       </section>
+      </template>
+
+      <button v-if="quickSource === 'personal' && quickDataLoaded" type="button" class="quick-view-all" @click="openFullScheduleView"><PanelTopOpen :size="14" />查看完整个人日程</button>
     </template>
 
     <template v-else>
@@ -1091,6 +1447,7 @@ onUnmounted(() => {
         <DesktopQuickTeamTaskCreator v-else v-model="teamCreateForm" :teams="store.teams" :groups="teamCreateGroups" :members="teamCreateMembers" :busy="formBusy" :loading-context="teamCreateContextLoading" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" :ai-breakdown-busy="aiBreaking" :ai-optimize-busy="aiOptimizingDescription" :ai-error="teamAiError" :ai-notice="teamAiNotice" @ai-breakdown="breakDownTeamTaskWithAi" @ai-optimize="optimizeTeamDescriptionWithAi" @error="store.notify" @team-change="handleTeamCreateChange" @submit="submitCreateTeamTask" />
       </template>
       <DesktopQuickTeamBreakdown v-else-if="activeView.kind === 'team-breakdown'" v-model="aiBreakdownTasks" :members="teamCreateMembers" :busy="aiBreakdownSaving" @cancel="cancelTeamBreakdown" @submit="submitTeamBreakdown" />
+      <DesktopQuickFatigueSurvey v-else-if="activeView.kind === 'fatigue-survey'" :local-date="activeView.localDate" @close="goBack" @updated="refreshQuickWorkspace" />
       <DesktopQuickScheduleEditor v-else-if="activeView.kind === 'schedule-edit'" v-model="scheduleEditForm" :groups="store.taskGroups" :busy="formBusy" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" submit-label="保存修改" @error="store.notify" @submit="saveScheduleEdit" />
       <DesktopQuickTaskEditor v-else-if="activeView.kind === 'task-edit'" v-model="taskEditForm" :groups="teamTaskGroups" :busy="formBusy" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" @error="store.notify" @submit="saveTaskEdit" />
 

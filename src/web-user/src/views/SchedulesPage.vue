@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import ContextMenu from '../components/ContextMenu.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
-import { MoreHorizontal } from 'lucide-vue-next'
-import { getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset, toDatetimeLocalInTimezone, zonedDateTimeToIso } from '../utils/helpers'
-import type { Schedule } from '../types'
+import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
+import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
+import { AlertTriangle, BatteryMedium, Clock3, Layers3, MoreHorizontal } from 'lucide-vue-next'
+import { getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso } from '../utils/helpers'
+import type { FatiguePreview, Schedule, ScheduleForm, ScheduleViewMode } from '../types'
 
 const router = useRouter()
+const route = useRoute()
 const store = useAppStore()
 const collapsedGroups = ref<string[]>([])
 const aiParsing = ref(false)
 const aiParseError = ref('')
 const showDraftConfirm = ref(false)
-const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; remindAt: string; description: string }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', description: '' })
+const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; remindAt: string; description: string; urgencyLevel: number; fatigueLevel: number }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', description: '', urgencyLevel: 3, fatigueLevel: 3 })
 const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; group?: any; schedule?: Schedule } | null>(null)
 const filterKeyword = ref(store.schedulePage.keyword || '')
 const filterStatus = ref(store.schedulePage.status || '')
@@ -24,8 +27,20 @@ const filterDateTo = ref(store.schedulePage.dateTo || '')
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
 const selectedReminderOffset = ref<number | null>(null)
+const createFatiguePreview = ref<FatiguePreview | null>(null)
+const draftFatiguePreview = ref<FatiguePreview | null>(null)
 const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
 const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
+const isGroupedView = computed(() => store.viewMode === 'group')
+const levelOptions = [1, 2, 3, 4, 5]
+const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
+const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
+const viewOptions = [
+  { value: 'time' as ScheduleViewMode, label: '时间', icon: Clock3 },
+  { value: 'group' as ScheduleViewMode, label: '分组', icon: Layers3 },
+  { value: 'urgency' as ScheduleViewMode, label: '紧急度', icon: AlertTriangle },
+  { value: 'fatigue' as ScheduleViewMode, label: '疲劳度', icon: BatteryMedium },
+]
 const reminderBaseTime = computed(() => {
   return store.scheduleForm.timeType === 'deadline_task'
     ? store.scheduleForm.deadlineTime
@@ -107,7 +122,9 @@ async function aiParseSchedule() {
       endTime: draft.endTime ? toDatetimeLocal(draft.endTime) : '',
       deadlineTime: draft.deadlineTime ? toDatetimeLocal(draft.deadlineTime) : '',
       remindAt: draft.remindAt ? toDatetimeLocal(draft.remindAt) : store.scheduleForm.remindAt,
-      description: draft.description || ''
+      description: draft.description || '',
+      urgencyLevel: store.scheduleForm.urgencyLevel,
+      fatigueLevel: store.scheduleForm.fatigueLevel
     }
     showDraftConfirm.value = true
     store.scheduleModalOpen = false
@@ -125,6 +142,8 @@ async function confirmAiDraft() {
   store.scheduleForm.deadlineTime = draft.deadlineTime
   store.scheduleForm.description = draft.description
   store.scheduleForm.remindAt = draft.remindAt
+  store.scheduleForm.urgencyLevel = draft.urgencyLevel
+  store.scheduleForm.fatigueLevel = draft.fatigueLevel
   showDraftConfirm.value = false
   await store.createSchedule()
 }
@@ -138,7 +157,7 @@ const filteredSchedules = computed(() => {
 })
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined
-watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo], () => {
+watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo, () => store.urgencyLevelFilter, () => store.fatigueLevelFilter], () => {
   clearTimeout(filterTimer)
   filterTimer = setTimeout(() => store.loadSchedules({
     page: 1,
@@ -148,7 +167,9 @@ watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo], () => {
     dateTo: filterDateTo.value
   }), 250)
 })
-watch(() => store.schedulePage.sort, () => store.loadSchedules({ page: 1 }))
+watch(() => store.schedulePage.sort, () => {
+  if (isGroupedView.value) store.loadSchedules({ page: 1 })
+})
 watch([
   () => store.scheduleForm.timeType,
   () => store.scheduleForm.startTime,
@@ -158,8 +179,94 @@ watch([
 })
 watch(() => store.scheduleModalOpen, isOpen => {
   if (!isOpen) selectedReminderOffset.value = null
+  if (!isOpen) createFatiguePreview.value = null
 })
-onUnmounted(() => clearTimeout(filterTimer))
+
+let createPreviewTimer: ReturnType<typeof setTimeout> | undefined
+let draftPreviewTimer: ReturnType<typeof setTimeout> | undefined
+let createPreviewVersion = 0
+let draftPreviewVersion = 0
+
+function hasPreviewTime(form: Pick<ScheduleForm, 'timeType' | 'startTime' | 'deadlineTime'>) {
+  return form.timeType === 'deadline_task' ? Boolean(form.deadlineTime) : Boolean(form.startTime)
+}
+
+async function loadCreateFatiguePreview() {
+  const version = ++createPreviewVersion
+  if (!store.scheduleModalOpen || !hasPreviewTime(store.scheduleForm) || store.fatigueProfile?.fatigueTrackingEnabled === false) {
+    createFatiguePreview.value = null
+    return
+  }
+  try {
+    const payload = toSchedulePayload(store.scheduleForm, userTimezone.value)
+    const result = await store.previewFatigue({ operation: 'create', ...payload })
+    if (version === createPreviewVersion) createFatiguePreview.value = result
+  } catch {
+    if (version === createPreviewVersion) createFatiguePreview.value = null
+  }
+}
+
+async function loadDraftFatiguePreview() {
+  const version = ++draftPreviewVersion
+  const draft = aiDraft.value
+  if (!showDraftConfirm.value || !hasPreviewTime(draft as ScheduleForm) || store.fatigueProfile?.fatigueTrackingEnabled === false) {
+    draftFatiguePreview.value = null
+    return
+  }
+  try {
+    const payload = toSchedulePayload({ ...draft, groupName: '' } as ScheduleForm, userTimezone.value)
+    const result = await store.previewFatigue({ operation: 'create', ...payload })
+    if (version === draftPreviewVersion) draftFatiguePreview.value = result
+  } catch {
+    if (version === draftPreviewVersion) draftFatiguePreview.value = null
+  }
+}
+
+watch([
+  () => store.scheduleModalOpen,
+  () => store.scheduleForm.timeType,
+  () => store.scheduleForm.startTime,
+  () => store.scheduleForm.endTime,
+  () => store.scheduleForm.deadlineTime,
+  () => store.scheduleForm.fatigueLevel,
+], () => {
+  clearTimeout(createPreviewTimer)
+  createPreviewTimer = setTimeout(loadCreateFatiguePreview, 250)
+})
+
+watch([
+  showDraftConfirm,
+  () => aiDraft.value.timeType,
+  () => aiDraft.value.startTime,
+  () => aiDraft.value.endTime,
+  () => aiDraft.value.deadlineTime,
+  () => aiDraft.value.fatigueLevel,
+], () => {
+  clearTimeout(draftPreviewTimer)
+  draftPreviewTimer = setTimeout(loadDraftFatiguePreview, 250)
+})
+
+onUnmounted(() => {
+  clearTimeout(filterTimer)
+  clearTimeout(createPreviewTimer)
+  clearTimeout(draftPreviewTimer)
+})
+
+function validView(value: unknown): value is ScheduleViewMode {
+  return ['time', 'group', 'urgency', 'fatigue'].includes(String(value))
+}
+
+async function applyView(mode: ScheduleViewMode) {
+  if (store.viewMode !== mode) await store.setScheduleViewMode(mode)
+  await router.replace({ query: { ...route.query, view: mode } })
+}
+
+onMounted(async () => {
+  const queryView = route.query.view
+  if (validView(queryView) && queryView !== store.viewMode) await store.setScheduleViewMode(queryView)
+  else if (!store.schedules.length) await store.loadSchedules({ page: 1 })
+  if (!validView(queryView)) await router.replace({ query: { ...route.query, view: store.viewMode } })
+})
 
 const scheduleGroups = computed(() => {
   const completed = filteredSchedules.value.filter(schedule => schedule.status === 'completed')
@@ -176,6 +283,37 @@ const scheduleGroups = computed(() => {
   if (completed.length) groups.push({ id: -1, name: '已完成', sortOrder: Number.MAX_SAFE_INTEGER, items: completed.sort((a, b) => a.sortOrder - b.sortOrder) })
   return groups.sort((a, b) => a.sortOrder - b.sortOrder)
 })
+
+const serverSections = computed(() => {
+  const rows = new Map<string, { id: string; name: string; sortOrder: number; items: Schedule[]; plannedLoad: number; pendingCount: number; total: number }>()
+  for (const schedule of filteredSchedules.value) {
+    const id = schedule.sectionKey || `${store.viewMode}:${schedule.sectionLabel || '未分组'}`
+    const current = rows.get(id) || { id, name: schedule.sectionLabel || '未分组', sortOrder: rows.size, items: [], plannedLoad: 0, pendingCount: 0, total: 0 }
+    current.items.push(schedule)
+    current.total += 1
+    if (schedule.status === 'pending') current.pendingCount += 1
+    if (schedule.status !== 'cancelled') current.plannedLoad += Number(schedule.fatigueWeight || 3)
+    rows.set(id, current)
+  }
+  return [...rows.values()].map(section => {
+    const summary = store.sectionSummaries.find(item => item.key === section.id)
+    return summary ? { ...section, ...summary, name: summary.label, items: section.items } : section
+  })
+})
+
+const displaySections = computed(() => isGroupedView.value ? scheduleGroups.value : serverSections.value)
+
+function sectionSummary(section: any) {
+  return store.sectionSummaries.find(item => item.key === section.id || item.key === section.sectionKey)
+}
+
+function scheduleOverdue(schedule: Schedule) {
+  return Boolean(schedule.isOverdue ?? isOverdue(schedule))
+}
+
+function levelLabel(level: number, labels: string[]) {
+  return labels[Math.max(0, Math.min(labels.length - 1, Number(level || 3) - 1))]
+}
 
 function toggleGroup(name: string) {
   collapsedGroups.value = collapsedGroups.value.includes(name)
@@ -370,33 +508,46 @@ const contextItems = computed(() => {
       <select v-model="filterStatus"><option value="">全部状态</option><option value="pending">待处理</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select>
       <input v-model="filterDateFrom" type="date" title="开始日期" />
       <input v-model="filterDateTo" type="date" title="截止日期" />
-      <select v-model="store.schedulePage.sort" aria-label="日程排序">
-        <option value="manual">模块顺序</option><option value="time_asc">时间升序</option><option value="time_desc">时间降序</option><option value="created_desc">最近创建</option><option value="title_asc">标题排序</option>
+      <select v-model="store.urgencyLevelFilter" aria-label="紧急度筛选">
+        <option :value="null">全部紧急度</option><option v-for="level in levelOptions" :key="`urgency-${level}`" :value="level">紧急度 {{ level }} · {{ levelLabel(level, urgencyNames) }}</option>
       </select>
-      <button v-if="filterKeyword || filterStatus || filterDateFrom || filterDateTo" class="plain-button" @click="filterKeyword='';filterStatus='';filterDateFrom='';filterDateTo=''" style="color:#e11d48">清除</button>
+      <select v-model="store.fatigueLevelFilter" aria-label="疲劳度筛选">
+        <option :value="null">全部疲劳度</option><option v-for="level in levelOptions" :key="`fatigue-${level}`" :value="level">疲劳度 {{ level }} · {{ levelLabel(level, fatigueNames) }}</option>
+      </select>
+      <button v-if="filterKeyword || filterStatus || filterDateFrom || filterDateTo || store.urgencyLevelFilter || store.fatigueLevelFilter" class="plain-button" @click="filterKeyword='';filterStatus='';filterDateFrom='';filterDateTo='';store.urgencyLevelFilter=null;store.fatigueLevelFilter=null" style="color:#e11d48">清除</button>
       <button class="primary" @click="store.openScheduleModal()">新建日程</button>
+    </div>
+    <div class="schedule-view-toolbar">
+      <div class="segmented-control" aria-label="日程视图">
+        <button v-for="option in viewOptions" :key="option.value" type="button" :class="{ active: store.viewMode === option.value }" :aria-pressed="store.viewMode === option.value" @click="applyView(option.value)">
+          <component :is="option.icon" :size="15" />{{ option.label }}
+        </button>
+      </div>
+      <span class="muted">{{ store.schedulePage.total }} 项个人日程 · 服务端已按当前视图排序</span>
     </div>
     <section class="table-card">
       <section
-        v-for="group in scheduleGroups"
+        v-for="group in displaySections"
         :key="group.id"
         class="group-block"
-        @dragover.prevent
-        @drop="dropSchedule(group)"
+        :class="{ 'readonly-section': !isGroupedView }"
+        @dragover.prevent="isGroupedView"
+        @drop="isGroupedView ? dropSchedule(group) : undefined"
       >
         <div
           class="group-title"
-          :draggable="group.id > 0"
-          @dragstart="draggingGroupId = group.id"
-          @drop.stop.prevent="dropGroup(group.id)"
-          @contextmenu.prevent="openGroupMenu($event, group)"
+          :draggable="isGroupedView && group.id > 0"
+          @dragstart="isGroupedView ? draggingGroupId = group.id : undefined"
+          @drop.stop.prevent="isGroupedView ? dropGroup(group.id) : undefined"
+          @contextmenu.prevent="isGroupedView ? openGroupMenu($event, group) : undefined"
         >
           <button class="plain-button" @click="toggleGroup(group.name)">
             <span>{{ collapsedGroups.includes(group.name) ? '▸' : '▾' }} {{ group.name }}</span>
           </button>
           <div class="group-actions" @click.stop>
-            <em>{{ group.items.filter(item => item.status === 'pending').length }}</em>
-            <template v-if="group.id > 0">
+            <span v-if="group.plannedLoad !== undefined" class="section-load">计划负荷 {{ group.plannedLoad }}</span>
+            <em>{{ group.pendingCount ?? group.items.filter(item => item.status === 'pending').length }}</em>
+            <template v-if="isGroupedView && group.id > 0">
               <button class="icon-button row-menu-button mobile-only" title="更多分组操作" aria-label="更多分组操作" @click="openGroupButtonMenu($event, group)"><MoreHorizontal :size="18" /></button>
               <button title="上移" @click="moveGroup(group.id, -1)">上移</button>
               <button title="下移" @click="moveGroup(group.id, 1)">下移</button>
@@ -409,16 +560,24 @@ const contextItems = computed(() => {
           <article
             v-for="(s, index) in group.items"
             :key="s.id"
-            :class="['table-row', { overdue: isOverdue(s), completed: s.status === 'completed' }]"
-            draggable="true"
+            :class="['table-row', { overdue: scheduleOverdue(s), completed: s.status === 'completed' }]"
             style="cursor:pointer"
             @click="goDetail(s.id)"
-            @dragstart="draggingSchedule = { id: s.id, fromGroupId: s.groupId }"
-            @dragover.prevent
-            @drop.stop.prevent="dropSchedule(group, s.id)"
-            @contextmenu.prevent="openScheduleMenu($event, group, s)"
+            :draggable="isGroupedView"
+            @dragstart="isGroupedView ? draggingSchedule = { id: s.id, fromGroupId: s.groupId } : undefined"
+            @dragover.prevent="isGroupedView"
+            @drop.stop.prevent="isGroupedView ? dropSchedule(group, s.id) : undefined"
+            @contextmenu.prevent="isGroupedView ? openScheduleMenu($event, group, s) : undefined"
           >
-            <div><strong>{{ s.title }}</strong><small>{{ s.groupName }} - {{ timeTypeLabel(s.timeType) }}</small></div>
+            <div>
+              <strong>{{ s.title }}</strong>
+              <small>{{ s.groupName }} - {{ timeTypeLabel(s.timeType) }}</small>
+              <div class="schedule-levels">
+                <span class="level-chip urgency"><AlertTriangle :size="12" />紧急 {{ s.urgencyLevel }} · {{ levelLabel(s.urgencyLevel, urgencyNames) }}</span>
+                <span class="level-chip fatigue"><BatteryMedium :size="12" />疲劳 {{ s.fatigueLevel }} · {{ levelLabel(s.fatigueLevel, fatigueNames) }} · {{ s.fatigueWeight }} 点</span>
+              </div>
+              <small v-if="s.status === 'completed' && s.completedFatigueLevel" class="muted">完成快照：疲劳 {{ s.completedFatigueLevel }} · {{ s.completedFatigueWeight }} 点</small>
+            </div>
             <span :class="['tag', s.status === 'completed' ? 'blue' : s.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(s.status) }}</span>
             <CountdownPill
               v-if="s.status === 'pending'"
@@ -432,12 +591,12 @@ const contextItems = computed(() => {
             />
             <span v-else class="muted">{{ statusLabel(s.status) }}</span>
             <div class="top-actions" @click.stop>
-              <button class="icon-button row-menu-button mobile-only" title="更多操作" aria-label="更多操作" @click="openScheduleButtonMenu($event, group, s)"><MoreHorizontal :size="18" /></button>
-              <select v-if="s.status !== 'completed'" :value="s.groupId || ''" aria-label="移动日程至分组" @click.stop @change="moveSchedule(s, $event)">
+              <button v-if="isGroupedView" class="icon-button row-menu-button mobile-only" title="更多操作" aria-label="更多操作" @click="openScheduleButtonMenu($event, group, s)"><MoreHorizontal :size="18" /></button>
+              <select v-if="isGroupedView && s.status !== 'completed'" :value="s.groupId || ''" aria-label="移动日程至分组" @click.stop @change="moveSchedule(s, $event)">
                 <option value="" disabled>移动至</option><option v-for="target in store.taskGroups" :key="target.id" :value="target.id">{{ target.name }}</option>
               </select>
-              <button v-if="group.id !== 0" :disabled="index === 0" @click="moveScheduleOrder(group.id, group.items, s.id, -1)">上移</button>
-              <button v-if="group.id !== 0" :disabled="index === group.items.length - 1" @click="moveScheduleOrder(group.id, group.items, s.id, 1)">下移</button>
+              <button v-if="isGroupedView && group.id !== 0" :disabled="index === 0" @click="moveScheduleOrder(group.id, group.items, s.id, -1)">上移</button>
+              <button v-if="isGroupedView && group.id !== 0" :disabled="index === group.items.length - 1" @click="moveScheduleOrder(group.id, group.items, s.id, 1)">下移</button>
               <button v-if="s.status === 'pending'" @click="handleAction(s, 'complete')">完成</button>
               <button v-if="s.status === 'completed'" @click="handleAction(s, 'uncomplete')">恢复</button>
               <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button><button v-if="s.status === 'cancelled'" @click="handleAction(s, 'restore')">恢复</button><button @click="handleDelete(s.id)">删除</button>
@@ -467,9 +626,14 @@ const contextItems = computed(() => {
           </div>
           <label>模块<select v-model="store.scheduleForm.groupId"><option v-for="group in store.taskGroups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
           <label>类型<select v-model="store.scheduleForm.timeType"><option value="point_event">安排事项</option><option value="deadline_task">待办任务</option><option value="duration_task">时间段任务</option></select></label>
+          <div class="level-form-grid">
+            <ScheduleLevelControl v-model="store.scheduleForm.urgencyLevel" label="紧急度" :labels="urgencyNames" />
+            <ScheduleLevelControl v-model="store.scheduleForm.fatigueLevel" label="预计疲劳度" :labels="fatigueNames" :weights="store.fatigueProfile?.weights" />
+          </div>
           <label v-if="store.scheduleForm.timeType === 'point_event'">发生时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label>
           <label v-if="store.scheduleForm.timeType === 'deadline_task'">截止时间<input v-model="store.scheduleForm.deadlineTime" type="datetime-local" /></label>
           <template v-if="store.scheduleForm.timeType === 'duration_task'"><label>开始时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label><label>结束时间<input v-model="store.scheduleForm.endTime" type="datetime-local" /></label></template>
+          <FatiguePreviewInline v-if="createFatiguePreview" :preview="createFatiguePreview" />
           <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" @input="handleManualReminderChange" /></label>
           <div class="reminder-shortcuts" aria-label="快捷提醒时间">
             <div class="reminder-shortcut-head">
@@ -504,9 +668,14 @@ const contextItems = computed(() => {
           <label>描述<input v-model="aiDraft.description" placeholder="可选" /></label>
           <label>模块<select v-model="aiDraft.groupId"><option value="">未分组</option><option v-for="group in store.taskGroups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
           <label>类型<select v-model="aiDraft.timeType"><option value="point_event">安排事项</option><option value="deadline_task">待办任务</option><option value="duration_task">时间段任务</option></select></label>
+          <div class="level-form-grid">
+            <ScheduleLevelControl v-model="aiDraft.urgencyLevel" label="紧急度" :labels="urgencyNames" />
+            <ScheduleLevelControl v-model="aiDraft.fatigueLevel" label="预计疲劳度" :labels="fatigueNames" :weights="store.fatigueProfile?.weights" />
+          </div>
           <label v-if="aiDraft.timeType === 'point_event'">发生时间<input v-model="aiDraft.startTime" type="datetime-local" /></label>
           <label v-if="aiDraft.timeType === 'deadline_task'">截止时间<input v-model="aiDraft.deadlineTime" type="datetime-local" /></label>
           <template v-if="aiDraft.timeType === 'duration_task'"><label>开始时间<input v-model="aiDraft.startTime" type="datetime-local" /></label><label>结束时间<input v-model="aiDraft.endTime" type="datetime-local" /></label></template>
+          <FatiguePreviewInline v-if="draftFatiguePreview" :preview="draftFatiguePreview" />
           <label>提醒时间<input v-model="aiDraft.remindAt" type="datetime-local" /></label>
           <div class="form-actions">
             <button type="button" @click="cancelAiDraft">取消</button>

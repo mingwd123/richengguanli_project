@@ -2,12 +2,18 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, State, WindowEvent, Wry,
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const MENU_OPEN_ID: &str = "open";
+const MENU_WORKSPACE_ID: &str = "workspace";
+const MENU_QUICK_TIMELINE_ID: &str = "quick-timeline";
+const MENU_FATIGUE_SURVEY_ID: &str = "fatigue-survey";
 const MENU_QUIT_ID: &str = "quit";
+
+struct TrayMenuState {
+    fatigue_survey: MenuItem<Wry>,
+}
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -15,6 +21,19 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn navigate_from_tray(app: &AppHandle, target: &str) {
+    show_main_window(app);
+    let _ = app.emit("desktop:navigate", target);
+}
+
+#[tauri::command]
+fn set_pending_survey_menu(pending: bool, state: State<'_, TrayMenuState>) -> Result<(), String> {
+    state
+        .fatigue_survey
+        .set_enabled(pending)
+        .map_err(|error| error.to_string())
 }
 
 fn create_tray_icon() -> Image<'static> {
@@ -49,10 +68,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![set_pending_survey_menu])
         .setup(|app| {
-            let open = MenuItem::with_id(app, MENU_OPEN_ID, "打开", true, None::<&str>)?;
+            let workspace = MenuItem::with_id(app, MENU_WORKSPACE_ID, "打开工作台", true, None::<&str>)?;
+            let quick_timeline = MenuItem::with_id(app, MENU_QUICK_TIMELINE_ID, "快捷时间轴", true, None::<&str>)?;
+            let fatigue_survey = MenuItem::with_id(app, MENU_FATIGUE_SURVEY_ID, "填写今日日终调查", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, MENU_QUIT_ID, "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let menu = Menu::with_items(app, &[&workspace, &quick_timeline, &fatigue_survey, &quit])?;
+            app.manage(TrayMenuState {
+                fatigue_survey: fatigue_survey.clone(),
+            });
 
             TrayIconBuilder::with_id("main-tray")
                 .icon(create_tray_icon())
@@ -60,7 +85,9 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    MENU_OPEN_ID => show_main_window(app),
+                    MENU_WORKSPACE_ID => navigate_from_tray(app, "workspace"),
+                    MENU_QUICK_TIMELINE_ID => navigate_from_tray(app, "quick-timeline"),
+                    MENU_FATIGUE_SURVEY_ID => navigate_from_tray(app, "fatigue-survey"),
                     MENU_QUIT_ID => app.exit(0),
                     _ => {}
                 })

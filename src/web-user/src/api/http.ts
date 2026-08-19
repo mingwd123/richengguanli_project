@@ -27,3 +27,20 @@ export async function apiRequest<T = any>(path: string, options: RequestInit = {
   }
   return body.data as T
 }
+
+export async function apiDownload(path: string, token = ''): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  if (token) headers.Authorization = `Bearer ${token}`
+  const transport = window.__DAYLIANE_HTTP_FETCH__ || window.fetch.bind(window)
+  let response: Response
+  try {
+    response = await transport(`${API_BASE}${path}`, { headers })
+  } catch {
+    throw new Error('无法连接到后端，请先启动后端服务（127.0.0.1:8080）')
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ message: '下载失败' }))
+    throw new Error(body.message || '下载失败')
+  }
+  return response.blob()
+}

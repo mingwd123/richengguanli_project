@@ -25,10 +25,12 @@ const routes = [
       { path: 'tasks/:id/assignees/:assigneeId/status', name: 'TeamTaskAssigneeStatus', component: () => import('@web/views/TeamTaskAssigneeStatusPage.vue'), props: true, meta: { title: '修正执行状态' } },
       { path: 'tasks/:id/assignees/:assigneeId/reassign', name: 'TeamTaskReassign', component: () => import('@web/views/TeamTaskReassignPage.vue'), props: true, meta: { title: '重新分配任务' } },
       { path: 'notifications', name: 'Notifications', component: () => import('@web/views/NotificationsPage.vue'), meta: { title: '通知' } },
+      { path: 'fatigue/survey', name: 'FatigueSurvey', component: () => import('@web/views/FatigueSurveyPage.vue'), meta: { title: '疲劳调查' } },
       { path: 'reminders', name: 'Reminders', component: () => import('@web/views/RemindersPage.vue'), meta: { title: '提醒记录' } },
       { path: 'profile', name: 'Profile', component: () => import('@web/views/ProfilePage.vue'), meta: { title: '个人中心' } },
       { path: 'profile/settings', name: 'ProfileSettings', component: () => import('@web/views/ProfileSettingsPage.vue'), meta: { title: '个人设置' } },
       { path: 'profile/notifications', name: 'NotificationSettings', component: () => import('@web/views/NotificationSettingsPage.vue'), meta: { title: '通知设置' } },
+      { path: 'profile/fatigue', name: 'FatigueSettings', component: () => import('@web/views/FatigueSettingsPage.vue'), meta: { title: '疲劳评估设置' } },
     ],
   },
 ]

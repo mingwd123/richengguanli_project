@@ -12,3 +12,13 @@ management:
     web:
       exposure:
         include: health,info
+
+dayliane:
+  features:
+    fatigue:
+      enabled: ${DAYLIANE_FATIGUE_ENABLED:true}
+      alerts-enabled: ${DAYLIANE_FATIGUE_ALERTS_ENABLED:true}
+      surveys-enabled: ${DAYLIANE_FATIGUE_SURVEYS_ENABLED:true}
+      learning-enabled: ${DAYLIANE_FATIGUE_LEARNING_ENABLED:true}
+      retention-days: ${DAYLIANE_FATIGUE_RETENTION_DAYS:180}
+      allowed-user-ids: ${DAYLIANE_FATIGUE_ALLOWED_USER_IDS:}

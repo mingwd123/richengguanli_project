@@ -1,6 +1,7 @@
 package com.dayliane.admin;
 
 import com.dayliane.common.BusinessException;
+import com.dayliane.fatigue.FatigueService;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -16,16 +17,19 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.*;
 
 @Service
 public class AdminService {
     private final JdbcTemplate jdbc;
+    private final FatigueService fatigueService;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public AdminService(JdbcTemplate jdbc) {
+    public AdminService(JdbcTemplate jdbc, FatigueService fatigueService) {
         this.jdbc = jdbc;
+        this.fatigueService = fatigueService;
     }
 
     // ==================== Admin user management ====================
@@ -85,7 +89,7 @@ public class AdminService {
                 if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
             }
             case "schedules" -> {
-                sql.append("select id,user_id userId,title,group_name groupName,time_type timeType,status,created_at createdAt from schedule where deleted_at is null");
+                sql.append("select id,user_id userId,title,group_name groupName,time_type timeType,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,created_at createdAt from schedule where deleted_at is null");
                 if (!blank(keyword)) { sql.append(" and title like ?"); params.add("%" + keyword + "%"); }
                 if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
             }
@@ -95,7 +99,7 @@ public class AdminService {
                 if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
             }
             case "notifications" -> {
-                sql.append("select id,user_id userId,type,title,related_type relatedType,related_id relatedId,is_read isRead,created_at createdAt from notification where deleted_at is null");
+                sql.append("select id,user_id userId,type,title,related_type relatedType,related_id relatedId,target_route targetRoute,data_revision dataRevision,is_read isRead,created_at createdAt from notification where deleted_at is null");
                 if (!blank(keyword)) { sql.append(" and title like ?"); params.add("%" + keyword + "%"); }
                 if ("read".equals(status)) sql.append(" and is_read=true");
                 else if ("unread".equals(status)) sql.append(" and is_read=false");
@@ -246,7 +250,7 @@ public class AdminService {
     public Map<String, Object> adminScheduleDetail(long id) {
         try {
             Map<String, Object> schedule = jdbc.queryForObject(
-                    "select id,user_id userId,title,description,group_id groupId,group_name groupName,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,created_at createdAt from schedule where id=? and deleted_at is null",
+                    "select id,user_id userId,title,description,group_id groupId,group_name groupName,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,created_at createdAt from schedule where id=? and deleted_at is null",
                     scheduleMapper(), id);
             Map<String, Object> user = jdbc.queryForObject(
                     "select id,phone,nickname,timezone,status from `user` where id=? and deleted_at is null",
@@ -281,7 +285,7 @@ public class AdminService {
 
     public Map<String, Object> adminNotificationDetail(long id) {
         try {
-            return jdbc.queryForObject("select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,is_read isRead,read_at readAt,created_at createdAt from notification where id=? and deleted_at is null",
+            return jdbc.queryForObject("select id,user_id userId,type,title,content,related_type relatedType,related_id relatedId,reminder_id reminderId,target_route targetRoute,data_revision dataRevision,is_read isRead,read_at readAt,created_at createdAt from notification where id=? and deleted_at is null",
                     notificationMapper(), id);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "notification not found");
@@ -427,7 +431,17 @@ public class AdminService {
                 ? List.of("completed", "cancelled").contains(status)
                 : "pending".equals(status) && List.of("completed", "cancelled").contains(currentStatus);
         if (!validTransition) throw new BusinessException(400, "invalid schedule status transition");
-        int updated = jdbc.update("update schedule set status=? where id=? and deleted_at is null", status, scheduleId);
+        int updated;
+        if ("completed".equals(status)) {
+            Integer fatigueLevel = jdbc.queryForObject("select fatigue_level from schedule where id=? and deleted_at is null", Integer.class, scheduleId);
+            int level = fatigueLevel == null ? 3 : fatigueLevel;
+            updated = jdbc.update("update schedule set status=?,completed_at=utc_timestamp(),completed_fatigue_level=?,completed_fatigue_weight=? where id=? and deleted_at is null",
+                    status, level, fatigueService.currentWeight(longValue(before.get("userId")), level), scheduleId);
+        } else if ("pending".equals(status)) {
+            updated = jdbc.update("update schedule set status=?,completed_at=null,completed_fatigue_level=null,completed_fatigue_weight=null where id=? and deleted_at is null", status, scheduleId);
+        } else {
+            updated = jdbc.update("update schedule set status=? where id=? and deleted_at is null", status, scheduleId);
+        }
         if (updated == 0) throw new BusinessException(404, "schedule not found");
         if (List.of("completed", "cancelled").contains(status)) {
             jdbc.update("update reminder set status='paused' where target_type='schedule' and target_id=? and status='pending'", scheduleId);
@@ -436,6 +450,15 @@ public class AdminService {
             jdbc.update("update reminder set status='pending' where target_type='schedule' and target_id=? and status='paused' and remind_at>utc_timestamp()", scheduleId);
         }
         Map<String, Object> after = adminScheduleDetail(scheduleId);
+        ZoneId zone = userZone(longValue(after.get("userId")));
+        java.util.List<LocalDate> dates = new java.util.ArrayList<>();
+        LocalDate planned = plannedDate(after, zone);
+        if (planned != null) dates.add(planned);
+        LocalDate completed = completedDate(before, zone);
+        if (completed != null) dates.add(completed);
+        completed = completedDate(after, zone);
+        if (completed != null) dates.add(completed);
+        if (!dates.isEmpty()) fatigueService.recalculateDates(longValue(after.get("userId")), dates, true);
         writeAdminOperationLog(adminId, "set_schedule_status", "schedule", scheduleId, before, after, ipAddress, userAgent);
         return after;
     }
@@ -673,9 +696,44 @@ public class AdminService {
             m.put("endTime", iso(rs.getTimestamp("endTime")));
             m.put("deadlineTime", iso(rs.getTimestamp("deadlineTime")));
             m.put("status", rs.getString("status"));
+            m.put("urgencyLevel", rs.getInt("urgencyLevel"));
+            m.put("fatigueLevel", rs.getInt("fatigueLevel"));
+            m.put("completedAt", iso(rs.getTimestamp("completedAt")));
+            m.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
+            m.put("completedFatigueWeight", rs.getObject("completedFatigueWeight"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
+    }
+
+    private static int fatigueWeight(int level) {
+        return switch (level) {
+            case 1 -> 1;
+            case 2 -> 2;
+            case 3 -> 3;
+            case 4 -> 5;
+            case 5 -> 8;
+            default -> 3;
+        };
+    }
+
+    private ZoneId userZone(long userId) {
+        String timezone = jdbc.queryForObject("select timezone from `user` where id=? and deleted_at is null", String.class, userId);
+        try { return ZoneId.of(timezone == null ? "Asia/Shanghai" : timezone); } catch (Exception ignored) { return ZoneId.of("Asia/Shanghai"); }
+    }
+
+    private static LocalDate plannedDate(Map<String, Object> item, ZoneId zone) {
+        String type = String.valueOf(item.getOrDefault("timeType", ""));
+        String value = switch (type) {
+            case "deadline_task" -> String.valueOf(item.getOrDefault("deadlineTime", ""));
+            case "duration_task", "point_event" -> String.valueOf(item.getOrDefault("startTime", ""));
+            default -> "";
+        };
+        try { return OffsetDateTime.parse(value).atZoneSameInstant(zone).toLocalDate(); } catch (Exception ignored) { return null; }
+    }
+
+    private static LocalDate completedDate(Map<String, Object> item, ZoneId zone) {
+        try { return OffsetDateTime.parse(String.valueOf(item.getOrDefault("completedAt", ""))).atZoneSameInstant(zone).toLocalDate(); } catch (Exception ignored) { return null; }
     }
 
     private RowMapper<Map<String, Object>> notificationMapper() {
@@ -689,6 +747,8 @@ public class AdminService {
             m.put("relatedType", rs.getString("relatedType"));
             m.put("relatedId", rs.getObject("relatedId"));
             m.put("reminderId", rs.getObject("reminderId"));
+            m.put("targetRoute", rs.getString("targetRoute"));
+            m.put("dataRevision", rs.getObject("dataRevision"));
             m.put("isRead", rs.getBoolean("isRead"));
             m.put("readAt", iso(rs.getTimestamp("readAt")));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
