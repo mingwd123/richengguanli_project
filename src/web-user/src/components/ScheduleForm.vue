@@ -1,11 +1,18 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useAppStore } from '../stores/app'
 import { labels } from '../utils/labels'
+import { getDisplayTimezone } from '../utils/helpers'
 import ScheduleLevelControl from './ScheduleLevelControl.vue'
+import ReminderShortcutPicker from './ReminderShortcutPicker.vue'
 
 const store = useAppStore()
 const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
 const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
+const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
+const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
+const reminderBaseTime = computed(() => store.scheduleForm.timeType === 'deadline_task' ? store.scheduleForm.deadlineTime : store.scheduleForm.startTime)
+const reminderBaseLabel = computed(() => store.scheduleForm.timeType === 'deadline_task' ? '截止时间' : '开始时间')
 </script>
 
 <template>
@@ -47,7 +54,7 @@ const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', 
       {{ labels.startTime }}
       <input v-model="store.scheduleForm.startTime" type="datetime-local" />
     </label>
-    <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" /></label>
+    <ReminderShortcutPicker v-model="store.scheduleForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="reminderPresets" :timezone="userTimezone" @error="store.notify" />
     <label v-if="store.scheduleForm.timeType === 'duration_task'">
       {{ labels.endTime }}
       <input v-model="store.scheduleForm.endTime" type="datetime-local" />

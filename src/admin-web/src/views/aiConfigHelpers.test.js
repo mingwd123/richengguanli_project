@@ -27,20 +27,27 @@ describe('buildAiConfigPayload', () => {
 
 describe('AI key payload helpers', () => {
   it('omits an empty key while editing so the encrypted key is preserved', () => {
-    expect(buildAiKeyPayload({ name: ' Backup ', apiKey: '   ', enabled: false, remark: ' standby ' })).toEqual({
+    expect(buildAiKeyPayload({ name: ' Backup ', apiKey: '   ', apiBaseUrl: ' ', enabled: false, remark: ' standby ' })).toEqual({
       name: 'Backup',
+      apiBaseUrl: '',
       enabled: false,
       remark: 'standby',
     })
   })
 
   it('submits a trimmed new key', () => {
-    expect(buildAiKeyPayload({ name: ' Primary ', apiKey: ' sk-new-key ', enabled: true, remark: '' })).toEqual({
+    expect(buildAiKeyPayload({ name: ' Primary ', apiKey: ' sk-new-key ', apiBaseUrl: ' https://relay.example.com ', enabled: true, remark: '' })).toEqual({
       name: 'Primary',
       apiKey: 'sk-new-key',
+      apiBaseUrl: 'https://relay.example.com',
       enabled: true,
       remark: '',
     })
+  })
+
+  it('submits an empty Base URL so editing can restore default inheritance', () => {
+    expect(buildAiKeyPayload({ name: 'Relay', apiKey: '', apiBaseUrl: '', enabled: true, remark: '' }))
+      .toMatchObject({ apiBaseUrl: '' })
   })
 
   it('requires a key only when creating', () => {
@@ -48,6 +55,25 @@ describe('AI key payload helpers', () => {
     expect(validateAiKeyForm(form, false)).toBe('请输入 API Key')
     expect(validateAiKeyForm(form, true)).toBe('')
     expect(validateAiKeyForm({ name: ' ', apiKey: 'sk-key' }, false)).toBe('请输入 Key 名称')
+    expect(validateAiKeyForm({ name: 'Primary', apiKey: 'sk-key', apiBaseUrl: 'http://relay.example.com' }, false))
+      .toBe('Base URL 必须使用 HTTPS')
+  })
+
+  it.each([
+    ['https://', 'Base URL 格式不正确'],
+    ['https://relay.example.com/open ai', 'Base URL 格式不正确'],
+    ['https://user:secret@relay.example.com', 'Base URL 必须是有效的 HTTPS 地址'],
+    ['https://relay.example.com:8443', 'Base URL 必须是有效的 HTTPS 地址'],
+    ['https://relay.example.com/v1?token=secret', 'Base URL 必须是有效的 HTTPS 地址'],
+    ['https://relay.example.com/v1#section', 'Base URL 必须是有效的 HTTPS 地址'],
+  ])('rejects unsupported Base URL %s', (apiBaseUrl, message) => {
+    expect(validateAiKeyForm({ name: 'Primary', apiKey: 'sk-key', apiBaseUrl }, false)).toBe(message)
+  })
+
+  it('rejects a Base URL longer than the database limit', () => {
+    const apiBaseUrl = `https://relay.example.com/${'a'.repeat(500)}`
+    expect(validateAiKeyForm({ name: 'Primary', apiKey: 'sk-key', apiBaseUrl }, false))
+      .toBe('Base URL 最多 500 个字符')
   })
 })
 

@@ -355,12 +355,15 @@ export interface SectionSummary {
   label: string
   total: number
   pendingCount: number
+  completedCount: number
   plannedLoad: number
+  completedLoad: number
 }
 
 export interface ScheduleListResult extends PageResult<Schedule> {
   viewMode: ScheduleViewMode
   sectionSummaries: SectionSummary[]
+  statusCounts?: Partial<Record<ScheduleStatus, number>>
   dataRevision: number
   revision: string
 }

@@ -13,6 +13,7 @@ import org.springframework.test.context.ActiveProfiles;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.sql.Timestamp;
 import java.util.List;
 import java.util.Map;
 
@@ -162,6 +163,76 @@ class ScheduleLogicRegressionTests {
 
         assertThat(rows).extracting(item -> item.get("title")).containsExactly("Overdue", "High urgency", "Low urgency");
         assertThat(rows).extracting(item -> item.get("sectionKey")).first().isEqualTo("time:overdue");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void completedSchedulesDefaultToCompletedTimeDescendingWithIdAsTheTieBreaker() {
+        long userId = authService.register("15100000007", "Abc12345", "Completed Sort User", "Asia/Shanghai");
+        long oldestId = ((Number) scheduleService.createSchedule(userId, Map.of(
+                "title", "Oldest completion", "timeType", "deadline_task", "deadlineTime", Instant.now().plusSeconds(3600).toString()
+        )).get("id")).longValue();
+        long firstTiedId = ((Number) scheduleService.createSchedule(userId, Map.of(
+                "title", "First tied completion", "timeType", "deadline_task", "deadlineTime", Instant.now().plusSeconds(7200).toString()
+        )).get("id")).longValue();
+        long secondTiedId = ((Number) scheduleService.createSchedule(userId, Map.of(
+                "title", "Second tied completion", "timeType", "deadline_task", "deadlineTime", Instant.now().plusSeconds(10800).toString()
+        )).get("id")).longValue();
+        scheduleService.setScheduleStatus(oldestId, userId, "completed");
+        scheduleService.setScheduleStatus(firstTiedId, userId, "completed");
+        scheduleService.setScheduleStatus(secondTiedId, userId, "completed");
+        jdbc.update("update schedule set completed_at=? where id=?", Timestamp.from(Instant.parse("2099-08-19T08:00:00Z")), oldestId);
+        Timestamp tiedCompletion = Timestamp.from(Instant.parse("2099-08-20T08:00:00Z"));
+        jdbc.update("update schedule set completed_at=? where id in (?,?)", tiedCompletion, firstTiedId, secondTiedId);
+
+        Map<String, Object> result = scheduleService.listSchedules(userId, 1, 20, "completed", null, null, null, null,
+                "manual", "time", null, null, false);
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) result.get("list");
+
+        assertThat(rows).extracting(item -> item.get("id")).containsExactly(secondTiedId, firstTiedId, oldestId);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void levelSummariesAlwaysContainFiveLevelsAndSeparatePlannedFromCompletedLoad() {
+        long userId = authService.register("15100000008", "Abc12345", "Level Summary User", "Asia/Shanghai");
+        scheduleService.createSchedule(userId, Map.of(
+                "title", "Pending high urgency", "timeType", "deadline_task",
+                "deadlineTime", Instant.now().plusSeconds(3600).toString(), "urgencyLevel", 5, "fatigueLevel", 4
+        ));
+        long completedId = ((Number) scheduleService.createSchedule(userId, Map.of(
+                "title", "Completed high urgency", "timeType", "deadline_task",
+                "deadlineTime", Instant.now().plusSeconds(7200).toString(), "urgencyLevel", 5, "fatigueLevel", 2
+        )).get("id")).longValue();
+        scheduleService.setScheduleStatus(completedId, userId, "completed");
+
+        Map<String, Object> urgencyResult = scheduleService.listSchedules(userId, 1, 1, null, null, null, null, null,
+                "manual", "urgency", null, null, false);
+        List<Map<String, Object>> urgencySummaries = (List<Map<String, Object>>) urgencyResult.get("sectionSummaries");
+        assertThat((List<?>) urgencyResult.get("list")).hasSize(1);
+        assertThat(urgencySummaries).extracting(item -> item.get("key"))
+                .containsExactly("urgency:5", "urgency:4", "urgency:3", "urgency:2", "urgency:1");
+        assertThat(urgencySummaries).extracting(item -> item.get("total"))
+                .containsExactly(2, 0, 0, 0, 0);
+        assertThat(urgencySummaries.get(0))
+                .containsEntry("pendingCount", 1L)
+                .containsEntry("completedCount", 1L)
+                .containsEntry("plannedLoad", new java.math.BigDecimal("5.000"))
+                .containsEntry("completedLoad", new java.math.BigDecimal("2.000"));
+
+        Map<String, Object> fatigueResult = scheduleService.listSchedules(userId, 1, 1, null, null, null, null, null,
+                "manual", "fatigue", null, null, false);
+        List<Map<String, Object>> fatigueSummaries = (List<Map<String, Object>>) fatigueResult.get("sectionSummaries");
+        assertThat(fatigueSummaries).extracting(item -> item.get("key"))
+                .containsExactly("fatigue:5", "fatigue:4", "fatigue:3", "fatigue:2", "fatigue:1");
+        assertThat(fatigueSummaries).extracting(item -> item.get("total"))
+                .containsExactly(0, 1, 0, 1, 0);
+        assertThat(fatigueSummaries.get(1))
+                .containsEntry("plannedLoad", new java.math.BigDecimal("5.000"))
+                .containsEntry("completedLoad", java.math.BigDecimal.ZERO);
+        assertThat(fatigueSummaries.get(3))
+                .containsEntry("plannedLoad", java.math.BigDecimal.ZERO)
+                .containsEntry("completedLoad", new java.math.BigDecimal("2.000"));
     }
 
     @Test

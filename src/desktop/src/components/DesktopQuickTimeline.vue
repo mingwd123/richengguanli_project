@@ -63,6 +63,7 @@ import {
   shouldAcceptScheduleRevision,
   shouldDeferQuickTarget,
   type QuickSource,
+  type QuickScheduleStatus,
 } from '../utils/desktopQuickScheduleViews'
 
 type SourceType = 'schedule' | 'team_task'
@@ -121,6 +122,7 @@ const aiBreakdownTasks = ref<QuickTeamBreakdownTask[]>([])
 const aiBreakdownBase = ref<QuickTeamBreakdownBase | null>(null)
 const quickSource = ref<QuickSource>('personal')
 const quickViewMode = ref<ScheduleViewMode>('time')
+const quickScheduleStatus = ref<QuickScheduleStatus>('pending')
 const quickScheduleResults = ref<Record<ScheduleViewMode, ScheduleListResult | null>>(quickModeRecord(() => null))
 const quickPersonalLoading = ref<Record<ScheduleViewMode, boolean>>(quickModeRecord(() => false))
 const quickPersonalErrors = ref<Record<ScheduleViewMode, string>>(quickModeRecord(() => ''))
@@ -184,6 +186,12 @@ const quickViewOptions = [
   { value: 'group' as ScheduleViewMode, label: '分组', icon: Layers3 },
   { value: 'urgency' as ScheduleViewMode, label: '紧急', icon: AlertTriangle },
   { value: 'fatigue' as ScheduleViewMode, label: '疲劳', icon: BatteryMedium },
+]
+
+const quickStatusOptions = [
+  { value: 'pending' as QuickScheduleStatus, label: '待处理' },
+  { value: 'completed' as QuickScheduleStatus, label: '已完成' },
+  { value: 'cancelled' as QuickScheduleStatus, label: '已取消' },
 ]
 
 const nestedViewTitle = computed(() => {
@@ -261,15 +269,18 @@ const personalSections = computed<QuickSection[]>(() => {
       label: (items[0]?.raw as Schedule)?.sectionLabel || (items[0]?.raw as Schedule)?.groupName || '未分组',
       total: items.length,
       pendingCount: items.length,
+      completedCount: 0,
       plannedLoad: items.reduce((sum, item) => sum + Number((item.raw as Schedule).fatigueWeight || 3), 0),
+      completedLoad: 0,
       items,
     }))
   }
   return summaries.map(summary => ({ ...summary, items: loaded.get(summary.key) || [] }))
 })
 
-const openEntries = computed(() => entries.value.filter(entry =>
-  !['completed', 'cancelled', 'rejected'].includes(entry.presentation)))
+const openEntries = computed(() => quickScheduleStatus.value === 'pending'
+  ? entries.value.filter(entry => !['completed', 'cancelled', 'rejected'].includes(entry.presentation))
+  : entries.value)
 
 const overdueEntries = computed(() => openEntries.value
   .filter(entry => entry.presentation === 'overdue')
@@ -319,6 +330,9 @@ const quickLoadPercent = computed(() => {
   const capacity = Number(store.fatigueDaily?.capacity75 || store.fatigueProfile?.capacity75 || 0)
   return capacity > 0 ? Math.min(100, Math.round(planned / capacity * 100)) : 0
 })
+
+const quickHistoryLoad = computed(() => (quickScheduleResult.value?.sectionSummaries || [])
+  .reduce((sum, section) => sum + Number(section.completedLoad || 0), 0))
 
 const fatigueAlertText = computed(() => {
   const level = store.fatigueDaily?.level
@@ -453,7 +467,7 @@ async function loadQuickPersonalSchedules(mode: ScheduleViewMode, notifyOnError:
   quickPersonalLoading.value[mode] = true
   quickPersonalErrors.value[mode] = ''
   try {
-    const scheduleQuery = quickScheduleQuery(mode)
+    const scheduleQuery = quickScheduleQuery(mode, quickScheduleStatus.value)
     const schedules = await store.request<ScheduleListResult>(`/schedules?${scheduleQuery.toString()}`)
     if (requestId !== quickPersonalRequests[mode] || userId !== store.profile?.id) return
     const revision = scheduleDataRevision(schedules)
@@ -543,6 +557,13 @@ async function selectQuickView(mode: ScheduleViewMode) {
   await restoreScroll(quickScrollPositions.value[mode])
 }
 
+async function selectQuickScheduleStatus(status: QuickScheduleStatus) {
+  if (quickScheduleStatus.value === status) return
+  quickScheduleStatus.value = status
+  quickScheduleResults.value[quickViewMode.value] = null
+  await loadQuickTimelineData(true, quickViewMode.value, 'personal')
+}
+
 async function openFatigueSurvey() {
   const localDate = store.fatigueSurveyToday?.localDate || store.fatigueDaily?.localDate || todayKey.value
   await pushView({ kind: 'fatigue-survey', localDate, scrollTop: 0 })
@@ -617,6 +638,18 @@ function scheduleTime(schedule: Schedule) {
   return schedule.effectiveTime || schedule.deadlineTime || schedule.endTime || schedule.startTime || ''
 }
 
+function displayScheduleTime(schedule: Schedule) {
+  return schedule.status === 'completed' && schedule.completedAt ? schedule.completedAt : scheduleTime(schedule)
+}
+
+function displayFatigueLevel(schedule: Schedule) {
+  return schedule.status === 'completed' && schedule.completedFatigueLevel ? schedule.completedFatigueLevel : schedule.fatigueLevel
+}
+
+function displayFatigueWeight(schedule: Schedule) {
+  return schedule.status === 'completed' && schedule.completedFatigueWeight != null ? schedule.completedFatigueWeight : schedule.fatigueWeight
+}
+
 function presentationLabel(presentation: TimelinePresentationStatus) {
   const labels: Record<TimelinePresentationStatus, string> = {
     upcoming: '待处理',
@@ -632,12 +665,26 @@ function presentationLabel(presentation: TimelinePresentationStatus) {
 }
 
 function actionLabel(entry: QuickEntry) {
-  if (entry.sourceType === 'schedule') return '完成'
+  if (entry.sourceType === 'schedule') {
+    const schedule = entry.raw as Schedule
+    return schedule.status === 'pending' ? '完成' : '恢复'
+  }
   const task = entry.raw as MyTask
   if (!isActionableTeamTask(task)) return ''
   if (task.assignStatus === 'pending') return '接受'
   if (task.assignStatus === 'accepted') return '完成'
   return ''
+}
+
+function actionIcon(entry: QuickEntry) {
+  if (entry.sourceType === 'schedule' && (entry.raw as Schedule).status !== 'pending') return RotateCcw
+  return Check
+}
+
+function sectionLoadText(section: QuickSection) {
+  if (quickScheduleStatus.value === 'completed') return `完成负荷 ${Number(section.completedLoad || 0)} 点`
+  if (quickScheduleStatus.value === 'pending') return `计划负荷 ${Number(section.plannedLoad || 0)} 点`
+  return `${section.total} 项`
 }
 
 function canAct(entry: QuickEntry) {
@@ -906,7 +953,9 @@ async function performAction(entry: QuickEntry) {
   actionBusy.value = true
   try {
     if (entry.sourceType === 'schedule') {
-      await store.request(`/schedules/${entry.raw.id}/complete`, { method: 'PUT' })
+      const schedule = entry.raw as Schedule
+      const endpoint = schedule.status === 'pending' ? 'complete' : schedule.status === 'completed' ? 'uncomplete' : 'restore'
+      await store.request(`/schedules/${entry.raw.id}/${endpoint}`, { method: 'PUT' })
       await refreshQuickWorkspace()
       return
     }
@@ -1236,7 +1285,9 @@ async function saveTaskEdit() {
 
 async function openFullWorkspace() {
   if (aiBreakdownSaving.value) return
-  let target = quickSource.value === 'personal' ? `/schedules?view=${encodeURIComponent(quickViewMode.value)}` : '/tasks'
+  let target = quickSource.value === 'personal'
+    ? `/schedules?view=${encodeURIComponent(quickViewMode.value)}&status=${encodeURIComponent(quickScheduleStatus.value)}`
+    : '/tasks'
   if (activeView.value.kind === 'create') {
     if (createKind.value === 'schedule') {
       Object.assign(store.scheduleForm, createForm.value)
@@ -1338,13 +1389,16 @@ onUnmounted(() => {
       </div>
 
       <template v-if="quickSource === 'personal'">
+        <div class="quick-view-switch" role="tablist" aria-label="个人日程状态">
+          <button v-for="option in quickStatusOptions" :key="option.value" type="button" :class="{ active: quickScheduleStatus === option.value }" role="tab" :aria-selected="quickScheduleStatus === option.value" @click="selectQuickScheduleStatus(option.value)">{{ option.label }}</button>
+        </div>
         <div class="quick-view-switch" role="tablist" aria-label="个人日程查看方式">
           <button v-for="option in quickViewOptions" :key="option.value" type="button" :class="{ active: quickViewMode === option.value }" role="tab" :aria-selected="quickViewMode === option.value" @click="selectQuickView(option.value)"><component :is="option.icon" :size="13" />{{ option.label }}</button>
         </div>
 
         <section class="quick-fatigue-summary" role="button" tabindex="0" @click="openFatigueSurvey" @keydown.enter="openFatigueSurvey" @keydown.space.prevent="openFatigueSurvey">
           <div><span>个人预计负荷</span><strong>{{ store.fatigueDaily?.predictedScore ?? '--' }}<small> 分 · {{ fatigueStateLabel }}</small></strong></div>
-          <div><span>计划 / 上限</span><strong>{{ store.fatigueDaily?.plannedLoad ?? 0 }} / {{ store.fatigueDaily?.capacity75 ?? store.fatigueProfile?.capacity75 ?? 18 }}</strong></div>
+          <div><span>{{ quickScheduleStatus === 'completed' ? '完成负荷' : quickScheduleStatus === 'cancelled' ? '取消记录' : '计划 / 上限' }}</span><strong>{{ quickScheduleStatus === 'completed' ? `${quickHistoryLoad} 点` : quickScheduleStatus === 'cancelled' ? `${quickScheduleResult?.total || 0} 项` : `${store.fatigueDaily?.plannedLoad ?? 0} / ${store.fatigueDaily?.capacity75 ?? store.fatigueProfile?.capacity75 ?? 18}` }}</strong></div>
           <div><span>调查</span><strong>{{ fatigueSurveyStatus }}</strong></div>
           <ChevronRight :size="16" />
           <span class="quick-load-track"><i :style="{ width: `${quickLoadPercent}%` }"></i></span>
@@ -1357,15 +1411,15 @@ onUnmounted(() => {
           <button type="button" @click="openFatigueSurvey">填写</button>
         </section>
 
-        <template v-if="quickViewMode !== 'time'">
+        <template v-if="quickViewMode !== 'time' || quickScheduleStatus !== 'pending'">
           <section v-if="quickDataLoading && !quickDataLoaded" class="quick-empty-state"><RefreshCw class="spinning" :size="22" /><span>正在加载个人日程...</span></section>
           <section v-else-if="quickDataError && !quickDataLoaded" class="quick-empty-state"><AlertTriangle :size="24" /><strong>暂时无法加载个人日程</strong><button type="button" @click="loadQuickTimelineData(true, quickViewMode, 'personal')">重试</button></section>
           <section v-else-if="!personalSections.length" class="quick-empty-state"><CalendarClock :size="24" /><strong>当前视图没有个人日程</strong><button type="button" @click="openCreateSchedule">新建日程</button></section>
           <section v-for="section in personalSections" v-else :key="section.key" class="quick-personal-section">
-            <div class="quick-section-heading"><component :is="quickViewMode === 'group' ? Layers3 : quickViewMode === 'urgency' ? AlertTriangle : BatteryMedium" :size="15" /><span>{{ section.label }}</span><em>{{ section.total }} · {{ section.plannedLoad }} 点</em></div>
+            <div class="quick-section-heading"><component :is="quickViewMode === 'group' ? Layers3 : quickViewMode === 'urgency' ? AlertTriangle : BatteryMedium" :size="15" /><span>{{ section.label }}</span><em>{{ sectionLoadText(section) }}</em></div>
             <article v-for="entry in section.items.slice(0, 8)" :key="entry.key" class="quick-unscheduled-item quick-personal-item" @click="openEntry(entry)">
-              <div><strong>{{ entry.raw.title }}</strong><small>{{ formatTime(scheduleTime(entry.raw as Schedule)) }} · 紧急 {{ (entry.raw as Schedule).urgencyLevel }} · 疲劳 {{ (entry.raw as Schedule).fatigueLevel }} / {{ (entry.raw as Schedule).fatigueWeight }} 点</small></div>
-              <button v-if="canAct(entry)" type="button" class="quick-action" title="完成日程" aria-label="完成日程" @click.stop="performAction(entry)"><Check :size="15" /></button>
+              <div><strong>{{ entry.raw.title }}</strong><small>{{ formatTime(displayScheduleTime(entry.raw as Schedule)) }} · 紧急 {{ (entry.raw as Schedule).urgencyLevel }} · 疲劳 {{ displayFatigueLevel(entry.raw as Schedule) }} / {{ displayFatigueWeight(entry.raw as Schedule) }} 点</small></div>
+              <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><component :is="actionIcon(entry)" :size="15" /></button>
               <ChevronRight v-else :size="16" />
             </article>
             <button v-if="section.total > Math.min(section.items.length, 8)" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ section.total }} 项</button>
@@ -1373,13 +1427,13 @@ onUnmounted(() => {
         </template>
       </template>
 
-      <template v-if="quickSource === 'team' || quickViewMode === 'time'">
+      <template v-if="quickSource === 'team' || (quickViewMode === 'time' && quickScheduleStatus === 'pending')">
       <section v-if="overdueEntries.length" class="quick-overdue-section" aria-label="已逾期任务">
         <div class="quick-section-heading"><Flag :size="15" /><span>已逾期</span><em>{{ overdueEntries.length }}</em></div>
         <article v-for="entry in overdueEntries.slice(0, 8)" :key="entry.key" class="quick-overdue-item" @click="openEntry(entry)">
           <span class="quick-overdue-time">{{ formatClock(entry.range.endAt) }}</span>
           <div><strong>{{ entry.raw.title }}</strong><small>{{ entry.sourceLabel }}</small></div>
-          <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><Check :size="15" /></button>
+          <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><component :is="actionIcon(entry)" :size="15" /></button>
           <ChevronRight v-else :size="16" />
         </article>
         <button v-if="overdueEntries.length > 8 && quickSource === 'personal'" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ overdueEntries.length }} 项</button>
@@ -1409,7 +1463,7 @@ onUnmounted(() => {
                   </span>
                   <strong>{{ row.entry.raw.title }}</strong><small>{{ row.entry.sourceLabel }}</small>
                 </button>
-                <button v-if="canAct(row.entry)" type="button" class="quick-card-action" :title="actionLabel(row.entry)" :aria-label="actionLabel(row.entry)" @click="performAction(row.entry)"><Check :size="15" /></button>
+                <button v-if="canAct(row.entry)" type="button" class="quick-card-action" :title="actionLabel(row.entry)" :aria-label="actionLabel(row.entry)" @click="performAction(row.entry)"><component :is="actionIcon(row.entry)" :size="15" /></button>
               </div>
             </template>
           </article>
@@ -1421,7 +1475,7 @@ onUnmounted(() => {
         <div class="quick-section-heading"><ListTodo :size="15" /><span>待安排</span><em>{{ unscheduledEntries.length }}</em></div>
         <article v-for="entry in unscheduledEntries.slice(0, 8)" :key="entry.key" class="quick-unscheduled-item" @click="openEntry(entry)">
           <div><strong>{{ entry.raw.title }}</strong><small>{{ entry.sourceLabel }}</small></div>
-          <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><Check :size="15" /></button>
+          <button v-if="canAct(entry)" type="button" class="quick-action" :title="actionLabel(entry)" :aria-label="actionLabel(entry)" @click.stop="performAction(entry)"><component :is="actionIcon(entry)" :size="15" /></button>
           <ChevronRight v-else :size="16" />
         </article>
         <button v-if="unscheduledEntries.length > 8 && quickSource === 'personal'" type="button" class="quick-section-more" @click="openFullScheduleView">查看全部 {{ unscheduledEntries.length }} 项</button>
