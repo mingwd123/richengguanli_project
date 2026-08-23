@@ -254,4 +254,25 @@ describe('app store request coordination', () => {
     expect(localStorage.getItem('dayliane_token')).toBeNull()
     expect(localStorage.getItem('dayliane_refresh_token')).toBeNull()
   })
+
+  it('clears authentication secrets after failed login and registration requests', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response(null, 401, '账号或密码错误'))
+    const store = useAppStore()
+
+    store.loginForm.account = 'user@example.com'
+    store.loginForm.password = 'Wrong12345'
+    expect(await store.login()).toBe(false)
+    expect(store.loginForm.password).toBe('')
+
+    store.registerForm.email = 'new@example.com'
+    store.registerForm.code = '123456'
+    store.registerForm.password = 'Abc12345'
+    store.registerForm.confirmPassword = 'Abc12345'
+    fetchMock.mockResolvedValue(response(null, 409, '邮箱已注册'))
+    expect(await store.register()).toBe(false)
+    expect(store.registerForm.code).toBe('')
+    expect(store.registerForm.password).toBe('')
+    expect(store.registerForm.confirmPassword).toBe('')
+  })
 })
