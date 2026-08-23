@@ -117,7 +117,7 @@ onMounted(loadMembers)
           <article v-for="m in members" :key="m.id" class="table-row" style="grid-template-columns:minmax(0,1fr) auto auto auto auto">
             <div>
               <strong>{{ m.nickname }}</strong>
-              <small>{{ m.phone }}</small>
+              <small>{{ m.phone || m.email || '未提供联系方式' }}</small>
             </div>
             <span :class="['tag', m.role === 'owner' ? 'danger' : m.role === 'admin' ? 'warning' : 'blue']">{{ statusLabel(m.role) }}</span>
             <span :class="['tag', m.status === 'active' ? 'blue' : 'danger']">{{ statusLabel(m.status) }}</span>

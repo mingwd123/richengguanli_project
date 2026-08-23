@@ -1,10 +1,17 @@
 package com.dayliane.auth;
 
+import com.dayliane.auth.email.EmailAddress;
+import com.dayliane.auth.email.EmailCodePurpose;
+import com.dayliane.auth.email.EmailProperties;
+import com.dayliane.auth.email.EmailOtpService;
+import com.dayliane.auth.email.EmailOtpVerificationException;
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.JwtService;
 import com.dayliane.common.LoginRateLimiter;
 import com.dayliane.common.PermissionService;
 import com.dayliane.common.RefreshTokenStore;
+import com.dayliane.common.UserLoginRateLimiter;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -16,11 +23,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.PreparedStatement;
-import java.sql.Statement;
 import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.DateTimeException;
 import java.util.LinkedHashMap;
@@ -29,42 +35,52 @@ import java.util.Objects;
 
 @Service
 public class AuthService {
+    private static final int EMAIL_SEND_LOCK_STRIPES = 256;
 
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate named;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
     private final JwtService jwtService;
     private final LoginRateLimiter rateLimiter;
+    private final UserLoginRateLimiter userLoginRateLimiter;
     private final RefreshTokenStore refreshTokenStore;
     private final PermissionService permissionService;
+    private final EmailProperties emailProperties;
+    private final EmailOtpService emailOtpService;
+    private final Object[] emailSendLocks = createEmailSendLocks();
 
     public AuthService(JdbcTemplate jdbc, NamedParameterJdbcTemplate named,
                        JwtService jwtService, LoginRateLimiter rateLimiter,
-                       RefreshTokenStore refreshTokenStore, PermissionService permissionService) {
+                       UserLoginRateLimiter userLoginRateLimiter,
+                       RefreshTokenStore refreshTokenStore, PermissionService permissionService,
+                       EmailProperties emailProperties, EmailOtpService emailOtpService) {
         this.jdbc = jdbc;
         this.named = named;
         this.jwtService = jwtService;
         this.rateLimiter = rateLimiter;
+        this.userLoginRateLimiter = userLoginRateLimiter;
         this.refreshTokenStore = refreshTokenStore;
         this.permissionService = permissionService;
+        this.emailProperties = emailProperties;
+        this.emailOtpService = emailOtpService;
     }
 
     @Transactional
     public long register(String phone, String password, String nickname, String timezone) {
-        if (phone == null || phone.isBlank() || password == null || password.length() < 8 || !password.matches(".*[A-Za-z].*") || !password.matches(".*\\d.*")) {
+        String normalizedPhone = normalizePhone(phone, true);
+        if (!validPassword(password)) {
             throw new BusinessException(400, "phone or password format is invalid");
         }
-        if (count("select count(*) from `user` where phone = ?", phone) > 0) {
+        if (count("select count(*) from `user` where phone = ?", normalizedPhone) > 0) {
             throw new BusinessException(409, "phone already registered");
         }
-        String selectedTimezone = blank(timezone) ? "Asia/Shanghai" : timezone;
-        try { ZoneId.of(selectedTimezone); } catch (DateTimeException ex) { throw new BusinessException(400, "timezone is invalid"); }
+        String selectedTimezone = validateTimezone(timezone);
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
                     "insert into `user` (phone,password_hash,nickname,avatar_url,timezone,status) values (?,?,?,?,?, 'active')",
                     new String[]{"id"});
-            ps.setString(1, phone);
+            ps.setString(1, normalizedPhone);
             ps.setString(2, passwordEncoder.encode(password));
             ps.setString(3, blank(nickname) ? "User" : nickname);
             ps.setString(4, "");
@@ -76,21 +92,107 @@ public class AuthService {
         return userId;
     }
 
-    public Map<String, Object> login(String phone, String password, String ip) {
-        rateLimiter.checkLimit(ip, phone);
-        Map<String, Object> user = findUserByPhone(phone);
+    @Transactional(noRollbackFor = EmailOtpVerificationException.class)
+    public long register(String email, String code, String password, String phone,
+                         String nickname, String timezone) {
+        if (!emailProperties.isRegistrationEnabled()) {
+            throw new BusinessException(503, "registration unavailable");
+        }
+        String normalizedEmail = EmailAddress.normalize(email);
+        String normalizedPhone = normalizePhone(phone, false);
+        if (!validPassword(password)) throw new BusinessException(400, "password format is invalid");
+        String selectedNickname = blank(nickname) ? "User" : nickname.trim();
+        if (selectedNickname.length() > 50) throw new BusinessException(400, "nickname is invalid");
+        String selectedTimezone = validateTimezone(timezone);
+        if (count("select count(*) from `user` where email=?", normalizedEmail) > 0) {
+            throw new BusinessException(409, "email already registered");
+        }
+        if (normalizedPhone != null && count("select count(*) from `user` where phone=?", normalizedPhone) > 0) {
+            throw new BusinessException(409, "phone already registered");
+        }
+
+        emailOtpService.consume(normalizedEmail, EmailCodePurpose.REGISTER, code, null);
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        try {
+            jdbc.update(connection -> {
+                PreparedStatement statement = connection.prepareStatement(
+                        "insert into `user` (phone,email,email_verified_at,password_hash,nickname,avatar_url,timezone,status) "
+                                + "values (?,?,utc_timestamp(),?,?,?,?,'active')",
+                        new String[]{"id"});
+                statement.setString(1, normalizedPhone);
+                statement.setString(2, normalizedEmail);
+                statement.setString(3, passwordEncoder.encode(password));
+                statement.setString(4, selectedNickname);
+                statement.setString(5, "");
+                statement.setString(6, selectedTimezone);
+                return statement;
+            }, keyHolder);
+        } catch (DuplicateKeyException ex) {
+            if (count("select count(*) from `user` where email=?", normalizedEmail) > 0) {
+                throw new BusinessException(409, "email already registered");
+            }
+            throw new BusinessException(409, "phone already registered");
+        }
+        long userId = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        createDefaultTaskGroups(userId);
+        return userId;
+    }
+
+    @Transactional(noRollbackFor = EmailOtpVerificationException.class)
+    public Map<String, Object> registerWithTokens(String email, String code, String password, String phone,
+                                                   String nickname, String timezone) {
+        long userId = register(email, code, password, phone, nickname, timezone);
+        return tokensMap(userId, 0);
+    }
+
+    @Transactional
+    public Map<String, Object> login(String account, String password, String ip) {
+        String normalizedAccount = account == null ? "" : account.trim();
+        String normalizedEmail = null;
+        if (normalizedAccount.contains("@")) {
+            normalizedEmail = EmailAddress.tryNormalize(normalizedAccount);
+            normalizedAccount = normalizedEmail == null ? normalizedAccount.toLowerCase() : normalizedEmail;
+        }
+        userLoginRateLimiter.acquireAttempt(ip, normalizedAccount);
+        Map<String, Object> user = normalizedEmail != null
+                ? findUserByEmailForUpdate(normalizedEmail)
+                : normalizedAccount.contains("@") ? null : findUserByPhoneForUpdate(normalizedAccount);
         if (user == null || !"active".equals(user.get("status"))) {
-            rateLimiter.recordFailure(ip, phone);
-            throw new BusinessException(401, "phone or password is incorrect");
+            throw new BusinessException(401, "account or password is incorrect");
         }
         String hash = String.valueOf(user.get("passwordHash"));
         if (!passwordMatches(password, hash)) {
-            rateLimiter.recordFailure(ip, phone);
-            throw new BusinessException(401, "phone or password is incorrect");
+            throw new BusinessException(401, "account or password is incorrect");
         }
-        rateLimiter.clearSuccess(ip, phone);
+        userLoginRateLimiter.clearSuccess(ip, normalizedAccount);
         long userId = longValue(user.get("id"));
-        return tokensMap(userId);
+        int version = ((Number) user.get("tokenVersion")).intValue();
+        return tokensMap(userId, version);
+    }
+
+    public int sendEmailCode(String authorization, String email, String purpose, String currentPassword,
+                             String ip, String userAgent) {
+        EmailCodePurpose parsedPurpose = EmailCodePurpose.parse(purpose);
+        Long userId = parsedPurpose.requiresAuthentication() ? requireUser(authorization) : null;
+        String normalizedEmail = EmailAddress.normalize(email);
+        Object lock = emailSendLocks[Math.floorMod(
+                31 * normalizedEmail.hashCode() + parsedPurpose.value().hashCode(), emailSendLocks.length)];
+        synchronized (lock) {
+            return emailOtpService.sendCode(parsedPurpose, normalizedEmail, userId, currentPassword, ip, userAgent);
+        }
+    }
+
+    @Transactional(noRollbackFor = EmailOtpVerificationException.class)
+    public void resetPassword(String email, String code, String newPassword) {
+        String normalizedEmail = EmailAddress.normalize(email);
+        if (!validPassword(newPassword)) throw new BusinessException(400, "new password format is invalid");
+        Map<String, Object> user = findResetUserByEmailForUpdate(normalizedEmail);
+        Long userId = user == null ? null : longValue(user.get("id"));
+        emailOtpService.consume(normalizedEmail, EmailCodePurpose.RESET_PASSWORD, code, userId);
+        if (userId == null) throw new EmailOtpVerificationException();
+        jdbc.update("update `user` set password_hash=?,token_version=token_version+1 where id=?",
+                passwordEncoder.encode(newPassword), userId);
+        refreshTokenStore.invalidateAllForUser(userId);
     }
 
     public Map<String, Object> adminLogin(String username, String password, String ip) {
@@ -125,24 +227,16 @@ public class AuthService {
         if (userId == null) {
             throw new BusinessException(401, "refresh token is invalid");
         }
-        if (count("select count(*) from `user` where id=? and status='active' and deleted_at is null", userId) == 0) {
-            throw new BusinessException(401, "refresh token is invalid");
-        }
-        if (jwtService.getTokenVersion(refreshToken) != tokenVersion(userId)) {
+        SessionState sessionState = findSessionStateForUpdate(userId);
+        if (sessionState == null || !"active".equals(sessionState.status())
+                || jwtService.getTokenVersion(refreshToken) != sessionState.tokenVersion()) {
             throw new BusinessException(401, "refresh token is invalid");
         }
         String jti = jwtService.getJti(refreshToken);
         if (jti == null || !refreshTokenStore.consume(jti, userId)) {
             throw new BusinessException(401, "refresh token is invalid");
         }
-        String newAccessToken = issueAccessToken(userId);
-        String newRefreshToken = issueRefreshToken(userId);
-        return Map.of(
-                "userId", userId,
-                "accessToken", newAccessToken,
-                "refreshToken", newRefreshToken,
-                "expiresIn", 86400
-        );
+        return tokensMap(userId, sessionState.tokenVersion());
     }
 
     public void logout(String authorization) {
@@ -213,20 +307,65 @@ public class AuthService {
         return token;
     }
 
-    private Map<String, Object> tokensMap(long userId) {
+    private Map<String, Object> tokensMap(long userId, int version) {
+        String accessToken = jwtService.issueAccessToken(userId, version);
+        String refreshToken = jwtService.issueRefreshToken(userId, version);
+        String refreshJti = jwtService.getJti(refreshToken);
+        if (refreshJti != null) refreshTokenStore.save(refreshJti, userId);
         return Map.of(
                 "userId", userId,
-                "accessToken", issueAccessToken(userId),
-                "refreshToken", issueRefreshToken(userId),
+                "accessToken", accessToken,
+                "refreshToken", refreshToken,
                 "expiresIn", 86400
         );
     }
 
-    private Map<String, Object> findUserByPhone(String phone) {
+    private Map<String, Object> findUserByPhoneForUpdate(String phone) {
         try {
             return jdbc.queryForObject(
-                    "select id,phone,password_hash passwordHash,nickname,avatar_url avatarUrl,timezone,status,created_at createdAt from `user` where phone=? and deleted_at is null",
+                    "select id,phone,password_hash passwordHash,nickname,avatar_url avatarUrl,timezone,status,"
+                            + "token_version tokenVersion,created_at createdAt from `user` "
+                            + "where phone=? and deleted_at is null for update",
                     userMapper(), phone);
+        } catch (EmptyResultDataAccessException ex) {
+            return null;
+        }
+    }
+
+    private SessionState findSessionStateForUpdate(long userId) {
+        try {
+            return jdbc.queryForObject(
+                    "select status,token_version from `user` where id=? and deleted_at is null for update",
+                    (rs, index) -> new SessionState(rs.getString("status"), rs.getInt("token_version")),
+                    userId);
+        } catch (EmptyResultDataAccessException ex) {
+            return null;
+        }
+    }
+
+    private record SessionState(String status, int tokenVersion) {}
+
+    private Map<String, Object> findUserByEmailForUpdate(String email) {
+        try {
+            return jdbc.queryForObject(
+                    "select id,phone,password_hash passwordHash,nickname,avatar_url avatarUrl,timezone,status,"
+                            + "token_version tokenVersion,created_at createdAt from `user` "
+                            + "where email=? and email_verified_at is not null and deleted_at is null for update",
+                    userMapper(), email);
+        } catch (EmptyResultDataAccessException ex) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> findResetUserByEmailForUpdate(String email) {
+        try {
+            return jdbc.queryForObject(
+                    "select id,password_hash passwordHash from `user` where email=? and email_verified_at is not null "
+                            + "and status='active' and deleted_at is null for update",
+                    (rs, index) -> Map.of(
+                            "id", rs.getLong("id"),
+                            "passwordHash", rs.getString("passwordHash")),
+                    email);
         } catch (EmptyResultDataAccessException ex) {
             return null;
         }
@@ -252,6 +391,7 @@ public class AuthService {
             m.put("avatarUrl", rs.getString("avatarUrl"));
             m.put("timezone", rs.getString("timezone"));
             m.put("status", rs.getString("status"));
+            m.put("tokenVersion", rs.getInt("tokenVersion"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
@@ -310,13 +450,35 @@ public class AuthService {
         return s == null || s.isBlank();
     }
 
-    private static String text(Map<String, Object> m, String k) {
-        return String.valueOf(m.getOrDefault(k, ""));
+    private static String normalizePhone(String raw, boolean required) {
+        String phone = raw == null ? "" : raw.trim();
+        if (phone.isEmpty() && !required) return null;
+        if (!phone.matches("1[3-9]\\d{9}")) throw new BusinessException(400, "phone format is invalid");
+        return phone;
     }
 
-    private static String textOr(Map<String, Object> m, String k, String f) {
-        String v = text(m, k);
-        return blank(v) ? f : v;
+    private static boolean validPassword(String password) {
+        return password != null
+                && password.length() >= 8
+                && password.getBytes(StandardCharsets.UTF_8).length <= 72
+                && password.matches(".*[A-Za-z].*")
+                && password.matches(".*\\d.*");
+    }
+
+    private static String validateTimezone(String timezone) {
+        String selected = blank(timezone) ? "Asia/Shanghai" : timezone.trim();
+        try {
+            ZoneId.of(selected);
+        } catch (DateTimeException ex) {
+            throw new BusinessException(400, "timezone is invalid");
+        }
+        return selected;
+    }
+
+    private static Object[] createEmailSendLocks() {
+        Object[] locks = new Object[EMAIL_SEND_LOCK_STRIPES];
+        for (int index = 0; index < locks.length; index++) locks[index] = new Object();
+        return locks;
     }
 
     private static long longValue(Object v) {

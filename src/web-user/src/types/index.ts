@@ -1,7 +1,9 @@
 /* ========== 用户 ========== */
 export interface UserProfile {
   id: number
-  phone: string
+  phone: string | null
+  email: string | null
+  emailVerifiedAt: string | null
   nickname: string
   avatarUrl: string
   timezone: string
@@ -76,7 +78,8 @@ export interface TeamMember {
   userId: number
   nickname: string
   avatarUrl?: string
-  phone: string
+  phone: string | null
+  email?: string | null
   role: TeamRole
   status: MemberStatus
   joinedAt: string
@@ -298,15 +301,47 @@ export interface TimelineStats {
 
 /* ========== 表单 ========== */
 export interface LoginForm {
-  phone: string
+  account: string
   password: string
 }
 
 export interface RegisterForm {
+  email: string
+  code: string
   phone: string
   password: string
   confirmPassword: string
   nickname: string
+}
+
+export type EmailCodePurpose = 'register' | 'bind_email' | 'change_email' | 'reset_password'
+
+export interface EmailCodeRequest {
+  email: string
+  purpose: EmailCodePurpose
+  currentPassword?: string
+}
+
+export interface EmailCodeResponse {
+  countdown: number
+}
+
+export interface ResetPasswordForm {
+  email: string
+  code: string
+  newPassword: string
+  confirmPassword: string
+}
+
+export interface UpdateEmailForm {
+  email: string
+  code: string
+  currentPassword: string
+}
+
+export interface UpdateEmailResponse {
+  ok: boolean
+  reauthenticate: boolean
 }
 
 export interface ScheduleForm {

@@ -38,6 +38,17 @@ public class UserController {
         return ApiResponse.success(Map.of("ok", true));
     }
 
+    @PutMapping("/email")
+    public ApiResponse<Map<String, Object>> email(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        boolean reauthenticate = userService.updateEmail(
+                userId,
+                String.valueOf(req.getOrDefault("email", "")),
+                String.valueOf(req.getOrDefault("code", "")),
+                String.valueOf(req.getOrDefault("currentPassword", "")));
+        return ApiResponse.success(Map.of("ok", true, "reauthenticate", reauthenticate));
+    }
+
     @PutMapping("/timezone")
     public ApiResponse<Map<String, Object>> timezone(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));

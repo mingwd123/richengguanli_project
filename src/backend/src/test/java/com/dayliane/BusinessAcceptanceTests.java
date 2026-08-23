@@ -54,7 +54,7 @@ class BusinessAcceptanceTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("fatigue_alert_log", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "ai_usage_log", "ai_api_key", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("fatigue_alert_log", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "ai_usage_log", "ai_api_key", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "auth_email_otp", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
         jdbc.update("update ai_key_pool_state set revision=0 where id=1");
@@ -217,6 +217,25 @@ class BusinessAcceptanceTests {
         teamService.joinTeam(member, text(team, "inviteCode"));
         assertThat(teamTaskService.listMyTeamTasks(member, 1, 20, null, null, null, null)).containsEntry("total", 0);
         assertThat(count("select count(*) from team_task_assignee where task_id=? and user_id=? and is_active=false", id(task), member)).isEqualTo(1);
+    }
+
+    @Test
+    void teamMemberSummaryIncludesEmailForUsersWithoutPhone() {
+        long owner = register("15000000033", "Owner");
+        long emailOnlyMember = register("15000000034", "Email Member");
+        jdbc.update("update `user` set phone=null,email='member@example.com',email_verified_at=utc_timestamp() where id=?",
+                emailOnlyMember);
+        Map<String, Object> team = teamService.createTeam(owner, "Email Member Team");
+        long teamId = id(team);
+        teamService.joinTeam(emailOnlyMember, text(team, "inviteCode"));
+
+        assertThat(teamService.activeMembers(teamId))
+                .filteredOn(member -> ((Number) member.get("userId")).longValue() == emailOnlyMember)
+                .singleElement()
+                .satisfies(member -> {
+                    assertThat(member.get("phone")).isNull();
+                    assertThat(member).containsEntry("email", "member@example.com");
+                });
     }
 
     @Test

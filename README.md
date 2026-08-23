@@ -110,6 +110,21 @@ DB_NAME
 DB_USERNAME
 DB_PASSWORD
 JWT_SECRET
+TRUST_FORWARDED_HEADERS            # 是否信任代理转发的客户端 IP，默认 false
+EMAIL_REGISTRATION_ENABLED         # 新邮箱注册总开关，默认 true；临时回滚时设为 false
+EMAIL_OTP_SECRET                   # 邮箱验证码摘要密钥，生产环境使用独立随机值
+EMAIL_OTP_TTL                      # 验证码有效期，默认 5m
+EMAIL_OTP_RESEND_COOLDOWN          # 同邮箱重发冷却，默认 60s
+EMAIL_OTP_MAX_ATTEMPTS             # 单个验证码最大尝试次数，默认 5
+EMAIL_OTP_MAX_PER_EMAIL_PER_DAY    # 同邮箱每日发送上限，默认 10
+EMAIL_OTP_MAX_PER_IP_PER_HOUR      # 同 IP 每小时发送上限，默认 30
+TENCENT_SES_ENABLED                # 腾讯云邮件发送开关，默认 false
+TENCENT_SES_REGION
+TENCENT_SES_SECRET_ID
+TENCENT_SES_SECRET_KEY
+TENCENT_SES_FROM_EMAIL
+TENCENT_SES_TEMPLATE_ID
+TENCENT_SES_REPLY_TO
 REMINDER_SCAN_TOKEN
 AI_ENABLED
 AI_PROVIDER
@@ -128,7 +143,13 @@ DAYLIANE_FATIGUE_RETENTION_DAYS   # 调查数据保留天数，默认 180
 DAYLIANE_FATIGUE_ALLOWED_USER_IDS # 可选灰度用户 ID 列表；留空表示不限制
 ```
 
-六个 `DAYLIANE_FATIGUE_*` 变量当前未由 `docker-compose.yml` 显式透传，容器部署默认使用上方标注的默认值；如需覆盖，应将对应变量加入后端服务的 `environment` 配置。
+`TRUST_FORWARDED_HEADERS` 只能在后端端口不对公网开放、且仅允许可信反向代理直连时设为 `true`，并由该代理覆盖客户端传入的 `X-Forwarded-For`。Docker Compose 默认将后端 `8080` 端口映射到宿主机，因此模板保持 `false`，避免客户端伪造来源 IP 绕过验证码和登录限流。
+
+`EMAIL_REGISTRATION_ENABLED=false` 是新邮箱注册的临时回滚开关：会同时停止注册验证码发送和公开邮箱注册，并返回 HTTP 503 `registration unavailable`；既有邮箱/手机号登录、绑定邮箱和找回密码不受影响。内部兼容用的手机号注册服务方法不受此开关影响。
+
+登录失败和邮箱敏感操作的当前密码失败限流保存在单个后端进程内存中。多实例部署需要在可信网关增加同等限流，或改用共享的分布式计数存储，避免请求在实例间轮转后绕过阈值。
+
+六个 `DAYLIANE_FATIGUE_*` 变量当前未由 `docker-compose.yml` 显式透传，容器部署默认使用上方标注的默认值；如需覆盖，应将对应变量加入后端服务的 `environment` 配置。腾讯云 SES 默认关闭，启用前必须完成发信域名、发信地址和模板审核，并通过环境变量注入凭证，不能把密钥提交到仓库。
 
 用户端、管理端和桌面端的 API 地址分别参考各目录下的 `.env.example`，默认后端地址为 `http://localhost:8080/api/v1`（桌面端默认使用 `127.0.0.1`）。
 
@@ -249,11 +270,11 @@ cargo test
 
 ## Docker 部署
 
-在项目根目录准备 Docker 环境变量文件，至少设置数据库密码、JWT 密钥和内部提醒扫描密钥，然后运行：
+在项目根目录准备 Docker 环境变量文件，至少设置数据库密码、JWT 密钥、邮箱验证码摘要密钥和内部提醒扫描密钥，然后运行：
 
 ```powershell
 Copy-Item .env.docker.example .env
-# 编辑 .env，至少替换 DB_PASSWORD、JWT_SECRET 和 REMINDER_SCAN_TOKEN
+# 编辑 .env，至少替换 DB_PASSWORD、JWT_SECRET、EMAIL_OTP_SECRET 和 REMINDER_SCAN_TOKEN
 docker compose up --build -d
 ```
 

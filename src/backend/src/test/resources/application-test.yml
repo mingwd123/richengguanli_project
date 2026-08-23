@@ -12,8 +12,20 @@ spring:
       schema-locations: classpath:schema-test.sql
 
 app:
+  http:
+    trust-forwarded-headers: false
   jwt:
     secret: test-secret-for-dayliane-acceptance-tests
+  email:
+    registration-enabled: true
+    otp-secret: test-secret-for-dayliane-email-otp-digests
+    otp-ttl: 5m
+    resend-cooldown: 60s
+    max-attempts: 5
+    max-per-email-per-day: 10
+    max-per-ip-per-hour: 30
+    tencent-ses:
+      enabled: false
   reminder:
     scheduler-enabled: false
   ai:

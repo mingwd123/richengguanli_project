@@ -78,7 +78,7 @@ onMounted(loadData)
           <span class="member-avatar">{{ member.nickname.slice(0, 1) }}</span>
           <span>
             <strong>{{ member.nickname }}</strong>
-            <small>{{ member.role === 'owner' ? '团队所有者' : member.role === 'admin' ? '管理员' : '成员' }} · {{ member.phone }}</small>
+            <small>{{ member.role === 'owner' ? '团队所有者' : member.role === 'admin' ? '管理员' : '成员' }} · {{ member.phone || member.email || '未提供联系方式' }}</small>
           </span>
         </label>
         <p v-if="!selectableMembers.length" class="hint">团队内没有可选择的其他活跃成员。</p>

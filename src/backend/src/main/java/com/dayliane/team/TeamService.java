@@ -95,7 +95,9 @@ public class TeamService {
     }
 
     public List<Map<String, Object>> activeMembers(long teamId) {
-        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,u.nickname,u.phone,u.avatar_url avatarUrl from team_member m join `user` u on u.id=m.user_id where m.team_id=? and m.status='active' order by m.id", (rs, i) -> {
+        return jdbc.query("select m.id,m.team_id teamId,m.user_id userId,m.role,m.status,m.joined_at joinedAt,"
+                + "u.nickname,u.phone,u.email,u.avatar_url avatarUrl from team_member m join `user` u on u.id=m.user_id "
+                + "where m.team_id=? and m.status='active' order by m.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("teamId", rs.getLong("teamId"));
@@ -106,6 +108,7 @@ public class TeamService {
             m.put("nickname", rs.getString("nickname"));
             m.put("avatarUrl", rs.getString("avatarUrl"));
             m.put("phone", rs.getString("phone"));
+            m.put("email", rs.getString("email"));
             return m;
         }, teamId);
     }

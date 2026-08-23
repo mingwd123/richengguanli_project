@@ -52,7 +52,7 @@ class FatigueLogicRegressionTests {
                 "notification", "notification_preference", "reminder_preset", "reminder",
                 "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task",
                 "schedule", "task_group", "team_member", "team", "auth_revoked_access_token",
-                "auth_refresh_token", "user")) {
+                "auth_refresh_token", "auth_email_otp", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
     }

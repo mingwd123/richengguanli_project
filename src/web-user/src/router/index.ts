@@ -9,6 +9,12 @@ const routes = [
     meta: { guest: true }
   },
   {
+    path: '/forgot-password',
+    name: 'ForgotPassword',
+    component: () => import('../views/ForgotPasswordPage.vue'),
+    meta: { guest: true }
+  },
+  {
     path: '/',
     component: () => import('../views/MainLayout.vue'),
     meta: { requiresAuth: true },

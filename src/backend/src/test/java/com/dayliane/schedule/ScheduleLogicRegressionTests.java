@@ -30,7 +30,7 @@ class ScheduleLogicRegressionTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("fatigue_alert_log", "fatigue_survey_prompt_log", "fatigue_survey_skip", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "notification", "auth_revoked_access_token", "auth_refresh_token", "reminder", "schedule", "task_group", "user")) {
+        for (String table : List.of("fatigue_alert_log", "fatigue_survey_prompt_log", "fatigue_survey_skip", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "notification", "auth_revoked_access_token", "auth_refresh_token", "auth_email_otp", "reminder", "schedule", "task_group", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
     }

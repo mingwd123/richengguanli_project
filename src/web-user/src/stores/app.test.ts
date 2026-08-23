@@ -155,4 +155,103 @@ describe('app store request coordination', () => {
 
     expect(store.activeTaskCount).toBe(2)
   })
+
+  it('sends a normalized authenticated email-code request', async () => {
+    localStorage.setItem('dayliane_token', 'access-token')
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ countdown: 45 }))
+    const store = useAppStore()
+
+    const result = await store.sendEmailCode({
+      email: '  New.Email@Example.COM ',
+      purpose: 'change_email',
+      currentPassword: 'Abc12345',
+    })
+
+    expect(result.countdown).toBe(45)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/auth/email-code')
+    expect((options?.headers as Record<string, string>).Authorization).toBe('Bearer access-token')
+    expect(JSON.parse(String(options?.body))).toEqual({
+      email: 'new.email@example.com',
+      purpose: 'change_email',
+      currentPassword: 'Abc12345',
+    })
+  })
+
+  it('resets a password without persisting password fields', async () => {
+    const localSetItem = vi.fn()
+    const sessionSetItem = vi.fn()
+    vi.stubGlobal('localStorage', { ...storageStub(), setItem: localSetItem })
+    vi.stubGlobal('sessionStorage', { ...storageStub(), setItem: sessionSetItem })
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ ok: true }))
+    const store = useAppStore()
+
+    const success = await store.resetPassword({
+      email: ' User@Example.com ',
+      code: '123456',
+      newPassword: 'NewPass123',
+      confirmPassword: 'NewPass123',
+    })
+
+    expect(success).toBe(true)
+    const [, options] = fetchMock.mock.calls[0]
+    expect(JSON.parse(String(options?.body))).toEqual({
+      email: 'user@example.com',
+      code: '123456',
+      newPassword: 'NewPass123',
+    })
+    expect(localSetItem).not.toHaveBeenCalled()
+    expect(sessionSetItem).not.toHaveBeenCalled()
+  })
+
+  it('clears the local session when an email change requires authentication again', async () => {
+    localStorage.setItem('dayliane_token', 'access-token')
+    localStorage.setItem('dayliane_refresh_token', 'refresh-token')
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ ok: true, reauthenticate: true }))
+    const store = useAppStore()
+    store.profile = {
+      id: 1,
+      phone: null,
+      email: 'old@example.com',
+      emailVerifiedAt: '2026-08-23T12:00:00',
+      nickname: 'Email user',
+      avatarUrl: '',
+      timezone: 'Asia/Shanghai',
+      createdAt: '2026-08-23T12:00:00',
+    }
+
+    const result = await store.updateEmail({
+      email: 'new@example.com',
+      code: '123456',
+      currentPassword: 'Abc12345',
+    })
+
+    expect(result).toEqual({ success: true, reauthenticate: true })
+    expect(store.token).toBe('')
+    expect(store.refreshToken).toBe('')
+    expect(localStorage.getItem('dayliane_token')).toBeNull()
+    expect(localStorage.getItem('dayliane_refresh_token')).toBeNull()
+  })
+
+  it('clears the local session after changing the password', async () => {
+    localStorage.setItem('dayliane_token', 'access-token')
+    localStorage.setItem('dayliane_refresh_token', 'refresh-token')
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ ok: true }))
+    const store = useAppStore()
+    store.passwordForm.oldPassword = 'Abc12345'
+    store.passwordForm.newPassword = 'Changed12345'
+    store.passwordForm.confirmPassword = 'Changed12345'
+
+    expect(await store.changePassword()).toBe(true)
+
+    expect(store.token).toBe('')
+    expect(store.refreshToken).toBe('')
+    expect(localStorage.getItem('dayliane_token')).toBeNull()
+    expect(localStorage.getItem('dayliane_refresh_token')).toBeNull()
+  })
 })

@@ -4,6 +4,7 @@ DROP TABLE IF EXISTS ai_key_pool_state;
 DROP TABLE IF EXISTS ai_usage_log;
 DROP TABLE IF EXISTS auth_revoked_access_token;
 DROP TABLE IF EXISTS auth_refresh_token;
+DROP TABLE IF EXISTS auth_email_otp;
 DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
@@ -30,7 +31,9 @@ CREATE ALIAS IF NOT EXISTS UTC_TIMESTAMP FOR "com.dayliane.TestSqlFunctions.utcT
 
 CREATE TABLE `user` (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  phone VARCHAR(20) NOT NULL UNIQUE,
+  phone VARCHAR(20) UNIQUE,
+  email VARCHAR(254),
+  email_verified_at DATETIME,
   password_hash VARCHAR(255) NOT NULL,
   nickname VARCHAR(50) NOT NULL,
   avatar_url VARCHAR(500),
@@ -41,6 +44,33 @@ CREATE TABLE `user` (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX uk_user_email ON `user`(email);
+
+CREATE TABLE auth_email_otp (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT,
+  email VARCHAR(254) NOT NULL,
+  purpose VARCHAR(32) NOT NULL,
+  code_digest VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'issued',
+  attempt_count TINYINT NOT NULL DEFAULT 0,
+  max_attempts TINYINT NOT NULL DEFAULT 5,
+  sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  consumed_at DATETIME,
+  invalidated_at DATETIME,
+  request_ip VARCHAR(45),
+  user_agent TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_auth_email_otp_lookup ON auth_email_otp(email, purpose, status, expires_at);
+CREATE INDEX idx_auth_email_otp_user_status ON auth_email_otp(user_id, status);
+CREATE INDEX idx_auth_email_otp_expires_at ON auth_email_otp(expires_at);
+CREATE INDEX idx_auth_email_otp_email_sent_at ON auth_email_otp(email, sent_at);
+CREATE INDEX idx_auth_email_otp_ip_sent_at ON auth_email_otp(request_ip, sent_at);
 
 CREATE TABLE auth_refresh_token (
   jti VARCHAR(64) NOT NULL PRIMARY KEY,

@@ -24,7 +24,7 @@ function goToSettings() {
       </div>
       <div>
         <h2>{{ store.profile?.nickname || '用户' }}</h2>
-        <p>{{ store.profile?.phone }}</p>
+        <p>{{ store.profile?.phone || store.profile?.email || '未绑定联系方式' }}</p>
       </div>
     </div>
 

@@ -9,12 +9,30 @@ spring:
     baseline-version: 0
 
 app:
+  http:
+    trust-forwarded-headers: ${TRUST_FORWARDED_HEADERS:false}
   jwt:
     secret: ${JWT_SECRET:change-me-in-development}
   internal:
     reminder-scan-token: ${REMINDER_SCAN_TOKEN:change-me-in-development}
   demo-data:
     enabled: ${DEMO_DATA_ENABLED:true}
+  email:
+    registration-enabled: ${EMAIL_REGISTRATION_ENABLED:true}
+    otp-secret: ${EMAIL_OTP_SECRET:${JWT_SECRET:change-me-in-development}}
+    otp-ttl: ${EMAIL_OTP_TTL:5m}
+    resend-cooldown: ${EMAIL_OTP_RESEND_COOLDOWN:60s}
+    max-attempts: ${EMAIL_OTP_MAX_ATTEMPTS:5}
+    max-per-email-per-day: ${EMAIL_OTP_MAX_PER_EMAIL_PER_DAY:10}
+    max-per-ip-per-hour: ${EMAIL_OTP_MAX_PER_IP_PER_HOUR:30}
+    tencent-ses:
+      enabled: ${TENCENT_SES_ENABLED:false}
+      region: ${TENCENT_SES_REGION:}
+      secret-id: ${TENCENT_SES_SECRET_ID:}
+      secret-key: ${TENCENT_SES_SECRET_KEY:}
+      from-email: ${TENCENT_SES_FROM_EMAIL:}
+      template-id: ${TENCENT_SES_TEMPLATE_ID:}
+      reply-to: ${TENCENT_SES_REPLY_TO:}
   ai:
     enabled: ${AI_ENABLED:true}
     provider: ${AI_PROVIDER:deepseek}

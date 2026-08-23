@@ -7,8 +7,24 @@ import type {
   LoginForm, RegisterForm, PageResult, UpcomingOverview, NotificationPreference,
   ScheduleListResult, ScheduleViewMode, SectionSummary, FatigueProfile,
   FatigueDailySummary, FatigueHistory, FatiguePreview, FatigueSurveyComparison,
-  FatigueSurveyToday
+  FatigueSurveyToday, EmailCodeRequest, EmailCodeResponse, ResetPasswordForm,
+  UpdateEmailForm
 } from '../types'
+import {
+  loginAccount,
+  registerAccount,
+  resetAccountPassword,
+  sendEmailVerificationCode,
+  updateAccountEmail,
+} from '../api/auth'
+import {
+  isValidEmail,
+  isValidEmailCode,
+  isValidOptionalNickname,
+  isValidOptionalPhone,
+  isValidPassword,
+  normalizeEmail,
+} from '../utils/auth'
 import { toSchedulePayload, toApiTimePayload, normalizeTimelineItem, buildMonthDays, primaryTime, setDisplayTimezone } from '../utils/helpers'
 import { buildTimelineStats, isTimelineItemOpen } from '../utils/timeline'
 
@@ -86,8 +102,8 @@ export const useAppStore = defineStore('app', () => {
   const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, fatigueAlertEnabled: true, fatigueSurveyEnabled: true, quietStartTime: '', quietEndTime: '', reminderPresetMinutes: [15, 30, 60, 1440] })
   const selectedDate = ref('')
 
-  const loginForm = reactive<LoginForm>({ phone: '13800138000', password: 'Abc12345' })
-  const registerForm = reactive<RegisterForm>({ phone: '', password: '', confirmPassword: '', nickname: '' })
+  const loginForm = reactive<LoginForm>({ account: '13800138000', password: 'Abc12345' })
+  const registerForm = reactive<RegisterForm>({ email: '', code: '', phone: '', password: '', confirmPassword: '', nickname: '' })
   const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
   const groupForm = reactive({ name: '' })
   const teamForm = reactive({ name: '' })
@@ -139,10 +155,33 @@ export const useAppStore = defineStore('app', () => {
     persistTokens(access, refresh)
   }
 
+  function clearAuthSecrets() {
+    clearLoginSecret()
+    clearRegisterSecrets()
+    clearPasswordSecrets()
+  }
+
+  function clearLoginSecret() {
+    loginForm.password = ''
+  }
+
+  function clearRegisterSecrets() {
+    registerForm.code = ''
+    registerForm.password = ''
+    registerForm.confirmPassword = ''
+  }
+
+  function clearPasswordSecrets() {
+    passwordForm.oldPassword = ''
+    passwordForm.newPassword = ''
+    passwordForm.confirmPassword = ''
+  }
+
   function clearSession() {
     sessionRevision += 1
     refreshPromise = null
     loading.value = false
+    clearAuthSecrets()
     token.value = ''
     refreshToken.value = ''
     localStorage.removeItem(TOKEN_KEY)
@@ -227,30 +266,106 @@ export const useAppStore = defineStore('app', () => {
   function closeScheduleModal() { scheduleModalOpen.value = false }
 
   async function login() {
+    const account = loginForm.account.trim()
+    if (!account) { clearLoginSecret(); notify('请输入邮箱或手机号'); return false }
+    if (!loginForm.password) { clearLoginSecret(); notify('请输入密码'); return false }
     loading.value = true
     try {
-      const data = await request<{ accessToken: string; refreshToken: string }>('/auth/login', { method: 'POST', body: JSON.stringify(loginForm) })
+      const data = await loginAccount({ account: isValidEmail(account) ? normalizeEmail(account) : account, password: loginForm.password })
       establishSession(data.accessToken, data.refreshToken)
       await loadAll()
       notify('登录成功')
       return true
-    } catch (e: any) { notify(e.message); return false } finally { loading.value = false }
+    } catch (e: any) { notify(e.message); return false } finally {
+      loginForm.password = ''
+      loading.value = false
+    }
   }
 
   async function register() {
-    if (!/^1\d{10}$/.test(registerForm.phone)) { notify('请输入正确的手机号'); return false }
-    if (registerForm.password.length < 8) { notify('密码至少 8 位'); return false }
-    if (registerForm.password !== registerForm.confirmPassword) { notify('两次密码不一致'); return false }
+    if (!isValidEmail(registerForm.email)) { clearRegisterSecrets(); notify('请输入正确的邮箱'); return false }
+    if (!isValidEmailCode(registerForm.code)) { clearRegisterSecrets(); notify('请输入 6 位邮箱验证码'); return false }
+    if (!isValidOptionalPhone(registerForm.phone)) { clearRegisterSecrets(); notify('请输入正确的手机号'); return false }
+    if (!isValidPassword(registerForm.password)) { clearRegisterSecrets(); notify('密码至少 8 位，且包含字母和数字'); return false }
+    if (registerForm.password !== registerForm.confirmPassword) { clearRegisterSecrets(); notify('两次密码不一致'); return false }
+    if (!isValidOptionalNickname(registerForm.nickname)) { clearRegisterSecrets(); notify('昵称不能超过 50 个字符'); return false }
     loading.value = true
     try {
-      const data = await request<{ accessToken: string; refreshToken: string }>('/auth/register', {
-        method: 'POST', body: JSON.stringify({ phone: registerForm.phone, password: registerForm.password, nickname: registerForm.nickname || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+      const phone = registerForm.phone.trim()
+      const data = await registerAccount({
+        email: normalizeEmail(registerForm.email),
+        code: registerForm.code,
+        password: registerForm.password,
+        phone: phone || undefined,
+        nickname: registerForm.nickname.trim() || undefined,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
       })
       establishSession(data.accessToken, data.refreshToken)
       await loadAll()
       notify('注册成功')
       return true
-    } catch (e: any) { notify(e.message); return false } finally { loading.value = false }
+    } catch (e: any) { notify(e.message); return false } finally {
+      registerForm.code = ''
+      registerForm.password = ''
+      registerForm.confirmPassword = ''
+      loading.value = false
+    }
+  }
+
+  async function sendEmailCode(payload: EmailCodeRequest): Promise<EmailCodeResponse> {
+    if (!isValidEmail(payload.email)) throw new Error('请输入正确的邮箱')
+    if (['bind_email', 'change_email'].includes(payload.purpose) && !payload.currentPassword) {
+      throw new Error('请输入当前密码')
+    }
+    return sendEmailVerificationCode({
+      ...payload,
+      email: normalizeEmail(payload.email),
+    }, token.value)
+  }
+
+  async function resetPassword(form: ResetPasswordForm) {
+    if (!isValidEmail(form.email)) { form.code = ''; form.newPassword = ''; form.confirmPassword = ''; notify('请输入正确的邮箱'); return false }
+    if (!isValidEmailCode(form.code)) { form.code = ''; form.newPassword = ''; form.confirmPassword = ''; notify('请输入 6 位邮箱验证码'); return false }
+    if (!isValidPassword(form.newPassword)) { form.code = ''; form.newPassword = ''; form.confirmPassword = ''; notify('密码至少 8 位，且包含字母和数字'); return false }
+    if (form.newPassword !== form.confirmPassword) { form.code = ''; form.newPassword = ''; form.confirmPassword = ''; notify('两次密码不一致'); return false }
+    loading.value = true
+    try {
+      await resetAccountPassword({
+        email: normalizeEmail(form.email),
+        code: form.code,
+        newPassword: form.newPassword,
+      })
+      notify('密码已重置，请使用新密码登录')
+      return true
+    } catch (e: any) { notify(e.message); return false } finally {
+      form.code = ''
+      form.newPassword = ''
+      form.confirmPassword = ''
+      loading.value = false
+    }
+  }
+
+  async function updateEmail(form: UpdateEmailForm) {
+    const failure = { success: false, reauthenticate: false }
+    if (!form.currentPassword) { notify('请输入当前密码'); return failure }
+    if (!isValidEmail(form.email)) { notify('请输入正确的邮箱'); return failure }
+    if (!isValidEmailCode(form.code)) { notify('请输入 6 位邮箱验证码'); return failure }
+    const hadEmail = !!profile.value?.email
+    try {
+      const result = await updateAccountEmail(request, {
+        email: normalizeEmail(form.email),
+        code: form.code,
+        currentPassword: form.currentPassword,
+      })
+      if (result.reauthenticate) {
+        clearSession()
+        notify('邮箱已修改，请重新登录')
+        return { success: true, reauthenticate: true }
+      }
+      await loadAll()
+      notify(hadEmail ? '邮箱已更新' : '邮箱已绑定')
+      return { success: true, reauthenticate: false }
+    } catch (e: any) { notify(e.message); return failure }
   }
 
   async function logout() {
@@ -835,9 +950,20 @@ export const useAppStore = defineStore('app', () => {
   }
   async function updateProfile() { try { await request('/user/profile', { method: 'PUT', body: JSON.stringify({ nickname: profileForm.nickname, avatarUrl: profileForm.avatarUrl }) }); await loadAll(); notify('资料已更新') } catch (e: any) { notify(e.message) } }
   async function changePassword() {
-    if (passwordForm.newPassword.length < 8) return notify('新密码至少 8 位')
-    if (passwordForm.newPassword !== passwordForm.confirmPassword) return notify('两次密码不一致')
-    try { await request('/user/password', { method: 'PUT', body: JSON.stringify({ oldPassword: passwordForm.oldPassword, newPassword: passwordForm.newPassword }) }); passwordForm.oldPassword = ''; passwordForm.newPassword = ''; passwordForm.confirmPassword = ''; notify('密码已修改') } catch (e: any) { notify(e.message) }
+    if (!passwordForm.oldPassword) { clearPasswordSecrets(); notify('请输入旧密码'); return false }
+    if (!isValidPassword(passwordForm.newPassword)) { clearPasswordSecrets(); notify('新密码至少 8 位，且包含字母和数字'); return false }
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) { clearPasswordSecrets(); notify('两次密码不一致'); return false }
+    try {
+      await request('/user/password', { method: 'PUT', body: JSON.stringify({ oldPassword: passwordForm.oldPassword, newPassword: passwordForm.newPassword }) })
+      clearSession()
+      notify('密码已修改，请重新登录')
+      return true
+    } catch (e: any) {
+      notify(e.message)
+      return false
+    } finally {
+      clearPasswordSecrets()
+    }
   }
   async function updateTimezone() { try { await request('/user/timezone', { method: 'PUT', body: JSON.stringify({ timezone: timezoneForm.timezone }) }); await loadAll(); notify('时区已更新') } catch (e: any) { notify(e.message) } }
 
@@ -873,7 +999,7 @@ export const useAppStore = defineStore('app', () => {
     schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage, scheduleStatusCounts,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
-    request, aiRequest, openScheduleModal, closeScheduleModal, login, register, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
+    request, aiRequest, openScheduleModal, closeScheduleModal, login, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
     createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,

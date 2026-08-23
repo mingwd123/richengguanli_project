@@ -92,7 +92,7 @@ function handleLogout() {
         <span class="user-avatar"><img v-if="store.profile?.avatarUrl" :src="store.profile.avatarUrl" alt="" /><template v-else>{{ store.profile?.nickname?.slice(0, 1) || 'U' }}</template></span>
         <span class="user-copy">
           <strong>{{ store.profile?.nickname || labels.user }}</strong>
-          <small>{{ store.profile?.phone }}</small>
+          <small>{{ store.profile?.phone || store.profile?.email || '未绑定联系方式' }}</small>
         </span>
       </button>
       <button class="icon-button logout-button" :title="labels.logout" :aria-label="labels.logout" @click="handleLogout">
