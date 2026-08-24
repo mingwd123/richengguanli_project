@@ -45,6 +45,7 @@ jobs:
     env:
       DB_PASSWORD: ci-database-password
       JWT_SECRET: ci-jwt-secret-at-least-32-characters-long
+      EMAIL_OTP_SECRET: ci-email-otp-secret-at-least-32-characters-long
       REMINDER_SCAN_TOKEN: ci-reminder-scan-token
     steps:
       - uses: actions/checkout@v4
