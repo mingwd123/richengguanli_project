@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS ai_usage_log;
 DROP TABLE IF EXISTS auth_revoked_access_token;
 DROP TABLE IF EXISTS auth_refresh_token;
 DROP TABLE IF EXISTS auth_email_otp;
+DROP TABLE IF EXISTS registration_setting;
 DROP TABLE IF EXISTS admin_operation_log;
 DROP TABLE IF EXISTS admin_user;
 DROP TABLE IF EXISTS notification;
@@ -40,6 +41,7 @@ CREATE TABLE `user` (
   timezone VARCHAR(50) NOT NULL DEFAULT 'Asia/Shanghai',
   status VARCHAR(20) NOT NULL DEFAULT 'active',
   token_version INT NOT NULL DEFAULT 0,
+  profile_version BIGINT NOT NULL DEFAULT 0,
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -376,6 +378,15 @@ CREATE TABLE admin_user (
   last_login_ip VARCHAR(45),
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE registration_setting (
+  id TINYINT NOT NULL PRIMARY KEY,
+  registration_enabled BOOLEAN NOT NULL,
+  updated_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_registration_setting_singleton CHECK (id = 1)
 );
 
 CREATE TABLE admin_operation_log (

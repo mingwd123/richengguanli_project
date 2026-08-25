@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { loginAccount, registerAccount } from './auth'
+import { fetchRegistrationStatus, loginAccount, registerAccount } from './auth'
 
 function response(data: unknown) {
   return { json: async () => ({ code: 0, message: '', data }) } as Response
@@ -23,6 +23,17 @@ describe('auth api', () => {
       account: 'user@example.com',
       password: 'Abc12345',
     })
+  })
+
+  it('loads the public registration status without credentials', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ registrationEnabled: false }))
+
+    await expect(fetchRegistrationStatus()).resolves.toEqual({ registrationEnabled: false })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/auth/registration-status')
+    expect((options?.headers as Record<string, string>).Authorization).toBeUndefined()
   })
 
   it('omits an optional phone from an email registration request', async () => {

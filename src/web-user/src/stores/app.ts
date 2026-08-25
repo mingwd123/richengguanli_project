@@ -11,6 +11,7 @@ import type {
   UpdateEmailForm
 } from '../types'
 import {
+  fetchRegistrationStatus,
   loginAccount,
   registerAccount,
   resetAccountPassword,
@@ -34,6 +35,7 @@ const AI_RECORD_KEY = 'dayliane_ai_record_enabled'
 const THEME_KEY = 'dayliane_theme'
 const BROWSER_NOTICE_IDS_KEY = 'dayliane_browser_notice_ids'
 const SCHEDULE_VIEW_KEY_PREFIX = 'dayliane_schedule_view_'
+const REGISTRATION_UNAVAILABLE_MESSAGE = '当前暂不开放新用户注册'
 
 type ListState = {
   page: number
@@ -68,6 +70,10 @@ export const useAppStore = defineStore('app', () => {
   const browserNoticePermission = ref(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission)
   const toast = ref('')
   const loading = ref(false)
+  const registrationEnabled = ref(false)
+  const registrationStatusLoading = ref(false)
+  const registrationStatusChecked = ref(false)
+  const registrationStatusError = ref(false)
   const scheduleModalOpen = ref(false)
   const profile = ref<UserProfile | null>(null)
   const schedules = ref<Schedule[]>([])
@@ -137,6 +143,7 @@ export const useAppStore = defineStore('app', () => {
 
   let refreshPromise: Promise<boolean> | null = null
   let sessionRevision = 0
+  let registrationStatusRequestVersion = 0
   let loadAllRequestVersion = 0
   let calendarRequestVersion = 0
   let unreadCountRequestVersion = 0
@@ -282,7 +289,44 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  async function loadRegistrationStatus() {
+    const version = ++registrationStatusRequestVersion
+    registrationEnabled.value = false
+    registrationStatusLoading.value = true
+    try {
+      const data = await fetchRegistrationStatus()
+      if (version !== registrationStatusRequestVersion) return registrationEnabled.value
+      registrationEnabled.value = data?.registrationEnabled === true
+      registrationStatusChecked.value = true
+      registrationStatusError.value = false
+      return registrationEnabled.value
+    } catch {
+      if (version !== registrationStatusRequestVersion) return false
+      registrationEnabled.value = false
+      registrationStatusChecked.value = true
+      registrationStatusError.value = true
+      return false
+    } finally {
+      if (version === registrationStatusRequestVersion) registrationStatusLoading.value = false
+    }
+  }
+
+  function markRegistrationUnavailable() {
+    registrationEnabled.value = false
+    registrationStatusChecked.value = true
+    registrationStatusError.value = false
+  }
+
+  function isRegistrationUnavailable(error: any) {
+    return Number(error?.code) === 503
+  }
+
   async function register() {
+    if (!registrationEnabled.value) {
+      clearRegisterSecrets()
+      notify(REGISTRATION_UNAVAILABLE_MESSAGE)
+      return false
+    }
     if (!isValidEmail(registerForm.email)) { clearRegisterSecrets(); notify('请输入正确的邮箱'); return false }
     if (!isValidEmailCode(registerForm.code)) { clearRegisterSecrets(); notify('请输入 6 位邮箱验证码'); return false }
     if (!isValidOptionalPhone(registerForm.phone)) { clearRegisterSecrets(); notify('请输入正确的手机号'); return false }
@@ -304,7 +348,15 @@ export const useAppStore = defineStore('app', () => {
       await loadAll()
       notify('注册成功')
       return true
-    } catch (e: any) { notify(e.message); return false } finally {
+    } catch (e: any) {
+      if (isRegistrationUnavailable(e)) {
+        markRegistrationUnavailable()
+        notify(REGISTRATION_UNAVAILABLE_MESSAGE)
+      } else {
+        notify(e.message)
+      }
+      return false
+    } finally {
       registerForm.code = ''
       registerForm.password = ''
       registerForm.confirmPassword = ''
@@ -317,10 +369,20 @@ export const useAppStore = defineStore('app', () => {
     if (['bind_email', 'change_email'].includes(payload.purpose) && !payload.currentPassword) {
       throw new Error('请输入当前密码')
     }
-    return sendEmailVerificationCode({
-      ...payload,
-      email: normalizeEmail(payload.email),
-    }, token.value)
+    try {
+      return await sendEmailVerificationCode({
+        ...payload,
+        email: normalizeEmail(payload.email),
+      }, token.value)
+    } catch (error: any) {
+      if (payload.purpose === 'register' && isRegistrationUnavailable(error)) {
+        markRegistrationUnavailable()
+        const unavailable: any = new Error(REGISTRATION_UNAVAILABLE_MESSAGE)
+        unavailable.code = error.code
+        throw unavailable
+      }
+      throw error
+    }
   }
 
   async function resetPassword(form: ResetPasswordForm) {
@@ -995,11 +1057,11 @@ export const useAppStore = defineStore('app', () => {
   applyTheme()
 
   return {
-    token, refreshToken, theme, browserNoticePermission, toast, loading, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, notificationDetail, selectedDate,
+    token, refreshToken, theme, browserNoticePermission, toast, loading, registrationEnabled, registrationStatusLoading, registrationStatusChecked, registrationStatusError, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, notificationDetail, selectedDate,
     schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage, scheduleStatusCounts,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
-    request, aiRequest, openScheduleModal, closeScheduleModal, login, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
+    request, aiRequest, openScheduleModal, closeScheduleModal, login, loadRegistrationStatus, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
     createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,

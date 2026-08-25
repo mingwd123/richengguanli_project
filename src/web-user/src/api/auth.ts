@@ -13,6 +13,10 @@ export interface AuthTokens {
   refreshToken: string
 }
 
+export interface RegistrationStatus {
+  registrationEnabled: boolean
+}
+
 export interface RegisterPayload {
   email: string
   code: string
@@ -27,6 +31,10 @@ export function loginAccount(payload: LoginForm) {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function fetchRegistrationStatus() {
+  return apiRequest<RegistrationStatus>('/auth/registration-status')
 }
 
 export function registerAccount(payload: RegisterPayload) {

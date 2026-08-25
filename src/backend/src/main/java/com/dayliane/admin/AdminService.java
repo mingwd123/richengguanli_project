@@ -1,7 +1,12 @@
 package com.dayliane.admin;
 
+import com.dayliane.auth.email.EmailAddress;
 import com.dayliane.common.BusinessException;
+import com.dayliane.common.RefreshTokenStore;
 import com.dayliane.fatigue.FatigueService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -14,6 +19,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -25,11 +32,16 @@ import java.util.*;
 public class AdminService {
     private final JdbcTemplate jdbc;
     private final FatigueService fatigueService;
+    private final ObjectMapper objectMapper;
+    private final RefreshTokenStore refreshTokenStore;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public AdminService(JdbcTemplate jdbc, FatigueService fatigueService) {
+    public AdminService(JdbcTemplate jdbc, FatigueService fatigueService, ObjectMapper objectMapper,
+                        RefreshTokenStore refreshTokenStore) {
         this.jdbc = jdbc;
         this.fatigueService = fatigueService;
+        this.objectMapper = objectMapper;
+        this.refreshTokenStore = refreshTokenStore;
     }
 
     // ==================== Admin user management ====================
@@ -79,8 +91,8 @@ public class AdminService {
 
         switch (table) {
             case "users" -> {
-                sql.append("select id,phone,nickname,timezone,status,created_at createdAt from `user` where deleted_at is null");
-                if (!blank(keyword)) { sql.append(" and (phone like ? or nickname like ?)"); String kw = "%" + keyword + "%"; params.add(kw); params.add(kw); }
+                sql.append("select id,phone,email,email_verified_at emailVerifiedAt,nickname,timezone,status,profile_version profileVersion,created_at createdAt from `user` where deleted_at is null");
+                if (!blank(keyword)) { sql.append(" and (phone like ? or email like ? or nickname like ?)"); String kw = "%" + keyword + "%"; params.add(kw); params.add(kw); params.add(kw); }
                 if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
             }
             case "teams" -> {
@@ -160,7 +172,7 @@ public class AdminService {
         if (List.of("schedules", "teamTasks", "notifications").contains(table)) allowed.put("title", "title");
         if ("teamTasks".equals(table)) allowed.put("deadlineTime", "deadline_time");
         if ("reminders".equals(table)) allowed.put("remindAt", "remind_at");
-        if ("users".equals(table)) { allowed.put("phone", "phone"); allowed.put("nickname", "nickname"); }
+        if ("users".equals(table)) { allowed.put("phone", "phone"); allowed.put("email", "email"); allowed.put("nickname", "nickname"); }
         if ("teams".equals(table)) allowed.put("name", "name");
         if ("adminUsers".equals(table)) { allowed.put("username", "username"); allowed.put("role", "role"); }
         if (sort == null || sort.isBlank()) return "created_at desc";
@@ -176,15 +188,18 @@ public class AdminService {
     public Map<String, Object> adminUserDetail(long id) {
         try {
             Map<String, Object> user = jdbc.queryForObject(
-                    "select id,phone,nickname,avatar_url avatarUrl,timezone,status,created_at createdAt from `user` where id=? and deleted_at is null",
+                    "select id,phone,email,email_verified_at emailVerifiedAt,nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt from `user` where id=? and deleted_at is null",
                     (rs, i) -> {
                         Map<String, Object> m = new LinkedHashMap<>();
                         m.put("id", rs.getLong("id"));
                         m.put("phone", rs.getString("phone"));
+                        m.put("email", rs.getString("email"));
+                        m.put("emailVerifiedAt", iso(rs.getTimestamp("emailVerifiedAt")));
                         m.put("nickname", rs.getString("nickname"));
                         m.put("avatarUrl", rs.getString("avatarUrl"));
                         m.put("timezone", rs.getString("timezone"));
                         m.put("status", rs.getString("status"));
+                        m.put("profileVersion", rs.getLong("profileVersion"));
                         m.put("createdAt", iso(rs.getTimestamp("createdAt")));
                         return m;
                     }, id);
@@ -315,11 +330,146 @@ public class AdminService {
     // ==================== Admin operations ====================
 
     @Transactional
+    public Map<String, Object> createUser(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
+        requireActiveAdmin(adminId);
+        String email = EmailAddress.normalize(text(req.get("email")));
+        String password = rawText(req.get("password"));
+        String phone = normalizeOptionalPhone(text(req.get("phone")));
+        String nickname = text(req.get("nickname"));
+        String timezone = validateTimezone(text(req.get("timezone")));
+
+        if (!validPassword(password)) throw new BusinessException(400, "password format is invalid");
+        if (nickname.isBlank()) nickname = "User";
+        if (nickname.length() > 50 || containsControlCharacter(nickname)) throw new BusinessException(400, "nickname is invalid");
+        if (count("select count(*) from `user` where email=?", email) > 0) {
+            throw new BusinessException(409, "email already registered");
+        }
+        if (phone != null && count("select count(*) from `user` where phone=?", phone) > 0) {
+            throw new BusinessException(409, "phone already registered");
+        }
+
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        String selectedNickname = nickname;
+        try {
+            jdbc.update(con -> {
+                PreparedStatement ps = con.prepareStatement(
+                        "insert into `user` (phone,email,email_verified_at,password_hash,nickname,avatar_url,timezone,status) "
+                                + "values (?,?,utc_timestamp(),?,?,?,?,'active')",
+                        new String[]{"id"});
+                ps.setString(1, phone);
+                ps.setString(2, email);
+                ps.setString(3, passwordEncoder.encode(password));
+                ps.setString(4, selectedNickname);
+                ps.setString(5, "");
+                ps.setString(6, timezone);
+                return ps;
+            }, keyHolder);
+        } catch (DuplicateKeyException ex) {
+            if (count("select count(*) from `user` where email=?", email) > 0) {
+                throw new BusinessException(409, "email already registered");
+            }
+            throw new BusinessException(409, "phone already registered");
+        }
+
+        long createdId = Objects.requireNonNull(keyHolder.getKey()).longValue();
+        createDefaultTaskGroups(createdId);
+        Map<String, Object> after = userView(createdId);
+        writeAdminOperationLog(adminId, "create_user", "user", createdId, null, after, ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
+    public Map<String, Object> updateUser(long adminId, long userId, Map<String, Object> req,
+                                          String ipAddress, String userAgent) {
+        requireActiveAdmin(adminId);
+        long expectedProfileVersion = requiredProfileVersion(req.get("profileVersion"));
+        Map<String, Object> before = userViewForUpdate(userId);
+        long currentProfileVersion = ((Number) before.get("profileVersion")).longValue();
+        if (currentProfileVersion != expectedProfileVersion) {
+            throw new BusinessException(409, "user information changed");
+        }
+
+        String rawEmail = text(req.get("email"));
+        String email = rawEmail.isBlank() ? null : EmailAddress.normalize(rawEmail);
+        String phone = normalizeOptionalPhone(text(req.get("phone")));
+        String nickname = text(req.get("nickname"));
+        String rawTimezone = text(req.get("timezone"));
+        if (email == null && phone == null) {
+            throw new BusinessException(400, "email or phone is required");
+        }
+        if (nickname.isBlank()) nickname = "User";
+        if (nickname.length() > 50 || containsControlCharacter(nickname)) {
+            throw new BusinessException(400, "nickname is invalid");
+        }
+        String timezone = validateTimezone(rawTimezone);
+
+        String previousEmail = before.get("email") == null ? null : String.valueOf(before.get("email"));
+        String previousPhone = before.get("phone") == null ? null : String.valueOf(before.get("phone"));
+        String previousNickname = String.valueOf(before.get("nickname"));
+        String previousTimezone = String.valueOf(before.get("timezone"));
+        boolean emailChanged = !Objects.equals(previousEmail, email);
+        boolean phoneChanged = !Objects.equals(previousPhone, phone);
+        boolean nicknameChanged = !Objects.equals(previousNickname, nickname);
+        boolean timezoneChanged = !Objects.equals(previousTimezone, timezone);
+        boolean identityChanged = emailChanged || phoneChanged;
+        if (identityChanged) requireSuperAdmin(adminId);
+        if (!identityChanged && !nicknameChanged && !timezoneChanged) return before;
+
+        if (email != null && count("select count(*) from `user` where email=? and id<>?", email, userId) > 0) {
+            throw new BusinessException(409, "email already registered");
+        }
+        if (phone != null && count("select count(*) from `user` where phone=? and id<>?", phone, userId) > 0) {
+            throw new BusinessException(409, "phone already registered");
+        }
+
+        String selectedNickname = nickname;
+        try {
+            StringBuilder updateSql = new StringBuilder(
+                    "update `user` set email=?,phone=?,nickname=?,timezone=?");
+            if (emailChanged) {
+                updateSql.append(email == null
+                        ? ",email_verified_at=null"
+                        : ",email_verified_at=utc_timestamp()");
+            }
+            if (identityChanged) updateSql.append(",token_version=token_version+1");
+            updateSql.append(",profile_version=profile_version+1 where id=? and deleted_at is null and profile_version=?");
+            int updated = jdbc.update(updateSql.toString(), email, phone, selectedNickname, timezone,
+                    userId, expectedProfileVersion);
+            if (updated == 0) throw new BusinessException(409, "user information changed");
+        } catch (DuplicateKeyException ex) {
+            if (email != null && count("select count(*) from `user` where email=? and id<>?", email, userId) > 0) {
+                throw new BusinessException(409, "email already registered");
+            }
+            if (phone != null && count("select count(*) from `user` where phone=? and id<>?", phone, userId) > 0) {
+                throw new BusinessException(409, "phone already registered");
+            }
+            throw new BusinessException(409, "email or phone already registered");
+        }
+
+        if (identityChanged) {
+            refreshTokenStore.invalidateAllForUser(userId);
+            jdbc.update("update auth_email_otp set status='invalidated',invalidated_at=utc_timestamp(),updated_at=utc_timestamp() "
+                    + "where user_id=? and status='issued'", userId);
+        }
+        if (timezoneChanged) {
+            fatigueService.timezoneChanged(userId, previousTimezone, timezone);
+        }
+        Map<String, Object> after = userView(userId);
+        writeAdminOperationLog(adminId, "update_user", "user", userId, before, after, ipAddress, userAgent);
+        return after;
+    }
+
+    @Transactional
     public Map<String, Object> adminSetUserStatus(long adminId, long userId, String status, String ipAddress, String userAgent) {
+        requireActiveAdmin(adminId);
         if (!List.of("active", "disabled").contains(status)) throw new BusinessException(400, "status is invalid");
-        Map<String, Object> before = userView(userId);
-        int updated = jdbc.update("update `user` set status=? where id=? and deleted_at is null", status, userId);
+        Map<String, Object> before = userViewForUpdate(userId);
+        int updated = "disabled".equals(status)
+                ? jdbc.update("update `user` set status=?,token_version=token_version+1 where id=? and deleted_at is null",
+                        status, userId)
+                : jdbc.update("update `user` set status=? where id=? and deleted_at is null", status, userId);
         if (updated == 0) throw new BusinessException(404, "user not found");
+        if ("disabled".equals(status)) refreshTokenStore.invalidateAllForUser(userId);
         Map<String, Object> after = userView(userId);
         writeAdminOperationLog(adminId, "set_user_status", "user", userId, before, after, ipAddress, userAgent);
         return after;
@@ -328,21 +478,26 @@ public class AdminService {
     @Transactional
     public Map<String, Object> createAdminUser(long adminId, Map<String, Object> req, String ipAddress, String userAgent) {
         requireSuperAdmin(adminId);
-        String username = String.valueOf(req.getOrDefault("username", "")).trim();
-        String password = String.valueOf(req.getOrDefault("password", ""));
-        String role = String.valueOf(req.getOrDefault("role", "admin")).trim();
+        String username = text(req.get("username"));
+        String password = rawText(req.get("password"));
+        String role = text(req.getOrDefault("role", "admin"));
         if (username.isBlank()) throw new BusinessException(400, "username is required");
-        if (password.length() < 8 || !password.matches(".*[A-Za-z].*") || !password.matches(".*\\d.*")) throw new BusinessException(400, "password format is invalid");
-        if (!List.of("admin", "super_admin").contains(role)) throw new BusinessException(400, "role is invalid");
+        if (username.length() > 50 || containsControlCharacter(username)) throw new BusinessException(400, "username is invalid");
+        if (!validPassword(password)) throw new BusinessException(400, "password format is invalid");
+        if (!"admin".equals(role)) throw new BusinessException(400, "role is invalid");
         if (count("select count(*) from admin_user where username=?", username) > 0) throw new BusinessException(409, "admin username already exists");
         KeyHolder keyHolder = new GeneratedKeyHolder();
-        jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement("insert into admin_user (username,password_hash,role,status) values (?,?,?, 'active')", new String[]{"id"});
-            ps.setString(1, username);
-            ps.setString(2, passwordEncoder.encode(password));
-            ps.setString(3, role);
-            return ps;
-        }, keyHolder);
+        try {
+            jdbc.update(con -> {
+                PreparedStatement ps = con.prepareStatement("insert into admin_user (username,password_hash,role,status) values (?,?,?, 'active')", new String[]{"id"});
+                ps.setString(1, username);
+                ps.setString(2, passwordEncoder.encode(password));
+                ps.setString(3, role);
+                return ps;
+            }, keyHolder);
+        } catch (DuplicateKeyException ex) {
+            throw new BusinessException(409, "admin username already exists");
+        }
         long createdId = Objects.requireNonNull(keyHolder.getKey()).longValue();
         Map<String, Object> after = adminView(createdId);
         writeAdminOperationLog(adminId, "create_admin_user", "admin_user", createdId, null, after, ipAddress, userAgent);
@@ -596,6 +751,9 @@ public class AdminService {
     private Map<String, Object> normalizeAdminRow(Map<String, Object> raw) {
         Map<String, Object> out = new LinkedHashMap<>();
         raw.forEach((key, value) -> out.put(key, value instanceof Timestamp ts ? iso(ts) : value));
+        if (out.containsKey("profileversion")) {
+            out.put("profileVersion", out.remove("profileversion"));
+        }
         return out;
     }
 
@@ -605,9 +763,24 @@ public class AdminService {
         return user;
     }
 
+    private Map<String, Object> userViewForUpdate(long userId) {
+        Map<String, Object> user = requireUserEntityForUpdate(userId);
+        user.remove("passwordHash");
+        return user;
+    }
+
     private Map<String, Object> requireUserEntity(long userId) {
         try {
-            return jdbc.queryForObject("select id, phone, password_hash passwordHash, nickname, avatar_url avatarUrl, timezone, status, created_at createdAt from `user` where id = ? and deleted_at is null", userMapper(), userId);
+            return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt from `user` where id=? and deleted_at is null", userMapper(), userId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "user not found");
+        }
+    }
+
+    private Map<String, Object> requireUserEntityForUpdate(long userId) {
+        try {
+            return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt from `user` where id=? and deleted_at is null for update",
+                    userMapper(), userId);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "user not found");
         }
@@ -651,11 +824,14 @@ public class AdminService {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("phone", rs.getString("phone"));
+            m.put("email", rs.getString("email"));
+            m.put("emailVerifiedAt", iso(rs.getTimestamp("emailVerifiedAt")));
             m.put("passwordHash", rs.getString("passwordHash"));
             m.put("nickname", rs.getString("nickname"));
             m.put("avatarUrl", rs.getString("avatarUrl"));
             m.put("timezone", rs.getString("timezone"));
             m.put("status", rs.getString("status"));
+            m.put("profileVersion", rs.getLong("profileVersion"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
@@ -756,23 +932,13 @@ public class AdminService {
         };
     }
 
-    private static String toJson(Map<String, Object> data) {
+    private String toJson(Map<String, Object> data) {
         if (data == null) return null;
-        StringBuilder json = new StringBuilder("{");
-        int i = 0;
-        for (Map.Entry<String, Object> entry : data.entrySet()) {
-            if (i++ > 0) json.append(',');
-            json.append('"').append(jsonEscape(entry.getKey())).append("\":");
-            Object value = entry.getValue();
-            if (value == null) json.append("null");
-            else if (value instanceof Number || value instanceof Boolean) json.append(value);
-            else json.append('"').append(jsonEscape(String.valueOf(value))).append('"');
+        try {
+            return objectMapper.writeValueAsString(data);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("failed to serialize admin operation log", ex);
         }
-        return json.append('}').toString();
-    }
-
-    private static String jsonEscape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n");
     }
 
     private static String iso(Timestamp ts) {
@@ -781,6 +947,66 @@ public class AdminService {
 
     private static boolean blank(String s) {
         return s == null || s.isBlank();
+    }
+
+    private Map<String, Object> requireActiveAdmin(long adminId) {
+        Map<String, Object> admin = requireAdminEntity(adminId);
+        if (!"active".equals(admin.get("status"))) throw new BusinessException(403, "admin permission is required");
+        return admin;
+    }
+
+    private void createDefaultTaskGroups(long userId) {
+        String[] names = {"工作", "生活", "团队"};
+        for (int i = 0; i < names.length; i++) {
+            jdbc.update("insert into task_group (user_id,scope,name,sort_order,is_default) values (?,'personal',?,?,?)",
+                    userId, names[i], (i + 1) * 10, i == 0);
+        }
+    }
+
+    private static String normalizeOptionalPhone(String raw) {
+        if (blank(raw)) return null;
+        String phone = raw.trim();
+        if (!phone.matches("1[3-9]\\d{9}")) throw new BusinessException(400, "phone format is invalid");
+        return phone;
+    }
+
+    private static boolean validPassword(String password) {
+        return password != null
+                && password.length() >= 8
+                && password.getBytes(StandardCharsets.UTF_8).length <= 72
+                && password.matches(".*[A-Za-z].*")
+                && password.matches(".*\\d.*");
+    }
+
+    private static String validateTimezone(String timezone) {
+        String selected = blank(timezone) ? "Asia/Shanghai" : timezone.trim();
+        try {
+            ZoneId.of(selected);
+        } catch (DateTimeException ex) {
+            throw new BusinessException(400, "timezone is invalid");
+        }
+        return selected;
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private static String rawText(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static boolean containsControlCharacter(String value) {
+        return value.codePoints().anyMatch(Character::isISOControl);
+    }
+
+    private static long requiredProfileVersion(Object value) {
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) {
+            throw new BusinessException(400, "profileVersion must be a non-negative integer");
+        }
+        long version = ((Number) value).longValue();
+        if (version < 0) throw new BusinessException(400, "profileVersion must be a non-negative integer");
+        return version;
     }
 
     private static long longValue(Object v) {

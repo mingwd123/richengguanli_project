@@ -3,6 +3,8 @@ package com.dayliane.auth;
 import com.dayliane.common.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -11,12 +13,22 @@ import java.util.Map;
 @RequestMapping("/api/v1/auth")
 public class AuthController {
     private final AuthService authService;
+    private final RegistrationSettingsService registrationSettingsService;
     private final boolean trustForwardedHeaders;
 
-    public AuthController(AuthService authService,
+    public AuthController(AuthService authService, RegistrationSettingsService registrationSettingsService,
                           @Value("${app.http.trust-forwarded-headers:false}") boolean trustForwardedHeaders) {
         this.authService = authService;
+        this.registrationSettingsService = registrationSettingsService;
         this.trustForwardedHeaders = trustForwardedHeaders;
+    }
+
+    @GetMapping("/registration-status")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> registrationStatus() {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(ApiResponse.success(Map.of(
+                        "registrationEnabled", registrationSettingsService.isRegistrationEnabled())));
     }
 
     @PostMapping("/register")

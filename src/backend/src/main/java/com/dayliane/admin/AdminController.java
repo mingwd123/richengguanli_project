@@ -3,6 +3,7 @@ package com.dayliane.admin;
 import com.dayliane.auth.AuthService;
 import com.dayliane.common.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -12,10 +13,13 @@ import java.util.Map;
 public class AdminController {
     private final AdminService adminService;
     private final AuthService authService;
+    private final boolean trustForwardedHeaders;
 
-    public AdminController(AdminService adminService, AuthService authService) {
+    public AdminController(AdminService adminService, AuthService authService,
+                           @Value("${app.http.trust-forwarded-headers:false}") boolean trustForwardedHeaders) {
         this.adminService = adminService;
         this.authService = authService;
+        this.trustForwardedHeaders = trustForwardedHeaders;
     }
 
     @PostMapping("/auth/login")
@@ -44,6 +48,19 @@ public class AdminController {
         return ApiResponse.success(adminService.adminList("users", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
+    @PostMapping("/users")
+    public ApiResponse<Map<String, Object>> createUser(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.createUser(adminId, req, clientIp(request), userAgent(request)));
+    }
+
+    @PutMapping("/users/{id}")
+    public ApiResponse<Map<String, Object>> updateUser(HttpServletRequest request, @PathVariable long id,
+                                                       @RequestBody Map<String, Object> req) {
+        long adminId = authService.requireAdmin(request.getHeader("Authorization"));
+        return ApiResponse.success(adminService.updateUser(adminId, id, req, clientIp(request), userAgent(request)));
+    }
+
     @PutMapping("/users/{id}/status")
     public ApiResponse<Map<String, Object>> userStatus(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
         long adminId = authService.requireAdmin(request.getHeader("Authorization"));
@@ -52,10 +69,12 @@ public class AdminController {
 
     @GetMapping("/admin-users")
     public ApiResponse<Map<String, Object>> adminUsers(HttpServletRequest request, @RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int size,
+                                                        @RequestParam(required = false) String keyword, @RequestParam(required = false) String status,
+                                                        @RequestParam(required = false) String dateFrom, @RequestParam(required = false) String dateTo,
                                                         @RequestParam(required = false) String sort) {
         long adminId = authService.requireAdmin(request.getHeader("Authorization"));
         adminService.requireSuperAdmin(adminId);
-        return ApiResponse.success(adminService.adminList("adminUsers", page, size, null, null, null, null, sort));
+        return ApiResponse.success(adminService.adminList("adminUsers", page, size, keyword, status, dateFrom, dateTo, sort));
     }
 
     @PostMapping("/admin-users")
@@ -186,9 +205,21 @@ public class AdminController {
 
     private static String text(Map<String, Object> req, String key) { return String.valueOf(req.getOrDefault(key, "")); }
     private static String userAgent(HttpServletRequest request) { return request.getHeader("User-Agent"); }
-    private static String clientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) return forwarded.split(",")[0].trim();
-        return request.getRemoteAddr();
+    private String clientIp(HttpServletRequest request) {
+        if (trustForwardedHeaders) {
+            String forwarded = request.getHeader("X-Forwarded-For");
+            if (forwarded != null) {
+                for (String candidate : forwarded.split(",")) {
+                    String selected = candidate.trim();
+                    if (selected.isEmpty()) continue;
+                    if (selected.length() <= 45) return selected;
+                    break;
+                }
+            }
+        }
+        String remoteAddress = request.getRemoteAddr();
+        if (remoteAddress == null) return "unknown";
+        String selected = remoteAddress.trim();
+        return selected.isEmpty() || selected.length() > 45 ? "unknown" : selected;
     }
 }

@@ -54,7 +54,7 @@ class BusinessAcceptanceTests {
 
     @BeforeEach
     void cleanDatabase() {
-        for (String table : List.of("fatigue_alert_log", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "ai_usage_log", "ai_api_key", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "auth_email_otp", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "admin_operation_log", "admin_user", "user")) {
+        for (String table : List.of("fatigue_alert_log", "fatigue_survey", "fatigue_daily_summary", "user_fatigue_profile", "ai_usage_log", "ai_api_key", "ai_config", "auth_revoked_access_token", "auth_refresh_token", "auth_email_otp", "notification", "reminder_preset", "notification_preference", "reminder", "team_task_event", "team_task_reminder_plan", "team_task_assignee", "team_task", "schedule", "task_group", "team_member", "team", "registration_setting", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
         jdbc.update("update ai_key_pool_state set revision=0 where id=1");
@@ -118,12 +118,75 @@ class BusinessAcceptanceTests {
         Map<String, Object> created = adminService.createAdminUser(rootId, Map.of(
                 "username", "auditor", "password", "Admin12345", "role", "admin"), "127.0.0.1", "test");
         assertThat(created).containsEntry("role", "admin");
+        assertBusinessCode(400, () -> adminService.createAdminUser(rootId, Map.of(
+                "username", "another-root", "password", "Admin12345", "role", "super_admin"), "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> adminService.createAdminUser(rootId, Map.of(
+                "username", "too-long", "password", "密码密码密码密码密码密码密码密码密码密码密码密码密码密码密码密码密码密码A1", "role", "admin"), "127.0.0.1", "test"));
         String auditorToken = text(authService.adminLogin("auditor", "Admin12345", "127.0.0.1"), "accessToken");
         assertThat(authService.requireAdmin("Bearer " + auditorToken)).isEqualTo(id(created));
         assertBusinessCode(403, () -> adminService.adminSetAdminUserStatus(operatorId, id(created), "disabled", "127.0.0.1", "test"));
         assertThat(adminService.adminSetAdminUserStatus(rootId, id(created), "disabled", "127.0.0.1", "test"))
                 .containsEntry("status", "disabled");
         assertBusinessCode(401, () -> authService.requireAdmin("Bearer " + auditorToken));
+    }
+
+    @Test
+    void regularAndSuperAdminsCanCreateVerifiedUsersWithAuditAndDefaults() {
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values ('root','Admin12345','super_admin','active')");
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values ('operator','Admin12345','admin','active')");
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values ('disabled','Admin12345','admin','disabled')");
+        long rootId = jdbc.queryForObject("select id from admin_user where username='root'", Long.class);
+        long operatorId = jdbc.queryForObject("select id from admin_user where username='operator'", Long.class);
+        long disabledId = jdbc.queryForObject("select id from admin_user where username='disabled'", Long.class);
+
+        Map<String, Object> created = adminService.createUser(operatorId, Map.of(
+                "email", "  Managed.User@Example.COM ",
+                "password", "User12345",
+                "phone", "15100000030",
+                "nickname", "Managed User",
+                "timezone", "Asia/Shanghai"), "127.0.0.1", "test");
+        long createdId = id(created);
+
+        assertThat(created)
+                .containsEntry("email", "managed.user@example.com")
+                .containsEntry("phone", "15100000030")
+                .containsEntry("nickname", "Managed User")
+                .containsEntry("status", "active")
+                .doesNotContainKeys("password", "passwordHash");
+        assertThat(text(created, "emailVerifiedAt")).isNotBlank();
+        String passwordHash = jdbc.queryForObject("select password_hash from `user` where id=?", String.class, createdId);
+        assertThat(passwordHash).startsWith("$2").doesNotContain("User12345");
+        assertThat(count("select count(*) from task_group where user_id=? and scope='personal'", createdId)).isEqualTo(3);
+        assertThat(count("select count(*) from admin_operation_log where admin_id=? and action='create_user' and target_id=?", operatorId, createdId)).isEqualTo(1);
+
+        Map<String, Object> login = authService.login("managed.user@example.com", "User12345", "127.0.0.1");
+        assertThat(authService.requireUser("Bearer " + text(login, "accessToken"))).isEqualTo(createdId);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> listed = (List<Map<String, Object>>) adminService
+                .adminList("users", 1, 20, "managed.user@example.com", null, null, null, null).get("list");
+        assertThat(listed).singleElement().satisfies(item ->
+                assertThat(item).containsEntry("email", "managed.user@example.com"));
+        assertThat(adminService.adminUserDetail(createdId))
+                .containsEntry("email", "managed.user@example.com")
+                .containsEntry("emailVerifiedAt", created.get("emailVerifiedAt"));
+
+        Map<String, Object> rootCreated = adminService.createUser(rootId, Map.of(
+                "email", "root-created@example.com", "password", "User12345"), "127.0.0.1", "test");
+        assertThat(rootCreated).containsEntry("nickname", "User").containsEntry("timezone", "Asia/Shanghai");
+        assertBusinessCode(403, () -> adminService.createUser(disabledId, Map.of(
+                "email", "blocked@example.com", "password", "User12345"), "127.0.0.1", "test"));
+        assertBusinessCode(409, () -> adminService.createUser(operatorId, Map.of(
+                "email", "managed.user@example.com", "password", "User12345"), "127.0.0.1", "test"));
+        assertBusinessCode(409, () -> adminService.createUser(operatorId, Map.of(
+                "email", "different@example.com", "phone", "15100000030", "password", "User12345"), "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> adminService.createUser(operatorId, Map.of(
+                "email", "invalid", "password", "User12345"), "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> adminService.createUser(operatorId, Map.of(
+                "email", "weak@example.com", "password", "12345678"), "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> adminService.createUser(operatorId, Map.of(
+                "email", "nickname@example.com", "password", "User12345", "nickname", "Bad\tNickname"), "127.0.0.1", "test"));
+        assertBusinessCode(400, () -> adminService.createUser(operatorId, Map.of(
+                "email", "timezone@example.com", "password", "User12345", "timezone", "Mars/Olympus"), "127.0.0.1", "test"));
     }
 
     @Test

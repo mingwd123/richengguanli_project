@@ -519,6 +519,31 @@ input:focus, select:focus, textarea:focus {
 .form-card { padding: 18px; }
 .create-panel { padding: 0; border: 0 !important; }
 .create-panel label { color: var(--admin-secondary) !important; }
+.account-create-panel {
+  margin-bottom: 14px;
+  padding: 16px !important;
+  border: 1px solid var(--admin-border-soft) !important;
+}
+.account-create-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.account-create-heading h2 { color: var(--admin-text-strong); font-size: 15px; }
+.account-create-heading p { margin-top: 4px; color: var(--admin-muted); font-size: 11px; }
+.role-badge {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: var(--admin-primary-soft);
+  color: var(--admin-primary-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+.account-create-form { display: grid; align-items: end; gap: 10px; }
+.account-create-form label { position: relative; min-width: 0; display: grid; gap: 6px; padding-bottom: 18px; }
+.account-create-form label > span { color: var(--admin-secondary); font-size: 11px; font-weight: 700; }
+.account-create-form label > small { position: absolute; bottom: 0; left: 0; color: var(--admin-muted); font-size: 10px; }
+.account-create-form input { width: 100%; }
+.user-account-create-form { grid-template-columns: minmax(210px, 1.25fr) minmax(190px, 1fr) minmax(160px, .85fr) minmax(140px, .75fr) minmax(160px, .8fr) auto; }
+.admin-account-create-form { grid-template-columns: minmax(220px, 1fr) minmax(240px, 1fr) auto; }
+.account-create-submit { min-width: 116px; margin-bottom: 18px; white-space: nowrap; }
 .hint, .muted { color: var(--admin-muted); }
 code { background: var(--admin-surface-muted) !important; color: var(--admin-primary); }
 .resource-page pre { background: var(--admin-surface-soft) !important; color: var(--admin-text); border: 1px solid var(--admin-border-soft); }
@@ -740,6 +765,14 @@ code { background: var(--admin-surface-muted) !important; color: var(--admin-pri
   .login-page { padding: 16px; gap: 20px; }
   .admin-login-copy { display: none; }
   .login-panel { padding: 22px 18px; }
+  .account-create-heading { align-items: flex-start; }
+  .account-create-form, .user-account-create-form, .admin-account-create-form { grid-template-columns: 1fr; }
+  .account-create-submit { width: 100%; }
+}
+
+@media (min-width: 681px) and (max-width: 1280px) {
+  .user-account-create-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .user-account-create-form .account-create-submit { width: 100%; }
 }
 .table-sort { min-height: 28px; padding: 0; border: 0; background: transparent; color: inherit; font-weight: inherit; box-shadow: none; }
 .table-sort:hover { color: var(--admin-primary, #0f766e); box-shadow: none; transform: none; }

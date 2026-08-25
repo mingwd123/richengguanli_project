@@ -1,5 +1,7 @@
 package com.dayliane.auth;
 
+import com.dayliane.admin.AdminRegistrationSettingsService;
+import com.dayliane.admin.AdminService;
 import com.dayliane.auth.email.EmailCodePurpose;
 import com.dayliane.auth.email.EmailOtpService;
 import com.dayliane.auth.email.EmailProperties;
@@ -27,6 +29,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,7 +46,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -53,6 +59,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class EmailAuthIntegrationTests {
     @Autowired private AuthService authService;
+    @Autowired private AdminService adminService;
+    @Autowired private AdminRegistrationSettingsService adminRegistrationSettingsService;
+    @Autowired private RegistrationSettingsService registrationSettingsService;
     @Autowired private UserService userService;
     @Autowired private EmailOtpService emailOtpService;
     @Autowired private EmailProperties emailProperties;
@@ -67,7 +76,7 @@ class EmailAuthIntegrationTests {
     void cleanDatabase() {
         emailProperties.setRegistrationEnabled(true);
         for (String table : List.of("auth_revoked_access_token", "auth_refresh_token", "auth_email_otp",
-                "task_group", "user")) {
+                "task_group", "registration_setting", "admin_operation_log", "admin_user", "user")) {
             jdbc.update("delete from " + ("user".equals(table) ? "`user`" : table));
         }
         emailSender.clear();
@@ -227,6 +236,116 @@ class EmailAuthIntegrationTests {
     }
 
     @Test
+    void registrationStatusUsesEnvironmentFallbackAndDisablesClientCaching() throws Exception {
+        assertThat(registrationSettingsService.current())
+                .containsEntry("registrationEnabled", true)
+                .containsEntry("source", "environment")
+                .containsEntry("updatedAt", "");
+
+        mvc.perform(get("/api/v1/auth/registration-status"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.data.registrationEnabled").value(true))
+                .andExpect(jsonPath("$.data.source").doesNotExist());
+
+        emailProperties.setRegistrationEnabled(false);
+        mvc.perform(get("/api/v1/auth/registration-status"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.data.registrationEnabled").value(false));
+    }
+
+    @Test
+    void activeAdminsCanReadButOnlySuperAdminCanPersistRegistrationSettings() throws Exception {
+        String superHash = passwordEncoder.encode("Super12345");
+        String adminHash = passwordEncoder.encode("Admin12345");
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values (?,?, 'super_admin','active')",
+                "root", superHash);
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values (?,?, 'admin','active')",
+                "operator", adminHash);
+        long rootId = jdbc.queryForObject("select id from admin_user where username='root'", Long.class);
+        String rootToken = String.valueOf(authService.adminLogin("root", "Super12345", "127.0.0.1").get("accessToken"));
+        String operatorToken = String.valueOf(authService.adminLogin("operator", "Admin12345", "127.0.0.1").get("accessToken"));
+
+        mvc.perform(get("/api/v1/admin/registration-settings")
+                        .header("Authorization", "Bearer " + operatorToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.registrationEnabled").value(true))
+                .andExpect(jsonPath("$.data.source").value("environment"));
+        mvc.perform(put("/api/v1/admin/registration-settings")
+                        .header("Authorization", "Bearer " + operatorToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"registrationEnabled\":false}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(put("/api/v1/admin/registration-settings")
+                        .header("Authorization", "Bearer " + rootToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"registrationEnabled\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.registrationEnabled").value(false))
+                .andExpect(jsonPath("$.data.source").value("database"));
+
+        assertThat(jdbc.queryForMap("select registration_enabled registrationEnabled,updated_by updatedBy "
+                + "from registration_setting where id=1"))
+                .containsEntry("registrationEnabled", false)
+                .containsEntry("updatedBy", rootId);
+        assertThat(jdbc.queryForMap("select action,target_type targetType,target_id targetId,before_data beforeData,after_data afterData "
+                + "from admin_operation_log"))
+                .containsEntry("action", "set_registration_enabled")
+                .containsEntry("targetType", "registration_settings")
+                .containsEntry("targetId", 1L)
+                .satisfies(log -> {
+                    assertThat(jsonText(log.get("beforeData"))).contains("registrationEnabled").contains("true");
+                    assertThat(jsonText(log.get("afterData"))).contains("registrationEnabled").contains("false");
+                });
+
+        mvc.perform(get("/api/v1/admin/registration-settings")
+                        .header("Authorization", "Bearer " + operatorToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.registrationEnabled").value(false))
+                .andExpect(jsonPath("$.data.source").value("database"));
+        mvc.perform(get("/api/v1/auth/registration-status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.registrationEnabled").value(false));
+    }
+
+    @Test
+    void disablingRegistrationInvalidatesIssuedCodesButDoesNotBlockAdminCreatedUsers() {
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values (?,?, 'super_admin','active')",
+                "root", passwordEncoder.encode("Super12345"));
+        jdbc.update("insert into admin_user (username,password_hash,role,status) values (?,?, 'admin','active')",
+                "operator", passwordEncoder.encode("Admin12345"));
+        long rootId = jdbc.queryForObject("select id from admin_user where username='root'", Long.class);
+        long operatorId = jdbc.queryForObject("select id from admin_user where username='operator'", Long.class);
+
+        authService.sendEmailCode(null, "issued@example.com", "register", null,
+                "203.0.113.61", "registration-settings-test");
+        String issuedCode = emailSender.lastCode();
+
+        adminRegistrationSettingsService.update(rootId, false, "127.0.0.1", "registration-settings-test");
+        assertThat(jdbc.queryForObject("select status from auth_email_otp where email='issued@example.com'", String.class))
+                .isEqualTo("invalidated");
+        assertBusinessCode(503, () -> authService.sendEmailCode(null, "blocked@example.com", "register", null,
+                "203.0.113.62", "registration-settings-test"));
+        assertBusinessCode(503, () -> authService.register("issued@example.com", issuedCode, "Abc12345", null,
+                "Blocked User", "UTC"));
+        assertThat(jdbc.queryForObject("select count(*) from `user`", Integer.class)).isZero();
+
+        Map<String, Object> managed = adminService.createUser(operatorId, Map.of(
+                "email", "managed-while-closed@example.com",
+                "password", "Admin12345",
+                "nickname", "Managed While Closed",
+                "timezone", "UTC"), "127.0.0.1", "registration-settings-test");
+        assertThat(managed)
+                .containsEntry("email", "managed-while-closed@example.com")
+                .containsEntry("status", "active");
+
+        adminRegistrationSettingsService.update(rootId, true, "127.0.0.1", "registration-settings-test");
+        assertBusinessCode(400, () -> authService.register("issued@example.com", issuedCode, "Abc12345", null,
+                "Old Code User", "UTC"));
+    }
+
+    @Test
     void publicRegistrationEndpointReturnsUsableTokens() throws Exception {
         authService.sendEmailCode(null, "endpoint-register@example.com", "register", null,
                 "203.0.113.40", "email-auth-test");
@@ -342,6 +461,8 @@ class EmailAuthIntegrationTests {
                 "203.0.113.14", "email-auth-test");
         assertThat(userService.updateEmail(userId, "bound@example.com", emailSender.lastCode(), "Abc12345"))
                 .isFalse();
+        assertThat(jdbc.queryForObject("select profile_version from `user` where id=?", Long.class, userId))
+                .isEqualTo(1L);
         assertThat(authService.requireUser(authorization)).isEqualTo(userId);
         assertThat(authService.login("bound@example.com", "Abc12345", "203.0.113.15"))
                 .containsEntry("userId", userId);
@@ -350,6 +471,8 @@ class EmailAuthIntegrationTests {
                 "203.0.113.14", "email-auth-test");
         assertThat(userService.updateEmail(userId, "changed@example.com", emailSender.lastCode(), "Abc12345"))
                 .isTrue();
+        assertThat(jdbc.queryForObject("select profile_version from `user` where id=?", Long.class, userId))
+                .isEqualTo(2L);
         assertBusinessCode(401, () -> authService.requireUser(authorization));
         assertBusinessCode(401, () -> authService.refreshToken(refreshToken));
         assertBusinessCode(401, () -> authService.login("bound@example.com", "Abc12345", "203.0.113.16"));
@@ -734,6 +857,12 @@ class EmailAuthIntegrationTests {
 
     private static String wrongCode(String correctCode) {
         return "000000".equals(correctCode) ? "000001" : "000000";
+    }
+
+    private static String jsonText(Object value) {
+        return value instanceof byte[] bytes
+                ? new String(bytes, StandardCharsets.UTF_8)
+                : String.valueOf(value);
     }
 
     private static void assertBusinessCode(int expectedCode, ThrowingRunnable runnable) {

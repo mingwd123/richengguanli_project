@@ -1,6 +1,22 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import { apiRequest } from '../api/http'
+import {
+  accountCreationErrorMessage,
+  accountUpdateErrorMessage,
+  buildAdminCreatePayload,
+  buildUserCreatePayload,
+  buildUserEditPayload,
+  canEditUserLoginIdentifiers,
+  userLoginIdentifiersChanged,
+  validateAdminCreateForm,
+  validateUserCreateForm,
+  validateUserEditForm,
+} from '../utils/accountCreation'
+import {
+  buildRegistrationSettingsPayload,
+  normalizeRegistrationSettings,
+} from '../utils/registrationSettings'
 
 const TOKEN_KEY = 'dayliane_admin_token'
 const ROLE_KEY = 'dayliane_admin_role'
@@ -11,6 +27,7 @@ export const useAdminStore = defineStore('admin', () => {
   const theme = ref(localStorage.getItem(THEME_KEY) || 'light')
   const activeResource = ref('users')
   const loading = ref(false)
+  const createLoading = ref(false)
   const detailLoading = ref(false)
   const toast = ref('')
   const toastType = ref('success')
@@ -19,7 +36,14 @@ export const useAdminStore = defineStore('admin', () => {
   const page = ref({ list: [], total: 0, page: 1, size: 20 })
   const currentDetail = ref(null)
   const loginForm = reactive({ username: 'admin', password: 'Admin12345' })
-  const adminCreateForm = reactive({ username: '', password: '', role: 'admin' })
+  const userCreateForm = reactive({ email: '', password: '', phone: '', nickname: '', timezone: 'Asia/Shanghai' })
+  const userEditForm = reactive({ id: null, email: '', phone: '', nickname: '', timezone: 'Asia/Shanghai' })
+  const userEditOriginal = reactive({ email: '', phone: '', profileVersion: null })
+  const userEditLoading = ref(false)
+  const adminCreateForm = reactive({ username: '', password: '' })
+  const registrationSettings = ref(null)
+  const registrationSettingsLoading = ref(false)
+  const registrationSettingsUpdating = ref(false)
   const aiConfig = ref(null)
   const aiConfigLoading = ref(false)
   const aiKeys = ref([])
@@ -88,6 +112,45 @@ export const useAdminStore = defineStore('admin', () => {
     profile.value = null
     page.value = { list: [], total: 0, page: 1, size: 20 }
     currentDetail.value = null
+    userCreateForm.email = ''
+    userCreateForm.password = ''
+    userCreateForm.phone = ''
+    userCreateForm.nickname = ''
+    userCreateForm.timezone = 'Asia/Shanghai'
+    resetUserEditForm()
+    adminCreateForm.username = ''
+    adminCreateForm.password = ''
+    createLoading.value = false
+    registrationSettings.value = null
+    registrationSettingsLoading.value = false
+    registrationSettingsUpdating.value = false
+  }
+
+  function resetUserEditForm() {
+    userEditForm.id = null
+    userEditForm.email = ''
+    userEditForm.phone = ''
+    userEditForm.nickname = ''
+    userEditForm.timezone = 'Asia/Shanghai'
+    userEditOriginal.email = ''
+    userEditOriginal.phone = ''
+    userEditOriginal.profileVersion = null
+    userEditLoading.value = false
+  }
+
+  function beginUserEdit(user) {
+    userEditForm.id = Number(user?.id) || null
+    userEditForm.email = String(user?.email || '')
+    userEditForm.phone = String(user?.phone || '')
+    userEditForm.nickname = String(user?.nickname || '')
+    userEditForm.timezone = String(user?.timezone || 'Asia/Shanghai')
+    userEditOriginal.email = userEditForm.email
+    userEditOriginal.phone = userEditForm.phone
+    const rawProfileVersion = user?.profileVersion
+    const profileVersion = rawProfileVersion === null || rawProfileVersion === undefined || rawProfileVersion === ''
+      ? Number.NaN
+      : Number(rawProfileVersion)
+    userEditOriginal.profileVersion = Number.isInteger(profileVersion) && profileVersion >= 0 ? profileVersion : null
   }
 
   function applyTheme() {
@@ -259,19 +322,133 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
-  async function createAdminUser() {
-    loading.value = true
+  async function createUser() {
+    const validationError = validateUserCreateForm(userCreateForm)
+    if (validationError) {
+      notify(validationError, 'error')
+      return false
+    }
+    createLoading.value = true
     try {
-      await request('/admin/admin-users', { method: 'POST', body: JSON.stringify(adminCreateForm) })
+      await request('/admin/users', { method: 'POST', body: JSON.stringify(buildUserCreatePayload(userCreateForm)) })
+      userCreateForm.email = ''
+      userCreateForm.password = ''
+      userCreateForm.phone = ''
+      userCreateForm.nickname = ''
+      userCreateForm.timezone = 'Asia/Shanghai'
+      await fetchList({ page: 1 })
+      notify('用户已创建')
+      return true
+    } catch (error) {
+      notify(accountCreationErrorMessage(error), 'error')
+      return false
+    } finally {
+      createLoading.value = false
+    }
+  }
+
+  async function createAdminUser() {
+    if (!isSuperAdmin.value) {
+      notify('只有超级管理员可以创建普通管理员', 'error')
+      return false
+    }
+    const validationError = validateAdminCreateForm(adminCreateForm)
+    if (validationError) {
+      notify(validationError, 'error')
+      return false
+    }
+    createLoading.value = true
+    try {
+      await request('/admin/admin-users', { method: 'POST', body: JSON.stringify(buildAdminCreatePayload(adminCreateForm)) })
       adminCreateForm.username = ''
       adminCreateForm.password = ''
-      adminCreateForm.role = 'admin'
-      await fetchList()
-      notify('管理员已创建')
+      await fetchList({ page: 1 })
+      notify('普通管理员已创建')
+      return true
     } catch (error) {
-      notify(error.message)
+      notify(accountCreationErrorMessage(error), 'error')
+      return false
     } finally {
-      loading.value = false
+      createLoading.value = false
+    }
+  }
+
+  async function updateUser({ confirmLoginIdentifierChange } = {}) {
+    if (userEditLoading.value) return false
+    const mayEditLoginIdentifiers = canEditUserLoginIdentifiers(profile.value?.role)
+    const payload = buildUserEditPayload(userEditForm, {
+      original: userEditOriginal,
+      canEditLoginIdentifiers: mayEditLoginIdentifiers,
+    })
+    const validationError = validateUserEditForm({ ...userEditForm, ...payload })
+    if (validationError) {
+      notify(validationError, 'error')
+      return false
+    }
+
+    const userId = userEditForm.id
+    userEditLoading.value = true
+    try {
+      if (mayEditLoginIdentifiers && userLoginIdentifiersChanged(payload, userEditOriginal)) {
+        if (typeof confirmLoginIdentifierChange !== 'function' || !await confirmLoginIdentifierChange()) return false
+      }
+      await request(`/admin/users/${userId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      })
+      await Promise.all([
+        fetchList({ page: page.value.page, size: page.value.size }),
+        fetchUserDetail(userId),
+      ])
+      notify('用户资料已更新')
+      return true
+    } catch (error) {
+      notify(accountUpdateErrorMessage(error), 'error')
+      return false
+    } finally {
+      userEditLoading.value = false
+    }
+  }
+
+  async function fetchRegistrationSettings() {
+    if (!token.value) return null
+    registrationSettingsLoading.value = true
+    try {
+      const settings = normalizeRegistrationSettings(await request('/admin/registration-settings'))
+      if (!settings) throw new Error('注册设置响应格式不正确')
+      registrationSettings.value = settings
+      return settings
+    } catch (error) {
+      notify(error.message || '获取注册设置失败', 'error')
+      return null
+    } finally {
+      registrationSettingsLoading.value = false
+    }
+  }
+
+  async function updateRegistrationEnabled(enabled) {
+    if (!isSuperAdmin.value) {
+      notify('只有超级管理员可以修改新用户注册设置', 'error')
+      return null
+    }
+    if (registrationSettingsUpdating.value) return null
+
+    registrationSettingsUpdating.value = true
+    try {
+      const data = await request('/admin/registration-settings', {
+        method: 'PUT',
+        body: JSON.stringify(buildRegistrationSettingsPayload(enabled)),
+      })
+      const settings = normalizeRegistrationSettings(data)
+      if (!settings) throw new Error('注册设置响应格式不正确')
+      registrationSettings.value = settings
+      notify(settings.registrationEnabled ? '已允许新用户注册' : '已暂停新用户注册')
+      return settings
+    } catch (error) {
+      notify(error.message || '更新注册设置失败', 'error')
+      return null
+    } finally {
+      registrationSettingsUpdating.value = false
     }
   }
 
@@ -537,8 +714,9 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   return {
-    token, theme, activeResource, loading, detailLoading, toast, toastType, profile, isSuperAdmin, page, currentDetail,
-    loginForm, adminCreateForm, resources, currentResource, stats,
+    token, theme, activeResource, loading, createLoading, detailLoading, toast, toastType, profile, isSuperAdmin, page, currentDetail,
+    loginForm, userCreateForm, userEditForm, userEditOriginal, userEditLoading, adminCreateForm, registrationSettings, registrationSettingsLoading,
+    registrationSettingsUpdating, resources, currentResource, stats,
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
     aiConfig, aiConfigLoading, aiKeys, aiEnvironmentFallback, aiKeyPoolRevision,
     aiKeyActionId, aiKeyTestResults, aiTestLoading, aiTestResult, dashboardStats, sortKey, sortOrder,
@@ -546,7 +724,9 @@ export const useAdminStore = defineStore('admin', () => {
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,
-    createAdminUser, adminSetScheduleStatus, adminTeamTaskAction,
+    createUser, createAdminUser, beginUserEdit, resetUserEditForm, updateUser,
+    fetchRegistrationSettings, updateRegistrationEnabled,
+    adminSetScheduleStatus, adminTeamTaskAction,
     resetFilters, notify, formatValue, toggleTheme,
     fetchAiConfig, updateAiConfig, updateAiEnabled,
     createAiKey, updateAiKey, deleteAiKey, setAiKeyEnabled, updateAiKeyOrder, testAiKey,

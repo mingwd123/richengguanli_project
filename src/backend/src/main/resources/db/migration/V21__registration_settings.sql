@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS registration_setting (
+  id TINYINT NOT NULL,
+  registration_enabled BOOLEAN NOT NULL,
+  updated_by BIGINT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CONSTRAINT chk_registration_setting_singleton CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

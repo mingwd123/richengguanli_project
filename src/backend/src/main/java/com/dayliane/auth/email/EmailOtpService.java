@@ -1,5 +1,6 @@
 package com.dayliane.auth.email;
 
+import com.dayliane.auth.RegistrationSettingsService;
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.CurrentPasswordRateLimiter;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -31,25 +32,26 @@ public class EmailOtpService {
     private final EmailSender emailSender;
     private final VerificationEmailRenderer renderer;
     private final CurrentPasswordRateLimiter currentPasswordRateLimiter;
+    private final RegistrationSettingsService registrationSettingsService;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
     private final SecureRandom secureRandom = new SecureRandom();
 
     public EmailOtpService(JdbcTemplate jdbc, EmailProperties properties, EmailSender emailSender,
                            VerificationEmailRenderer renderer,
-                           CurrentPasswordRateLimiter currentPasswordRateLimiter) {
+                           CurrentPasswordRateLimiter currentPasswordRateLimiter,
+                           RegistrationSettingsService registrationSettingsService) {
         this.jdbc = jdbc;
         this.properties = properties;
         this.emailSender = emailSender;
         this.renderer = renderer;
         this.currentPasswordRateLimiter = currentPasswordRateLimiter;
+        this.registrationSettingsService = registrationSettingsService;
     }
 
     @Transactional
     public int sendCode(EmailCodePurpose purpose, String rawEmail, Long authenticatedUserId,
                         String currentPassword, String requestIp, String userAgent) {
-        if (purpose == EmailCodePurpose.REGISTER && !properties.isRegistrationEnabled()) {
-            throw new BusinessException(503, "registration unavailable");
-        }
+        if (purpose == EmailCodePurpose.REGISTER) registrationSettingsService.requireRegistrationEnabled();
         String email = EmailAddress.normalize(rawEmail);
         validateConfiguration();
         emailSender.ensureReady();

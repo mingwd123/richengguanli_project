@@ -2,7 +2,6 @@ package com.dayliane.auth;
 
 import com.dayliane.auth.email.EmailAddress;
 import com.dayliane.auth.email.EmailCodePurpose;
-import com.dayliane.auth.email.EmailProperties;
 import com.dayliane.auth.email.EmailOtpService;
 import com.dayliane.auth.email.EmailOtpVerificationException;
 import com.dayliane.common.BusinessException;
@@ -45,7 +44,7 @@ public class AuthService {
     private final UserLoginRateLimiter userLoginRateLimiter;
     private final RefreshTokenStore refreshTokenStore;
     private final PermissionService permissionService;
-    private final EmailProperties emailProperties;
+    private final RegistrationSettingsService registrationSettingsService;
     private final EmailOtpService emailOtpService;
     private final Object[] emailSendLocks = createEmailSendLocks();
 
@@ -53,7 +52,8 @@ public class AuthService {
                        JwtService jwtService, LoginRateLimiter rateLimiter,
                        UserLoginRateLimiter userLoginRateLimiter,
                        RefreshTokenStore refreshTokenStore, PermissionService permissionService,
-                       EmailProperties emailProperties, EmailOtpService emailOtpService) {
+                       RegistrationSettingsService registrationSettingsService,
+                       EmailOtpService emailOtpService) {
         this.jdbc = jdbc;
         this.named = named;
         this.jwtService = jwtService;
@@ -61,7 +61,7 @@ public class AuthService {
         this.userLoginRateLimiter = userLoginRateLimiter;
         this.refreshTokenStore = refreshTokenStore;
         this.permissionService = permissionService;
-        this.emailProperties = emailProperties;
+        this.registrationSettingsService = registrationSettingsService;
         this.emailOtpService = emailOtpService;
     }
 
@@ -95,9 +95,7 @@ public class AuthService {
     @Transactional(noRollbackFor = EmailOtpVerificationException.class)
     public long register(String email, String code, String password, String phone,
                          String nickname, String timezone) {
-        if (!emailProperties.isRegistrationEnabled()) {
-            throw new BusinessException(503, "registration unavailable");
-        }
+        registrationSettingsService.requireRegistrationEnabled();
         String normalizedEmail = EmailAddress.normalize(email);
         String normalizedPhone = normalizePhone(phone, false);
         if (!validPassword(password)) throw new BusinessException(400, "password format is invalid");

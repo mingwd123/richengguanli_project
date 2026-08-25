@@ -57,18 +57,23 @@ public class UserService {
     public Map<String, Object> requireUserEntity(long userId) {
         try {
             return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,"
-                    + "nickname,avatar_url avatarUrl,timezone,status,created_at createdAt "
+                    + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt "
                     + "from `user` where id=? and deleted_at is null", userMapper(), userId);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "user not found");
         }
     }
 
+    @Transactional
     public void updateUserProfile(long userId, Map<String, Object> req) {
         if (req.containsKey("nickname")) {
             String nickname = nullableText(req.get("nickname"));
             if (nickname == null || nickname.length() > 50) throw new BusinessException(400, "nickname is invalid");
-            jdbc.update("update `user` set nickname=? where id=? and deleted_at is null", nickname, userId);
+            Map<String, Object> user = requireUserEntityForUpdate(userId);
+            if (!Objects.equals(user.get("nickname"), nickname)) {
+                jdbc.update("update `user` set nickname=?,profile_version=profile_version+1 where id=? and deleted_at is null",
+                        nickname, userId);
+            }
         }
         if (req.containsKey("avatarUrl")) {
             String avatarUrl = Objects.toString(req.get("avatarUrl"), "").trim();
@@ -110,11 +115,11 @@ public class UserService {
         emailOtpService.consume(normalizedEmail, purpose, code, userId);
         try {
             int updated = changing
-                    ? jdbc.update("update `user` set email=?,email_verified_at=utc_timestamp(),token_version=token_version+1 "
-                                    + "where id=? and deleted_at is null",
-                            normalizedEmail, userId)
-                    : jdbc.update("update `user` set email=?,email_verified_at=utc_timestamp() "
-                                    + "where id=? and deleted_at is null",
+                    ? jdbc.update("update `user` set email=?,email_verified_at=utc_timestamp(),token_version=token_version+1,profile_version=profile_version+1 "
+                                     + "where id=? and deleted_at is null",
+                             normalizedEmail, userId)
+                    : jdbc.update("update `user` set email=?,email_verified_at=utc_timestamp(),profile_version=profile_version+1 "
+                                     + "where id=? and deleted_at is null",
                             normalizedEmail, userId);
             if (updated != 1) throw new BusinessException(404, "user not found");
         } catch (DuplicateKeyException ex) {
@@ -124,12 +129,17 @@ public class UserService {
         return changing;
     }
 
+    @Transactional
     public void updateTimezone(long userId, String timezone) {
         String next = blank(timezone) ? "Asia/Shanghai" : timezone;
         try { ZoneId.of(next); } catch (DateTimeException ex) { throw new BusinessException(400, "timezone is invalid"); }
-        String previous = jdbc.queryForObject("select timezone from `user` where id=? and deleted_at is null", String.class, userId);
-        jdbc.update("update `user` set timezone = ? where id = ?", next, userId);
-        if (!Objects.equals(previous, next)) fatigueService.timezoneChanged(userId, previous, next);
+        Map<String, Object> user = requireUserEntityForUpdate(userId);
+        String previous = String.valueOf(user.get("timezone"));
+        if (!Objects.equals(previous, next)) {
+            jdbc.update("update `user` set timezone=?,profile_version=profile_version+1 where id=? and deleted_at is null",
+                    next, userId);
+            fatigueService.timezoneChanged(userId, previous, next);
+        }
         else fatigueService.recalculateDates(userId, java.util.List.of(java.time.LocalDate.now(java.time.ZoneId.of(next))));
     }
 
@@ -147,6 +157,7 @@ public class UserService {
             m.put("avatarUrl", rs.getString("avatarUrl"));
             m.put("timezone", rs.getString("timezone"));
             m.put("status", rs.getString("status"));
+            m.put("profileVersion", rs.getLong("profileVersion"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
@@ -155,7 +166,7 @@ public class UserService {
     private Map<String, Object> requireUserEntityForUpdate(long userId) {
         try {
             return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,"
-                            + "nickname,avatar_url avatarUrl,timezone,status,created_at createdAt "
+                            + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt "
                             + "from `user` where id=? and deleted_at is null for update",
                     userMapper(), userId);
         } catch (EmptyResultDataAccessException ex) {

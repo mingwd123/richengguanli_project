@@ -1323,6 +1323,32 @@ input:focus, select:focus, textarea:focus {
 .register-line button { border: 0; background: transparent; color: #70817f; }
 .register-line button.active { background: #fff; color: #08766f; box-shadow: 0 3px 10px rgba(35, 65, 61, .08); }
 .register-line button:hover:not(:disabled) { transform: none; }
+.registration-notice {
+  min-height: 34px;
+  margin-top: 10px;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.registration-notice > span { min-width: 0; flex: 1; }
+.registration-notice button {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+}
 .login-form { gap: 13px; margin-top: 20px; }
 .login-form label { gap: 7px; color: #4c605e; font-size: 11px; }
 .login-form input { height: 43px; border-color: #d7e2e0; color: #1b2e2b; background: rgba(255, 255, 255, .82); }

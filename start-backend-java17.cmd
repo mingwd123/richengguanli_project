@@ -1,6 +1,13 @@
 @echo off
 setlocal
 
+rem Load the ignored root .env for local development, if present.
+if exist "%~dp0.env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%~dp0.env") do (
+        if not "%%A"=="" set "%%A=%%B"
+    )
+)
+
 set "JAVA_HOME=D:\JDK(java)"
 if not exist "%JAVA_HOME%\bin\java.exe" (
     echo [ERROR] JDK 17 was not found at "%JAVA_HOME%".

@@ -1,10 +1,10 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
 import { useAdminStore } from '../stores/admin'
 import DataTable from '../components/DataTable.vue'
 
 const store = useAdminStore()
-const showDetail = ref(false)
 
 const columns = [
   { key: 'id', label: 'ID' },
@@ -45,14 +45,8 @@ function onSizeChange(size) {
   store.fetchList({ page: 1, size })
 }
 
-async function viewDetail(row) {
-  store.currentDetail = row
-  showDetail.value = true
-}
-
-function closeDetail() {
-  showDetail.value = false
-  store.currentDetail = null
+function roleLabel(role) {
+  return role === 'super_admin' ? '超级管理员' : role === 'admin' ? '普通管理员' : role
 }
 </script>
 
@@ -72,16 +66,27 @@ function closeDetail() {
       <article><span>待处理</span><strong>{{ store.stats.pending }}</strong></article>
     </section>
 
-    <section class="create-panel">
-      <h2>创建管理员</h2>
-      <form class="create-form" @submit.prevent="store.createAdminUser">
-        <input v-model="store.adminCreateForm.username" placeholder="管理员账号" autocomplete="off" />
-        <input v-model="store.adminCreateForm.password" placeholder="密码" type="password" autocomplete="new-password" />
-        <select v-model="store.adminCreateForm.role" aria-label="管理员角色">
-          <option value="admin">普通管理员</option>
-          <option value="super_admin">超级管理员</option>
-        </select>
-        <button class="primary" :disabled="store.loading">创建</button>
+    <section class="create-panel account-create-panel">
+      <div class="account-create-heading">
+        <div>
+          <h2>创建普通管理员</h2>
+          <p>新账号创建后可登录后台并创建用户。</p>
+        </div>
+        <span class="role-badge">普通管理员</span>
+      </div>
+      <form class="account-create-form admin-account-create-form" novalidate @submit.prevent="store.createAdminUser">
+        <label>
+          <span>管理员账号</span>
+          <input v-model="store.adminCreateForm.username" maxlength="50" placeholder="请输入管理员账号" autocomplete="off" :disabled="store.createLoading" required />
+        </label>
+        <label>
+          <span>初始密码</span>
+          <input v-model="store.adminCreateForm.password" placeholder="至少 8 位，含字母和数字" type="password" minlength="8" maxlength="72" autocomplete="new-password" :disabled="store.createLoading" required />
+          <small>至少 8 位，且包含字母和数字</small>
+        </label>
+        <button class="primary account-create-submit" :disabled="store.createLoading">
+          <el-icon><Plus /></el-icon><span>{{ store.createLoading ? '创建中...' : '创建普通管理员' }}</span>
+        </button>
       </form>
     </section>
 
@@ -101,8 +106,12 @@ function closeDetail() {
       <template #cell-status="{ row }">
         <span :class="'status-badge status-' + row.status">{{ store.formatValue(row.status) }}</span>
       </template>
+      <template #cell-role="{ row }">
+        {{ roleLabel(row.role) }}
+      </template>
       <template #actions="{ row }">
-        <button v-if="row.status !== 'active'" @click="store.setAdminUserStatus(row, 'active')">启用</button>
+        <button v-if="row.id === store.profile?.id" disabled title="不能禁用当前登录账号">当前账号</button>
+        <button v-else-if="row.status !== 'active'" @click="store.setAdminUserStatus(row, 'active')">启用</button>
         <button v-else @click="store.setAdminUserStatus(row, 'disabled')">禁用</button>
       </template>
     </DataTable>

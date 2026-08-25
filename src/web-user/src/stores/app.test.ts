@@ -180,6 +180,95 @@ describe('app store request coordination', () => {
     })
   })
 
+  it('keeps registration disabled until the public status endpoint enables it', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ registrationEnabled: true }))
+    const store = useAppStore()
+
+    expect(store.registrationEnabled).toBe(false)
+    await expect(store.loadRegistrationStatus()).resolves.toBe(true)
+
+    expect(store.registrationEnabled).toBe(true)
+    expect(store.registrationStatusChecked).toBe(true)
+    expect(store.registrationStatusError).toBe(false)
+    expect(store.registrationStatusLoading).toBe(false)
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/auth/registration-status')
+  })
+
+  it('closes a previously enabled registration entry while the latest status is loading', async () => {
+    const pending = deferred<Response>()
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockReturnValue(pending.promise)
+    const store = useAppStore()
+    store.registrationEnabled = true
+
+    const loading = store.loadRegistrationStatus()
+
+    expect(store.registrationEnabled).toBe(false)
+    expect(store.registrationStatusLoading).toBe(true)
+
+    pending.resolve(response({ registrationEnabled: true }))
+    await expect(loading).resolves.toBe(true)
+    expect(store.registrationEnabled).toBe(true)
+  })
+
+  it('fails closed when registration status cannot be loaded without affecting password recovery', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock
+      .mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce(response({ countdown: 60 }))
+    const store = useAppStore()
+
+    await expect(store.loadRegistrationStatus()).resolves.toBe(false)
+
+    expect(store.registrationEnabled).toBe(false)
+    expect(store.registrationStatusChecked).toBe(true)
+    expect(store.registrationStatusError).toBe(true)
+    await expect(store.sendEmailCode({
+      email: 'reset@example.com',
+      purpose: 'reset_password',
+    })).resolves.toEqual({ countdown: 60 })
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/auth/email-code')
+  })
+
+  it('turns a registration-code 503 into a clear message and closes registration locally', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response(null, 503, 'registration unavailable'))
+    const store = useAppStore()
+    store.registrationEnabled = true
+
+    await expect(store.sendEmailCode({
+      email: 'new@example.com',
+      purpose: 'register',
+    })).rejects.toMatchObject({
+      code: 503,
+      message: '当前暂不开放新用户注册',
+    })
+
+    expect(store.registrationEnabled).toBe(false)
+    expect(store.registrationStatusChecked).toBe(true)
+    expect(store.registrationStatusError).toBe(false)
+  })
+
+  it('turns a final registration 503 into a clear toast and closes registration locally', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response(null, 503, 'registration unavailable'))
+    const store = useAppStore()
+    store.registrationEnabled = true
+    store.registerForm.email = 'new@example.com'
+    store.registerForm.code = '123456'
+    store.registerForm.password = 'Abc12345'
+    store.registerForm.confirmPassword = 'Abc12345'
+
+    await expect(store.register()).resolves.toBe(false)
+
+    expect(store.registrationEnabled).toBe(false)
+    expect(store.toast).toBe('当前暂不开放新用户注册')
+    expect(store.registerForm.code).toBe('')
+    expect(store.registerForm.password).toBe('')
+    expect(store.registerForm.confirmPassword).toBe('')
+  })
+
   it('resets a password without persisting password fields', async () => {
     const localSetItem = vi.fn()
     const sessionSetItem = vi.fn()
@@ -265,6 +354,7 @@ describe('app store request coordination', () => {
     expect(await store.login()).toBe(false)
     expect(store.loginForm.password).toBe('')
 
+    store.registrationEnabled = true
     store.registerForm.email = 'new@example.com'
     store.registerForm.code = '123456'
     store.registerForm.password = 'Abc12345'
