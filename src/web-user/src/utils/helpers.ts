@@ -111,6 +111,8 @@ export function toSchedulePayload(input: ScheduleForm, timezone = displayTimezon
     out.endTime = toIso(input.endTime, timezone)
   }
   if (input.remindAt) out.remindAt = toIso(input.remindAt, timezone)
+  out.rrule = input.rrule || ''
+  out.excludedDates = Array.isArray(input.excludedDates) ? input.excludedDates : []
   return out
 }
 
@@ -208,6 +210,24 @@ export function groupByTaskState<T extends Record<string, any>>(items: T[], grou
 
 export function timeTypeLabel(t: string) {
   return t === 'point_event' ? '安排事项' : t === 'duration_task' ? '时间段任务' : '待办任务'
+}
+
+export function describeRrule(rrule?: string | null) {
+  if (!rrule) return ''
+  const parts = String(rrule).toUpperCase().split(';').map(p => p.trim())
+  const freq = parts.find(p => p.startsWith('FREQ='))?.slice(5)
+  const interval = parts.find(p => p.startsWith('INTERVAL='))?.slice(9)
+  const byday = parts.find(p => p.startsWith('BYDAY='))?.slice(6)
+  const dayNames: Record<string, string> = { MO: '一', TU: '二', WE: '三', TH: '四', FR: '五', SA: '六', SU: '日' }
+  const freqLabel = freq === 'DAILY' ? '每天' : freq === 'WEEKLY' ? '每周' : freq === 'MONTHLY' ? '每月' : '重复'
+  let label = freqLabel
+  if (freq === 'DAILY') label = interval && Number(interval) > 1 ? `每 ${interval} 天` : '每天'
+  if (freq === 'WEEKLY') {
+    label = interval && Number(interval) > 1 ? `每 ${interval} 周` : '每周'
+    if (byday) label += '（' + byday.split(',').map(d => '周' + (dayNames[d.trim()] || d.trim())).join('、') + '）'
+  }
+  if (freq === 'MONTHLY') label = interval && Number(interval) > 1 ? `每 ${interval} 个月` : '每月'
+  return label
 }
 
 export function statusLabel(s: string) {

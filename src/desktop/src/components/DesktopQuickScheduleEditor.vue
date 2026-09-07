@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { BatteryMedium, CalendarClock, Flag, Save, Sparkles, Timer, TriangleAlert } from 'lucide-vue-next'
 import type { ScheduleForm, TaskGroup, TimeType } from '@web/types'
+import RepeatRuleEditor from '@web/components/RepeatRuleEditor.vue'
 import DesktopQuickReminderPicker from './DesktopQuickReminderPicker.vue'
 
 const props = defineProps<{
@@ -104,6 +105,8 @@ const reminderBaseLabel = computed(() => form.value.timeType === 'deadline_task'
     </div>
 
     <DesktopQuickReminderPicker v-model="form.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="props.reminderPresets" :timezone="props.timezone" :disabled="busy" @error="emit('error', $event)" />
+
+    <RepeatRuleEditor v-model:rrule="form.rrule" v-model:excluded-dates="form.excludedDates" />
 
     <label class="quick-editor-field">
       <span>说明 <small>可选</small></span>

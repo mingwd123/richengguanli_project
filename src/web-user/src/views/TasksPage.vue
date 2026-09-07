@@ -6,6 +6,7 @@ import ContextMenu from '../components/ContextMenu.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
 import TaskTimeline from '../components/TaskTimeline.vue'
+import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import { MoreHorizontal, Plus, Sparkles } from 'lucide-vue-next'
 import { canDeleteTeamTask, getDisplayTimezone, statusLabel, isOverdue, normalizeTimelineItem, toDatetimeLocalInTimezone, zonedDateTimeToIso } from '../utils/helpers'
 import type { MyTask, TeamMember } from '../types'
@@ -220,7 +221,32 @@ function moveTeamGroup(group: any, direction: -1 | 1) {
   store.sortTeamTaskGroups(group.teamId, ids)
 }
 
-function handleAction(task: MyTask, action: string) { store.taskAction(task, action) }
+const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
+const completingTask = ref<MyTask | null>(null)
+const completingFatigueLevel = ref(3)
+const completingSubmitting = ref(false)
+const fatigueTrackingOn = computed(() => Boolean(store.fatigueProfile?.fatigueTrackingEnabled && store.fatigueProfile?.featureEnabled))
+
+function handleAction(task: MyTask, action: string) {
+  if (action === 'complete') {
+    if (fatigueTrackingOn.value) {
+      completingTask.value = task
+      completingFatigueLevel.value = 3
+      return
+    }
+    store.completeTeamTask(task)
+    return
+  }
+  store.taskAction(task, action)
+}
+
+async function submitComplete() {
+  if (!completingTask.value) return
+  completingSubmitting.value = true
+  const ok = await store.completeTeamTask(completingTask.value, completingFatigueLevel.value)
+  completingSubmitting.value = false
+  if (ok) completingTask.value = null
+}
 function moveTask(task: MyTask, event: Event) {
   const groupId = (event.target as HTMLSelectElement).value
   if (groupId && Number(groupId) !== task.groupId) store.moveTeamTaskGroup(task, groupId)
@@ -452,6 +478,7 @@ const contextItems = computed(() => {
             </div>
             <CountdownPill v-if="canOperateAssignment(task) && !['completed', 'rejected'].includes(task.assignStatus || '')" :time="task.deadlineTime || task.startTime" :created-at="task.createdAt" :start-time="task.startTime" :deadline-time="task.deadlineTime" :remind-at="task.remindAt" />
             <span :class="['tag', taskStatusClass(task)]">{{ statusLabel(taskDisplayStatus(task)) }}</span>
+            <small v-if="task.completedFatigueLevel" class="muted" style="grid-column:1 / -1">完成疲劳：{{ task.completedFatigueLevel }} · {{ fatigueNames[task.completedFatigueLevel - 1] }}{{ task.completedFatigueWeight ? ` · ${task.completedFatigueWeight} 点` : '' }}</small>
             <div class="top-actions" @click.stop>
               <button class="icon-button row-menu-button mobile-only" title="更多操作" aria-label="更多操作" @click="openTaskButtonMenu($event, group, task)"><MoreHorizontal :size="18" /></button>
               <select v-if="canManageTask(task) && !isDoneTask(task)" :value="task.groupId || ''" aria-label="移动团队任务至分组" @click.stop @change="moveTask(task, $event)"><option value="" disabled>移动至</option><option v-for="target in taskGroupsFor(task.teamId)" :key="target.id" :value="target.id">{{ target.name }}</option></select>
@@ -489,6 +516,18 @@ const contextItems = computed(() => {
         <div class="form-actions" style="margin-top:14px">
           <button @click="cancelAiBreakdown">取消</button>
           <button class="primary" @click="confirmAiBreakdown">创建所选 ({{ aiBreakdownTasks.filter(t => t.selected).length }})</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="completingTask" class="modal-backdrop" @click.self="completingTask = null">
+      <section class="modal-panel" style="max-width: 480px;">
+        <div class="modal-head"><h2>完成团队任务</h2><button class="modal-close" aria-label="关闭" @click="completingTask = null">✕</button></div>
+        <p class="muted" style="margin-bottom: 12px;">「{{ completingTask.title }}」完成后，请选择这项任务给你带来的实际疲劳程度。</p>
+        <ScheduleLevelControl v-model="completingFatigueLevel" label="完成疲劳度" :labels="fatigueNames" :weights="store.fatigueProfile?.weights" />
+        <div class="form-actions" style="margin-top:18px">
+          <button @click="completingTask = null">取消</button>
+          <button class="primary" :disabled="completingSubmitting" @click="submitComplete">{{ completingSubmitting ? '完成中...' : '确认完成' }}</button>
         </div>
       </section>
     </div>

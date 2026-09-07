@@ -2,6 +2,7 @@ package com.dayliane.ai;
 
 import com.dayliane.admin.AdminService;
 import com.dayliane.common.BusinessException;
+import com.dayliane.fatigue.FatigueService;
 import com.dayliane.user.UserService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -19,6 +20,8 @@ import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.IDN;
 import java.net.InetAddress;
 import java.net.URI;
@@ -26,8 +29,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.sql.PreparedStatement;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -35,6 +40,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -60,6 +67,7 @@ public class AiService {
     private final JdbcTemplate jdbc;
     private final AdminService adminService;
     private final UserService userService;
+    private final FatigueService fatigueService;
     private final ObjectMapper objectMapper;
     private final AiHttpTransport aiHttpTransport;
     private final boolean defaultEnabled;
@@ -73,8 +81,8 @@ public class AiService {
     private final Duration totalTimeout;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, ObjectMapper objectMapper,
-                     AiHttpTransport aiHttpTransport,
+    public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, FatigueService fatigueService,
+                     ObjectMapper objectMapper, AiHttpTransport aiHttpTransport,
                      @Value("${app.ai.enabled:false}") boolean defaultEnabled,
                      @Value("${app.ai.provider:}") String defaultProvider,
                       @Value("${app.ai.model:}") String defaultModel,
@@ -88,6 +96,7 @@ public class AiService {
         this.jdbc = jdbc;
         this.adminService = adminService;
         this.userService = userService;
+        this.fatigueService = fatigueService;
         this.objectMapper = objectMapper;
         this.aiHttpTransport = aiHttpTransport;
         this.defaultEnabled = defaultEnabled;
@@ -122,6 +131,205 @@ public class AiService {
     public Map<String, Object> optimizeTaskDescription(long userId, String text, boolean recordUsage) {
         requireText(text);
         return suggest(userId, "task_description_optimize", text, "Return JSON only: {\"description\":\"\"}. Improve this task description while preserving its intent:", recordUsage);
+    }
+
+    public Map<String, Object> arrangeSchedules(long userId, boolean recordUsage) {
+        return arrangeSchedules(userId, recordUsage, null);
+    }
+
+    public Map<String, Object> arrangeSchedules(long userId, boolean recordUsage, LocalDate anchor) {
+        if (!recordUsage) {
+            Map<String, Object> disabled = new LinkedHashMap<>();
+            disabled.put("disabled", true);
+            disabled.put("reason", "AI 数据记录已关闭，排程建议已停用");
+            return disabled;
+        }
+        ZoneId zone = userZone(userId);
+        LocalDate today = anchor == null ? LocalDate.now(zone) : anchor;
+        LocalDate horizonEnd = today.plusDays(13);
+        Map<String, Object> profile = fatigueService.profile(userId);
+        BigDecimal capacity = decimal(profile.get("capacity75"), BigDecimal.valueOf(18));
+        Map<Integer, BigDecimal> weights = weightIndex(profile);
+
+        List<Map<String, Object>> rows = jdbc.query(
+                "select id,title,time_type timeType,start_time startTime,deadline_time deadlineTime,fatigue_level fatigueLevel from schedule where user_id=? and deleted_at is null and status='pending'",
+                (rs, i) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("title", nullToEmpty(rs.getString("title")));
+                    row.put("plannedDate", plannedDate(rs.getString("timeType"), rs.getTimestamp("startTime"), rs.getTimestamp("deadlineTime"), zone));
+                    row.put("fatigueLevel", rs.getInt("fatigueLevel"));
+                    return row;
+                }, userId);
+
+        Map<LocalDate, BigDecimal> loadByDate = new HashMap<>();
+        List<Map<String, Object>> pending = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            LocalDate date = (LocalDate) row.get("plannedDate");
+            if (date == null || date.isBefore(today) || date.isAfter(horizonEnd)) continue;
+            int level = (int) number(row.get("fatigueLevel"), 3L);
+            BigDecimal weight = weights.getOrDefault(level, BigDecimal.valueOf(defaultWeight(level)));
+            row.put("weight", weight);
+            pending.add(row);
+            loadByDate.merge(date, weight, BigDecimal::add);
+        }
+        pending.sort(Comparator
+                .comparing((Map<String, Object> row) -> (LocalDate) row.get("plannedDate"))
+                .thenComparing(row -> ((BigDecimal) row.get("weight")).negate())
+                .thenComparing(row -> ((Number) row.get("id")).longValue()));
+
+        List<LocalDate> highDays = new ArrayList<>();
+        List<LocalDate> lowDays = new ArrayList<>();
+        for (LocalDate day = today; !day.isAfter(horizonEnd); day = day.plusDays(1)) {
+            int score = predictedScore(loadByDate.getOrDefault(day, BigDecimal.ZERO), capacity);
+            if (score >= 75) highDays.add(day);
+            else if (score < 40) lowDays.add(day);
+        }
+        Set<LocalDate> highDaySet = new HashSet<>(highDays);
+
+        Map<LocalDate, BigDecimal> simulated = new HashMap<>(loadByDate);
+        List<Map<String, Object>> suggestions = new ArrayList<>();
+
+        for (Map<String, Object> row : pending) {
+            LocalDate date = (LocalDate) row.get("plannedDate");
+            if (!highDaySet.contains(date)) continue;
+            BigDecimal weight = (BigDecimal) row.get("weight");
+            LocalDate target = null;
+            for (LocalDate day = today; !day.isAfter(horizonEnd); day = day.plusDays(1)) {
+                if (!lowDays.contains(day)) continue;
+                BigDecimal after = simulated.getOrDefault(day, BigDecimal.ZERO).add(weight);
+                if (after.compareTo(capacity) < 0) {
+                    target = day;
+                    simulated.put(day, after);
+                    break;
+                }
+            }
+            if (target != null) {
+                suggestions.add(orderedMap(
+                        "type", "reschedule",
+                        "scheduleId", row.get("id"),
+                        "title", row.get("title"),
+                        "fromDate", date.toString(),
+                        "targetDate", target.toString(),
+                        "reason", "该日计划负荷已超过精力上限，建议调整到负荷更低的一天"));
+            }
+        }
+
+        Map<LocalDate, List<Map<String, Object>>> grouped = new HashMap<>();
+        for (Map<String, Object> row : pending) {
+            grouped.computeIfAbsent((LocalDate) row.get("plannedDate"), k -> new ArrayList<>()).add(row);
+        }
+        int reorderCount = 0;
+        for (Map.Entry<LocalDate, List<Map<String, Object>>> entry : grouped.entrySet()) {
+            if (entry.getValue().size() < 2 || reorderCount >= 3) continue;
+            List<Map<String, Object>> ordered = new ArrayList<>(entry.getValue());
+            ordered.sort(Comparator.comparing((Map<String, Object> row) -> (int) row.get("fatigueLevel"))
+                    .thenComparing(row -> ((Number) row.get("id")).longValue()));
+            suggestions.add(orderedMap(
+                    "type", "reorder",
+                    "date", entry.getKey().toString(),
+                    "scheduleIds", ordered.stream().map(row -> ((Number) row.get("id")).longValue()).toList(),
+                    "titles", ordered.stream().map(row -> String.valueOf(row.get("title"))).toList(),
+                    "reason", "建议按疲劳等级从低到高依次执行，把较高难度任务留到后面"));
+            reorderCount++;
+        }
+
+        int splitCount = 0;
+        for (Map<String, Object> row : pending) {
+            if (splitCount >= 3) break;
+            if ((int) row.get("fatigueLevel") >= 4) {
+                suggestions.add(orderedMap(
+                        "type", "split",
+                        "scheduleId", row.get("id"),
+                        "title", row.get("title"),
+                        "fatigueLevel", row.get("fatigueLevel"),
+                        "reason", "疲劳等级较高，建议拆分为多个子任务分天完成"));
+                splitCount++;
+            }
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("disabled", false);
+        out.put("today", today.toString());
+        out.put("horizonEnd", horizonEnd.toString());
+        out.put("capacity75", scaleDecimal(capacity));
+        out.put("highLoadDays", highDays.stream().map(LocalDate::toString).toList());
+        out.put("suggestions", suggestions);
+        return out;
+    }
+
+    private static int predictedScore(BigDecimal load, BigDecimal capacity) {
+        if (capacity == null || capacity.signum() <= 0) return 100;
+        return load.multiply(BigDecimal.valueOf(75)).divide(capacity, 0, RoundingMode.HALF_UP)
+                .max(BigDecimal.ZERO).min(BigDecimal.valueOf(100)).intValue();
+    }
+
+    private static int defaultWeight(int level) {
+        return switch (level) {
+            case 1 -> 1;
+            case 2 -> 2;
+            case 3 -> 3;
+            case 4 -> 5;
+            case 5 -> 8;
+            default -> 3;
+        };
+    }
+
+    private static Map<Integer, BigDecimal> weightIndex(Map<String, Object> profile) {
+        Map<Integer, BigDecimal> result = new LinkedHashMap<>();
+        Object weights = profile.get("weights");
+        if (weights instanceof Map<?, ?> map) {
+            for (int level = 1; level <= 5; level++) {
+                result.put(level, decimal(map.get(String.valueOf(level)), BigDecimal.valueOf(defaultWeight(level))));
+            }
+        } else {
+            for (int level = 1; level <= 5; level++) {
+                result.put(level, BigDecimal.valueOf(defaultWeight(level)));
+            }
+        }
+        return result;
+    }
+
+    private static BigDecimal decimal(Object value, BigDecimal fallback) {
+        if (value == null) return fallback;
+        if (value instanceof BigDecimal bigDecimal) return bigDecimal;
+        if (value instanceof Number number) return new BigDecimal(number.toString());
+        try {
+            return new BigDecimal(String.valueOf(value).trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static long number(Object value, long fallback) {
+        if (value instanceof Number number) return number.longValue();
+        if (value == null) return fallback;
+        try {
+            return Long.parseLong(String.valueOf(value).trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static String scaleDecimal(BigDecimal value) {
+        return value == null ? null : value.stripTrailingZeros().toPlainString();
+    }
+
+    private static LocalDate plannedDate(String timeType, Timestamp startTime, Timestamp deadlineTime, ZoneId zone) {
+        Timestamp instant = switch (timeType == null ? "" : timeType) {
+            case "deadline_task" -> deadlineTime;
+            case "duration_task", "point_event" -> startTime;
+            default -> null;
+        };
+        return instant == null ? null : instant.toInstant().atZone(zone).toLocalDate();
+    }
+
+    private static Map<String, Object> orderedMap(Object... entries) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < entries.length; i += 2) {
+            result.put(String.valueOf(entries[i]), entries[i + 1]);
+        }
+        return result;
     }
 
     public Map<String, Object> configView() {

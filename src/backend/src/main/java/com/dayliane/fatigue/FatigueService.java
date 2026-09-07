@@ -2,8 +2,10 @@ package com.dayliane.fatigue;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.notification.NotificationService;
+import com.dayliane.schedule.ScheduleService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -48,6 +50,7 @@ public class FatigueService {
     private final JdbcTemplate jdbc;
     private final NotificationService notificationService;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<ScheduleService> scheduleServiceProvider;
 
     @Value("${dayliane.features.fatigue.enabled:true}")
     private boolean fatigueFeatureEnabled;
@@ -67,10 +70,11 @@ public class FatigueService {
     @Value("${dayliane.features.fatigue.allowed-user-ids:}")
     private String fatigueAllowedUserIds;
 
-    public FatigueService(JdbcTemplate jdbc, NotificationService notificationService, ObjectMapper objectMapper) {
+    public FatigueService(JdbcTemplate jdbc, NotificationService notificationService, ObjectMapper objectMapper, ObjectProvider<ScheduleService> scheduleServiceProvider) {
         this.jdbc = jdbc;
         this.notificationService = notificationService;
         this.objectMapper = objectMapper;
+        this.scheduleServiceProvider = scheduleServiceProvider;
     }
 
     @Transactional
@@ -180,6 +184,12 @@ public class FatigueService {
     }
 
     @Transactional
+    public boolean trackingEnabledFor(long userId) {
+        ensureProfile(userId);
+        return trackingEnabled(profileRow(userId));
+    }
+
+    @Transactional
     public Map<String, Object> profile(long userId) {
         ensureProfile(userId);
         return profileResponse(profileRow(userId));
@@ -247,6 +257,165 @@ public class FatigueService {
         result.put("profile", profileResponse(profileRow(userId)));
         result.put("list", list);
         result.put("disclaimer", DISCLAIMER);
+        return result;
+    }
+
+    @Transactional
+    public Map<String, Object> report(long userId, String period) {
+        return report(userId, period, (String) null);
+    }
+
+    @Transactional
+    public Map<String, Object> report(long userId, String period, String date) {
+        String normalized = period == null || period.isBlank() ? "week" : period.trim().toLowerCase();
+        if (!"week".equals(normalized) && !"month".equals(normalized)) {
+            throw new BusinessException(400, "period must be 'week' or 'month'");
+        }
+        ensureProfile(userId);
+        ZoneId zone = userZone(userId);
+        LocalDate anchor = date == null || date.isBlank() ? LocalDate.now(zone) : parseDate(date, "date");
+        LocalDate from;
+        LocalDate to;
+        if ("week".equals(normalized)) {
+            from = anchor.minusDays(anchor.getDayOfWeek().getValue() - 1L);
+            to = from.plusDays(6);
+        } else {
+            from = anchor.withDayOfMonth(1);
+            to = anchor.with(java.time.temporal.TemporalAdjusters.lastDayOfMonth());
+        }
+
+        ScheduleService scheduleService = scheduleServiceProvider.getIfAvailable();
+        if (scheduleService != null) scheduleService.materializeForRange(userId, from, to);
+
+        Map<String, Object> profile = profileRow(userId);
+        Map<Integer, BigDecimal> currentWeights = weights(profile);
+        BigDecimal capacity = decimal(profile.get("capacity75"), DEFAULT_CAPACITY);
+        boolean trackingOn = trackingEnabled(profile);
+
+        Map<LocalDate, BigDecimal> plannedByDate = new LinkedHashMap<>();
+        Map<LocalDate, BigDecimal> completedByDate = new LinkedHashMap<>();
+        int personalScheduleCount = 0;
+        int personalCompletedCount = 0;
+        for (Map<String, Object> schedule : schedulesForUser(userId)) {
+            String status = String.valueOf(schedule.getOrDefault("status", "pending"));
+            LocalDate plannedDate = schedulePlannedDate(schedule, zone);
+            if (plannedDate != null && !plannedDate.isBefore(from) && !plannedDate.isAfter(to) && !"cancelled".equals(status)) {
+                personalScheduleCount++;
+                int level = (int) number(schedule.get("fatigueLevel"), 3);
+                BigDecimal weight = currentWeights.getOrDefault(level, BigDecimal.valueOf(defaultWeight(level)));
+                plannedByDate.merge(plannedDate, weight, BigDecimal::add);
+            }
+            if ("completed".equals(status)) {
+                LocalDate completedDate = localDate(schedule.get("completedAt"), zone);
+                if (completedDate != null && !completedDate.isBefore(from) && !completedDate.isAfter(to)) {
+                    personalCompletedCount++;
+                    int completedLevel = (int) number(schedule.get("completedFatigueLevel"), number(schedule.get("fatigueLevel"), 3));
+                    BigDecimal completedWeight = decimal(schedule.get("completedFatigueWeight"), BigDecimal.valueOf(defaultWeight(completedLevel)));
+                    completedByDate.merge(completedDate, completedWeight, BigDecimal::add);
+                }
+            }
+        }
+        Map<LocalDate, BigDecimal> teamByDate = trackingOn ? teamCompletedLoadByDate(userId, from, to, zone) : Map.of();
+
+        Map<LocalDate, Integer> surveyScoreByDate = new HashMap<>();
+        jdbc.query("select local_date localDate,score from fatigue_survey where user_id=? and local_date between ? and ?",
+                rs -> {
+                    surveyScoreByDate.put(rs.getDate("localDate").toLocalDate(), rs.getInt("score"));
+                },
+                userId, from, to);
+        Map<LocalDate, Integer> persistedPredictedByDate = new HashMap<>();
+        jdbc.query("select local_date localDate,predicted_score predictedScore from fatigue_daily_summary where user_id=? and local_date between ? and ?",
+                rs -> {
+                    persistedPredictedByDate.put(rs.getDate("localDate").toLocalDate(), rs.getInt("predictedScore"));
+                },
+                userId, from, to);
+
+        List<Map<String, Object>> trend = new ArrayList<>();
+        BigDecimal sumPlanned = BigDecimal.ZERO;
+        BigDecimal sumCompleted = BigDecimal.ZERO;
+        BigDecimal sumTeam = BigDecimal.ZERO;
+        BigDecimal peakLoad = BigDecimal.ZERO;
+        LocalDate peakDay = null;
+        BigDecimal surveySum = BigDecimal.ZERO;
+        int surveyCount = 0;
+        BigDecimal predictedSum = BigDecimal.ZERO;
+        int predictedCount = 0;
+        for (LocalDate day = from; !day.isAfter(to); day = day.plusDays(1)) {
+            BigDecimal planned = plannedByDate.getOrDefault(day, BigDecimal.ZERO);
+            BigDecimal completed = completedByDate.getOrDefault(day, BigDecimal.ZERO);
+            BigDecimal team = teamByDate.getOrDefault(day, BigDecimal.ZERO);
+            Integer surveyScore = surveyScoreByDate.get(day);
+            Integer persistedPredicted = persistedPredictedByDate.get(day);
+            int predicted = persistedPredicted != null ? persistedPredicted : predictedScore(planned, capacity);
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("localDate", day.toString());
+            row.put("plannedLoad", scale(planned));
+            row.put("completedLoad", scale(completed));
+            row.put("teamCompletedLoad", scale(team));
+            row.put("totalCompletedLoad", scale(completed.add(team)));
+            row.put("predictedScore", predicted);
+            row.put("surveyScore", surveyScore);
+            trend.add(row);
+
+            sumPlanned = sumPlanned.add(planned);
+            sumCompleted = sumCompleted.add(completed);
+            sumTeam = sumTeam.add(team);
+            if (planned.compareTo(peakLoad) > 0) {
+                peakLoad = planned;
+                peakDay = day;
+            }
+            if (surveyScore != null) {
+                surveySum = surveySum.add(BigDecimal.valueOf(surveyScore));
+                surveyCount++;
+            }
+            if (predicted > 0) {
+                predictedSum = predictedSum.add(BigDecimal.valueOf(predicted));
+                predictedCount++;
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("surveyScoreAvg", surveyCount == 0 ? null : scale(surveySum.divide(BigDecimal.valueOf(surveyCount), 3, RoundingMode.HALF_UP)));
+        summary.put("predictedScoreAvg", predictedCount == 0 ? null : scale(predictedSum.divide(BigDecimal.valueOf(predictedCount), 3, RoundingMode.HALF_UP)));
+        LocalDate peak = peakLoad.signum() > 0 ? peakDay : null;
+        summary.put("peakDay", peak == null ? null : peak.toString());
+        summary.put("peakDayLoad", scale(peakLoad));
+        summary.put("peakDayCompletedLoad", peak == null ? null : scale(completedByDate.getOrDefault(peak, BigDecimal.ZERO)));
+        summary.put("peakDayTeamCompletedLoad", peak == null ? null : scale(teamByDate.getOrDefault(peak, BigDecimal.ZERO)));
+        summary.put("peakDayTotalCompletedLoad", peak == null ? null : scale(completedByDate.getOrDefault(peak, BigDecimal.ZERO).add(teamByDate.getOrDefault(peak, BigDecimal.ZERO))));
+        summary.put("personalPlannedLoad", scale(sumPlanned));
+        summary.put("personalCompletedLoad", scale(sumCompleted));
+        summary.put("teamCompletedLoad", scale(sumTeam));
+        summary.put("totalCompletedLoad", scale(sumCompleted.add(sumTeam)));
+        summary.put("personalScheduleCount", personalScheduleCount);
+        summary.put("personalCompletedCount", personalCompletedCount);
+        summary.put("personalCompletionRate", personalScheduleCount == 0 ? null
+                : BigDecimal.valueOf(personalCompletedCount).divide(BigDecimal.valueOf(personalScheduleCount), 4, RoundingMode.HALF_UP).stripTrailingZeros());
+        summary.put("personalCompletionRateNote", "完成率按完成日归属所在周期：本期实际完成数 / 本期计划数，跨周期完成不计入计划日周期。");
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("period", normalized);
+        result.put("dateFrom", from.toString());
+        result.put("dateTo", to.toString());
+        result.put("timezone", zone.getId());
+        result.put("summary", summary);
+        result.put("trend", trend);
+        result.put("disclaimer", DISCLAIMER);
+        return result;
+    }
+
+    private Map<LocalDate, BigDecimal> teamCompletedLoadByDate(long userId, LocalDate from, LocalDate to, ZoneId zone) {
+        Instant start = from.atStartOfDay(zone).toInstant();
+        Instant end = to.plusDays(1).atStartOfDay(zone).toInstant();
+        Map<LocalDate, BigDecimal> result = new LinkedHashMap<>();
+        jdbc.query("select completed_at completedAt, completed_fatigue_weight weight from team_task_assignee where user_id=? and completed_at is not null and completed_fatigue_weight is not null and completed_at >= ? and completed_at < ?",
+                rs -> {
+                    LocalDate completedDate = rs.getTimestamp("completedAt").toInstant().atZone(zone).toLocalDate();
+                    BigDecimal weight = rs.getBigDecimal("weight");
+                    if (weight != null) result.merge(completedDate, weight, BigDecimal::add);
+                },
+                userId, Timestamp.from(start), Timestamp.from(end));
         return result;
     }
 
@@ -715,11 +884,14 @@ public class FatigueService {
         BigDecimal capacity = decimal(profile.get("capacity75"), DEFAULT_CAPACITY);
         int predicted = predictedScore(planned, capacity);
         int actualLoadScore = predictedScore(completed, capacity);
+        BigDecimal teamCompleted = teamCompletedLoad(userId, date, zone);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("localDate", date.toString());
         summary.put("timezone", zone.getId());
         summary.put("plannedLoad", scale(planned));
         summary.put("completedLoad", scale(completed));
+        summary.put("teamCompletedLoad", scale(teamCompleted));
+        summary.put("totalCompletedLoad", scale(completed.add(teamCompleted)));
         summary.put("predictedScore", predicted);
         summary.put("pendingCount", pendingCount);
         summary.put("completedCount", completedCount);
@@ -750,6 +922,8 @@ public class FatigueService {
         result.put("timezone", zone.getId());
         result.put("plannedLoad", BigDecimal.ZERO);
         result.put("completedLoad", BigDecimal.ZERO);
+        result.put("teamCompletedLoad", BigDecimal.ZERO);
+        result.put("totalCompletedLoad", BigDecimal.ZERO);
         result.put("predictedScore", 0);
         result.put("actualLoadScore", 0);
         result.put("pendingCount", 0);
@@ -770,6 +944,30 @@ public class FatigueService {
         result.put("survey", survey == null ? Map.of() : survey);
         result.put("disclaimer", DISCLAIMER);
         return result;
+    }
+
+    private BigDecimal teamCompletedLoad(long userId, LocalDate date, ZoneId zone) {
+        Instant start = date.atStartOfDay(zone).toInstant();
+        Instant end = date.plusDays(1).atStartOfDay(zone).toInstant();
+        List<Map<String, Object>> rows = jdbc.query(
+                "select completed_at completedAt, completed_fatigue_weight completedFatigueWeight " +
+                        "from team_task_assignee where user_id=? and completed_at is not null and completed_fatigue_weight is not null " +
+                        "and completed_at >= ? and completed_at < ?",
+                (rs, i) -> {
+                    Map<String, Object> row = new HashMap<>();
+                    row.put("completedAt", rs.getTimestamp("completedAt"));
+                    row.put("weight", rs.getBigDecimal("completedFatigueWeight"));
+                    return row;
+                },
+                userId, Timestamp.from(start), Timestamp.from(end));
+        BigDecimal total = BigDecimal.ZERO;
+        for (Map<String, Object> row : rows) {
+            LocalDate completedDate = ((Timestamp) row.get("completedAt")).toInstant().atZone(zone).toLocalDate();
+            if (date.equals(completedDate) && row.get("weight") != null) {
+                total = total.add((BigDecimal) row.get("weight"));
+            }
+        }
+        return total;
     }
 
     private boolean createFatigueAlert(long userId, LocalDate date, String sourceType, int score,

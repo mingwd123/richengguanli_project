@@ -110,6 +110,10 @@ const now = ref(Date.now())
 const detailLoading = ref(false)
 const formBusy = ref(false)
 const actionBusy = ref(false)
+const pendingCompleteTask = ref<{ id: number; title: string } | null>(null)
+const completingFatigueLevel = ref(3)
+const fatigueTrackingOn = computed(() => Boolean(store.fatigueProfile?.fatigueTrackingEnabled && store.fatigueProfile?.featureEnabled))
+const completionFatigueLabels = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
 const aiParsing = ref(false)
 const aiParseError = ref('')
 const aiParseNotice = ref('')
@@ -398,6 +402,8 @@ function newScheduleForm(): ScheduleForm {
     remindAt: '',
     urgencyLevel: 3,
     fatigueLevel: 3,
+    rrule: '',
+    excludedDates: [],
   }
 }
 
@@ -948,6 +954,30 @@ async function openEntry(entry: QuickEntry) {
   await loadTeamTaskDetail(entry.raw.id)
 }
 
+async function submitTeamTaskComplete(id: number, fatigueLevel?: number) {
+  const body = fatigueLevel !== undefined ? JSON.stringify({ fatigueLevel }) : undefined
+  await store.request(`/team-tasks/${id}/complete`, { method: 'POST', body })
+  await refreshQuickWorkspace()
+  if (activeView.value.kind === 'task-detail' && activeView.value.id === id) {
+    await loadTeamTaskDetail(id)
+  }
+}
+
+async function confirmComplete() {
+  if (!pendingCompleteTask.value || actionBusy.value) return
+  actionBusy.value = true
+  const id = pendingCompleteTask.value.id
+  try {
+    await submitTeamTaskComplete(id, completingFatigueLevel.value)
+    store.notify('任务已完成')
+  } catch (error: any) {
+    store.notify(error.message || '操作失败')
+  } finally {
+    actionBusy.value = false
+    pendingCompleteTask.value = null
+  }
+}
+
 async function performAction(entry: QuickEntry) {
   if (actionBusy.value) return
   actionBusy.value = true
@@ -962,7 +992,14 @@ async function performAction(entry: QuickEntry) {
     const task = entry.raw as MyTask
     if (!isActionableTeamTask(task)) return
     const action = task.assignStatus === 'pending' ? 'accept' : task.assignStatus === 'accepted' ? 'complete' : ''
-    if (action) {
+    if (action === 'complete') {
+      if (fatigueTrackingOn.value) {
+        pendingCompleteTask.value = { id: task.id, title: task.title }
+        completingFatigueLevel.value = 3
+        return
+      }
+      await submitTeamTaskComplete(task.id)
+    } else if (action) {
       await store.request(`/team-tasks/${task.id}/${action}`, { method: 'POST' })
       await refreshQuickWorkspace()
     }
@@ -1171,6 +1208,8 @@ async function openScheduleEdit() {
     remindAt: isoToZonedDatetimeLocal(item.pendingReminders?.[0]?.remindAt || item.remindAt || '', timezone.value),
     urgencyLevel: item.urgencyLevel || 3,
     fatigueLevel: item.fatigueLevel || 3,
+    rrule: item.rrule || '',
+    excludedDates: [...(item.excludedDates || [])],
   }
   initialScheduleReminder.value = scheduleEditForm.value.remindAt
   await pushView({ kind: 'schedule-edit', id: item.id, scrollTop: 0 })
@@ -1217,6 +1256,23 @@ async function loadTeamTaskDetail(id: number) {
 
 async function runTeamTaskAction(action: string) {
   if (!teamTaskDetail.value || actionBusy.value) return
+  if (action === 'complete') {
+    if (fatigueTrackingOn.value) {
+      pendingCompleteTask.value = { id: teamTaskDetail.value.id, title: teamTaskDetail.value.title }
+      completingFatigueLevel.value = 3
+      return
+    }
+    actionBusy.value = true
+    try {
+      await submitTeamTaskComplete(teamTaskDetail.value.id)
+      store.notify('任务已完成')
+    } catch (error: any) {
+      store.notify(error.message || '操作失败')
+    } finally {
+      actionBusy.value = false
+    }
+    return
+  }
   actionBusy.value = true
   try {
     const id = teamTaskDetail.value.id

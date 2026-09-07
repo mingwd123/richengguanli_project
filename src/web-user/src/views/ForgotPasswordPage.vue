@@ -3,6 +3,7 @@ import { onBeforeUnmount, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft, ArrowRight, CalendarCheck2, CircleCheck, Eye, EyeOff, Sparkles } from 'lucide-vue-next'
 import EmailVerificationFields from '../components/EmailVerificationFields.vue'
+import ComplianceFooter from '../components/ComplianceFooter.vue'
 import { useAppStore } from '../stores/app'
 import { isValidPassword } from '../utils/auth'
 
@@ -128,6 +129,8 @@ onBeforeUnmount(() => {
         </form>
       </template>
     </section>
+
+    <ComplianceFooter />
 
     <div v-if="store.toast" class="toast login-toast" role="alert">{{ store.toast }}</div>
   </main>

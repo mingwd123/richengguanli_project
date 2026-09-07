@@ -323,12 +323,12 @@ class BusinessAcceptanceTests {
                 .containsEntry("description", "Visible to the whole team")
                 .containsEntry("canManage", true);
         teamTaskService.teamTaskAssigneeTransition(allCompleted, b, "accepted", List.of("pending"));
-        assertThat(teamTaskService.teamTaskAssigneeTransition(allCompleted, b, "completed", List.of("accepted"))).containsEntry("status", "completed");
+        assertThat(teamTaskService.completeTeamTask(allCompleted, b, Map.of("fatigueLevel", 3))).containsEntry("status", "completed");
         assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_completed'", owner, allCompleted)).isEqualTo(1);
 
         long mixed = id(teamTaskService.createTeamTask(owner, Map.of("teamId", teamId, "title", "Mixed result", "assigneeUserIds", List.of(b, c))));
         teamTaskService.teamTaskAssigneeTransition(mixed, b, "accepted", List.of("pending"));
-        teamTaskService.teamTaskAssigneeTransition(mixed, b, "completed", List.of("accepted"));
+        teamTaskService.completeTeamTask(mixed, b, Map.of("fatigueLevel", 3));
         assertThat(teamTaskService.teamTaskAssigneeTransition(mixed, c, "rejected", List.of("pending"))).containsEntry("status", "completed");
         assertThat(count("select count(*) from notification where user_id=? and related_type='team_task' and related_id=? and type='task_rejected'", owner, mixed)).isEqualTo(1);
 
@@ -479,7 +479,7 @@ class BusinessAcceptanceTests {
         assertThat(teamTaskService.teamTaskDetail(taskId, owner))
                 .containsEntry("status", "active")
                 .containsEntry("unassignedCount", 0);
-        assertThat(teamTaskService.teamTaskAssigneeTransition(taskId, survivor, "completed", List.of("accepted")))
+        assertThat(teamTaskService.completeTeamTask(taskId, survivor, Map.of("fatigueLevel", 3)))
                 .containsEntry("status", "completed");
     }
 
@@ -539,7 +539,7 @@ class BusinessAcceptanceTests {
                 .containsEntry("status", "active");
         assertThat(teamTaskService.correctTeamTaskAssigneeStatus(taskId, assigneeId, owner, "accepted"))
                 .containsEntry("status", "active");
-        teamTaskService.teamTaskAssigneeTransition(taskId, assignee, "completed", List.of("accepted"));
+        teamTaskService.completeTeamTask(taskId, assignee, Map.of("fatigueLevel", 3));
         assertThat(teamTaskService.teamTaskDetail(taskId, owner)).containsEntry("status", "completed");
         assertBusinessCode(400, () -> teamTaskService.cancelTeamTask(taskId, owner));
         assertBusinessCode(400, () -> adminService.adminCancelTeamTask(owner, taskId, "127.0.0.1", "test"));
@@ -631,7 +631,7 @@ class BusinessAcceptanceTests {
         assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", taskId, c)).isEqualTo(1);
 
         teamTaskService.teamTaskAssigneeTransition(taskId, c, "accepted", List.of("pending"));
-        teamTaskService.teamTaskAssigneeTransition(taskId, c, "completed", List.of("accepted"));
+        teamTaskService.completeTeamTask(taskId, c, Map.of("fatigueLevel", 3));
         assertThat(count("select count(*) from reminder where target_type='team_task' and target_id=? and status='pending'", taskId)).isZero();
     }
 

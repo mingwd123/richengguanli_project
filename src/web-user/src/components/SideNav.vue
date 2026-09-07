@@ -12,6 +12,7 @@ import {
   MoreHorizontal,
   PanelsTopLeft,
   Settings2,
+  TrendingUp,
   UsersRound,
 } from 'lucide-vue-next'
 
@@ -27,6 +28,7 @@ const nav = [
   { id: 'teams', label: '团队', icon: UsersRound, route: '/teams', mobilePrimary: false },
   { id: 'tasks', label: '团队任务', icon: CheckSquare2, route: '/tasks', mobilePrimary: true },
   { id: 'notifications', label: '通知', icon: PanelsTopLeft, route: '/notifications', mobilePrimary: false },
+  { id: 'report', label: '回顾', icon: TrendingUp, route: '/fatigue/report', mobilePrimary: false },
   { id: 'reminders', label: '提醒记录', icon: AlarmClock, route: '/reminders', mobilePrimary: false },
   { id: 'profile', label: '我的', icon: Settings2, route: '/profile', mobilePrimary: false },
 ]

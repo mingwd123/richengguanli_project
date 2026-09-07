@@ -31,9 +31,11 @@ const routes = [
       { path: 'tasks/:id/assignees/:assigneeId/reassign', name: 'TeamTaskReassign', component: () => import('../views/TeamTaskReassignPage.vue'), props: true },
       { path: 'notifications', name: 'Notifications', component: () => import('../views/NotificationsPage.vue') },
       { path: 'fatigue/survey', name: 'FatigueSurvey', component: () => import('../views/FatigueSurveyPage.vue') },
+      { path: 'fatigue/report', name: 'FatigueReport', component: () => import('../views/FatigueReportPage.vue') },
       { path: 'reminders', name: 'Reminders', component: () => import('../views/RemindersPage.vue') },
       { path: 'profile', name: 'Profile', component: () => import('../views/ProfilePage.vue') },
       { path: 'profile/settings', name: 'ProfileSettings', component: () => import('../views/ProfileSettingsPage.vue') },
+      { path: 'profile/settings/calendar-subscription', name: 'CalendarSubscriptionHelp', component: () => import('../views/CalendarSubscriptionHelpPage.vue') },
       { path: 'profile/fatigue', name: 'FatigueSettings', component: () => import('../views/FatigueSettingsPage.vue') },
       { path: 'profile/notifications', name: 'NotificationSettings', component: () => import('../views/NotificationSettingsPage.vue') },
     ]

@@ -53,6 +53,13 @@ public class FatigueController {
         return ApiResponse.success(fatigueService.history(userId(request), dateFrom, dateTo));
     }
 
+    @GetMapping("/report")
+    public ApiResponse<Map<String, Object>> report(HttpServletRequest request,
+                                                   @RequestParam String period,
+                                                   @RequestParam(required = false) String date) {
+        return ApiResponse.success(fatigueService.report(userId(request), period, date));
+    }
+
     @GetMapping("/survey/today")
     public ApiResponse<Map<String, Object>> surveyToday(HttpServletRequest request,
                                                         @RequestParam(required = false) String date) {

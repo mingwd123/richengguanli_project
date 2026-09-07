@@ -2,6 +2,7 @@ package com.dayliane.teamtask;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.common.PermissionService;
+import com.dayliane.fatigue.FatigueService;
 import com.dayliane.notification.NotificationService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -12,6 +13,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -24,11 +26,13 @@ public class TeamTaskService {
     private final JdbcTemplate jdbc;
     private final PermissionService permissionService;
     private final NotificationService notificationService;
+    private final FatigueService fatigueService;
 
-    public TeamTaskService(JdbcTemplate jdbc, PermissionService permissionService, NotificationService notificationService) {
+    public TeamTaskService(JdbcTemplate jdbc, PermissionService permissionService, NotificationService notificationService, FatigueService fatigueService) {
         this.jdbc = jdbc;
         this.permissionService = permissionService;
         this.notificationService = notificationService;
+        this.fatigueService = fatigueService;
     }
 
     // ===== Public API Methods =====
@@ -175,6 +179,16 @@ public class TeamTaskService {
         task.put("canReview", teamManager && "pending".equals(task.get("approvalStatus")));
         task.put("pendingReminders", jdbc.query("select id,user_id userId,remind_at remindAt,status from reminder where target_type='team_task' and target_id=? and status='pending' order by remind_at,user_id", (rs, i) -> Map.of(
                 "id", rs.getLong("id"), "userId", rs.getLong("userId"), "remindAt", iso(rs.getTimestamp("remindAt")), "status", rs.getString("status")), taskId));
+        try {
+            Map<String, Object> mine = requireMyActiveAssignee(taskId, userId);
+            task.put("assigneeId", mine.get("id"));
+            task.put("assignStatus", mine.get("status"));
+            task.put("assignRound", mine.get("assignRound"));
+            task.put("completedAt", mine.get("completedAt") == null ? null : iso((Timestamp) mine.get("completedAt")));
+            task.put("completedFatigueLevel", mine.get("completedFatigueLevel"));
+            task.put("completedFatigueWeight", mine.get("completedFatigueWeight"));
+        } catch (BusinessException ignored) {
+        }
         return task;
     }
 
@@ -229,6 +243,7 @@ public class TeamTaskService {
 
     @Transactional
     public Map<String, Object> teamTaskAssigneeTransition(long taskId, long userId, String next, List<String> allowedFrom) {
+        if ("completed".equals(next)) throw new BusinessException(400, "use the dedicated completion flow to record completion fatigue");
         Map<String, Object> task = requireTeamTaskForUpdate(taskId);
         if (!"approved".equals(task.get("approvalStatus"))) throw new BusinessException(400, "task assignment is not approved");
         if (!List.of("active", "unassigned").contains(String.valueOf(task.get("status")))) throw new BusinessException(400, "task cannot be operated in current status");
@@ -248,6 +263,54 @@ public class TeamTaskService {
             cancelActiveReminders(taskId, null);
         }
         return teamTaskDetail(taskId, userId);
+    }
+
+    @Transactional
+    public Map<String, Object> completeTeamTask(long taskId, long userId, Map<String, Object> req) {
+        Map<String, Object> task = requireTeamTaskForUpdate(taskId);
+        if (!"approved".equals(task.get("approvalStatus"))) throw new BusinessException(400, "task assignment is not approved");
+        Map<String, Object> a = requireMyActiveAssigneeForUpdate(taskId, userId);
+        String current = String.valueOf(a.get("status"));
+        if ("completed".equals(current)) {
+            return teamTaskDetail(taskId, userId);
+        }
+        if (!"accepted".equals(current)) throw new BusinessException(400, "invalid status transition");
+        if (!List.of("active", "unassigned").contains(String.valueOf(task.get("status")))) throw new BusinessException(400, "task cannot be operated in current status");
+
+        boolean trackingEnabled = fatigueService.trackingEnabledFor(userId);
+        Integer fatigueLevel = null;
+        BigDecimal weight = null;
+        if (trackingEnabled) {
+            fatigueLevel = parseFatigueLevel(req);
+            weight = fatigueService.currentWeight(userId, fatigueLevel);
+        }
+
+        int updated = trackingEnabled
+                ? jdbc.update("update team_task_assignee set status='completed', completed_at=utc_timestamp(), completed_fatigue_level=?, completed_fatigue_weight=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and status='accepted' and is_active=true", fatigueLevel, weight, userId, a.get("id"))
+                : jdbc.update("update team_task_assignee set status='completed', completed_at=utc_timestamp(), completed_fatigue_level=null, completed_fatigue_weight=null, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and status='accepted' and is_active=true", userId, a.get("id"));
+        if (updated == 0) throw new BusinessException(409, "assignee status has changed");
+
+        if (trackingEnabled) fatigueService.touchDataRevision(userId);
+        recordEvent(taskId, userId, "completed", "完成了任务");
+        recalculateTeamTaskStatus(taskId);
+        notifyCreator(task, userId, "completed");
+        cancelActiveReminders(taskId, userId);
+        if ("completed".equals(String.valueOf(requireTeamTask(taskId).get("status")))) {
+            cancelActiveReminders(taskId, null);
+        }
+        return teamTaskDetail(taskId, userId);
+    }
+
+    private static Integer parseFatigueLevel(Map<String, Object> req) {
+        Object raw = req == null ? null : req.get("fatigueLevel");
+        if (raw == null) throw new BusinessException(400, "fatigueLevel is required when fatigue tracking is enabled");
+        if (!(raw instanceof Number number)) throw new BusinessException(400, "fatigueLevel must be an integer");
+        if (number.doubleValue() != Math.floor(number.doubleValue())) {
+            throw new BusinessException(400, "fatigueLevel must be an integer");
+        }
+        int level = number.intValue();
+        if (level < 1 || level > 5) throw new BusinessException(400, "fatigueLevel must be between 1 and 5");
+        return level;
     }
 
     @Transactional
@@ -408,9 +471,24 @@ public class TeamTaskService {
         Map<String, Object> task = requireManagedTeamTaskForUpdate(taskId, userId);
         if (!"approved".equals(task.get("approvalStatus"))) throw new BusinessException(400, "task assignment is not approved");
         if ("completed".equals(task.get("status"))) throw new BusinessException(400, "completed task cannot be reopened");
-        if (!List.of("pending", "accepted", "rejected", "completed").contains(status)) throw new BusinessException(400, "status is invalid");
-        int updated = jdbc.update("update team_task_assignee set status=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, userId, assigneeId, taskId);
-        if (updated == 0) throw new BusinessException(404, "assignee not found");
+        if (!List.of("pending", "accepted", "rejected").contains(status)) throw new BusinessException(400, "status is invalid");
+        Long correctedUserId;
+        try {
+            correctedUserId = jdbc.queryForObject("select user_id from team_task_assignee where id=? and task_id=? and is_active=true", Long.class, assigneeId, taskId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "assignee not found");
+        }
+        String timeColumn = "accepted".equals(status) ? "accepted_at" : "rejected".equals(status) ? "rejected_at" : null;
+        int updated;
+        if (timeColumn == null) {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, accepted_at=null, rejected_at=null, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, userId, assigneeId, taskId);
+        } else if ("accepted_at".equals(timeColumn)) {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, rejected_at=null, accepted_at=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, userId, assigneeId, taskId);
+        } else {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, accepted_at=null, rejected_at=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, userId, assigneeId, taskId);
+        }
+        if (updated == 0) throw new BusinessException(409, "assignee not found or state has changed");
+        fatigueService.touchDataRevision(correctedUserId);
         recordEvent(taskId, userId, "status_corrected", "修正执行人状态为: " + status);
         recalculateTeamTaskStatus(taskId);
         syncRemindersAfterAssigneeCorrection(taskId, assigneeId, status);
@@ -661,13 +739,16 @@ public class TeamTaskService {
             task.put("assigneeId", a.get("id"));
             task.put("assignStatus", a.get("status"));
             task.put("assignRound", a.get("assignRound"));
+            task.put("completedAt", a.get("completedAt") == null ? null : iso((Timestamp) a.get("completedAt")));
+            task.put("completedFatigueLevel", a.get("completedFatigueLevel"));
+            task.put("completedFatigueWeight", a.get("completedFatigueWeight"));
         } catch (BusinessException ignored) {
         }
         return task;
     }
 
     private List<Map<String, Object>> teamTaskAssignees(long taskId) {
-        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,u.nickname,u.avatar_url avatarUrl from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and a.is_active=true order by a.id", (rs, i) -> {
+        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,u.nickname,u.avatar_url avatarUrl from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and (a.is_active=true or a.status='completed') order by a.is_active desc, a.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("assigneeId", rs.getLong("id"));
@@ -696,7 +777,17 @@ public class TeamTaskService {
 
     private Map<String, Object> requireMyActiveAssignee(long taskId, long userId) {
         try {
-            return jdbc.queryForObject("select id,user_id userId,status,assign_round assignRound from team_task_assignee where task_id=? and user_id=? and is_active=true", (rs, i) -> Map.of("id", rs.getLong("id"), "userId", rs.getLong("userId"), "status", rs.getString("status"), "assignRound", rs.getInt("assignRound")), taskId, userId);
+            return jdbc.queryForObject("select id,user_id userId,status,assign_round assignRound,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight from team_task_assignee where task_id=? and user_id=? and is_active=true", (rs, i) -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("id", rs.getLong("id"));
+                m.put("userId", rs.getLong("userId"));
+                m.put("status", rs.getString("status"));
+                m.put("assignRound", rs.getInt("assignRound"));
+                m.put("completedAt", rs.getTimestamp("completedAt"));
+                m.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
+                m.put("completedFatigueWeight", rs.getObject("completedFatigueWeight"));
+                return m;
+            }, taskId, userId);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(403, "not task assignee");
         }

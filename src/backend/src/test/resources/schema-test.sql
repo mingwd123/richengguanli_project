@@ -23,6 +23,7 @@ DROP TABLE IF EXISTS team_task_event;
 DROP TABLE IF EXISTS team_task_assignee;
 DROP TABLE IF EXISTS team_task;
 DROP TABLE IF EXISTS schedule;
+DROP TABLE IF EXISTS schedule_series_exdate;
 DROP TABLE IF EXISTS task_group;
 DROP TABLE IF EXISTS team_member;
 DROP TABLE IF EXISTS team;
@@ -42,12 +43,14 @@ CREATE TABLE `user` (
   status VARCHAR(20) NOT NULL DEFAULT 'active',
   token_version INT NOT NULL DEFAULT 0,
   profile_version BIGINT NOT NULL DEFAULT 0,
+  subscribe_token VARCHAR(64),
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX uk_user_email ON `user`(email);
+CREATE UNIQUE INDEX uk_user_subscribe_token ON `user`(subscribe_token);
 
 CREATE TABLE auth_email_otp (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -145,6 +148,9 @@ CREATE TABLE schedule (
   completed_at DATETIME,
   completed_fatigue_level TINYINT,
   completed_fatigue_weight DECIMAL(8,3),
+  rrule VARCHAR(500),
+  series_id VARCHAR(36),
+  occurrence_date DATE,
   deleted_at DATETIME,
   deleted_by BIGINT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -153,6 +159,17 @@ CREATE TABLE schedule (
   CONSTRAINT chk_schedule_fatigue_level CHECK (fatigue_level BETWEEN 1 AND 5),
   CONSTRAINT chk_schedule_completed_fatigue_level CHECK (completed_fatigue_level IS NULL OR completed_fatigue_level BETWEEN 1 AND 5),
   CONSTRAINT chk_schedule_completed_fatigue_weight CHECK (completed_fatigue_weight IS NULL OR completed_fatigue_weight > 0)
+);
+
+CREATE INDEX idx_schedule_series_id ON schedule(series_id, occurrence_date);
+CREATE UNIQUE INDEX uk_schedule_series_occurrence ON schedule(series_id, occurrence_date);
+
+CREATE TABLE schedule_series_exdate (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  series_id VARCHAR(36) NOT NULL,
+  excluded_date DATE NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uk_series_exdate UNIQUE (series_id, excluded_date)
 );
 
 CREATE TABLE reminder (
@@ -203,6 +220,8 @@ CREATE TABLE team_task_assignee (
   accepted_at DATETIME,
   rejected_at DATETIME,
   completed_at DATETIME,
+  completed_fatigue_level TINYINT,
+  completed_fatigue_weight DECIMAL(8,3),
   reassigned_from_user_id BIGINT,
   assigned_by BIGINT,
   assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -211,8 +230,13 @@ CREATE TABLE team_task_assignee (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (task_id, user_id, assign_round),
-  UNIQUE (task_id, active_user_id)
+  UNIQUE (task_id, active_user_id),
+  CONSTRAINT chk_team_assignee_completed_fatigue_level CHECK (completed_fatigue_level IS NULL OR completed_fatigue_level BETWEEN 1 AND 5),
+  CONSTRAINT chk_team_assignee_completed_fatigue_weight CHECK (completed_fatigue_weight IS NULL OR completed_fatigue_weight > 0)
 );
+
+CREATE INDEX idx_team_assignee_user_completed_at
+  ON team_task_assignee(user_id, completed_at, completed_fatigue_weight);
 
 CREATE TABLE team_task_event (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,

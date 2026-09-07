@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import SideNav from '../components/SideNav.vue'
+import ComplianceFooter from '../components/ComplianceFooter.vue'
 import { Bell, Moon, Plus, RefreshCw, Sun, UserRound } from 'lucide-vue-next'
 import { getDisplayTimezone } from '../utils/helpers'
 
@@ -47,6 +48,7 @@ const routeMeta = computed(() => {
     '/tasks': { title: '团队任务', description: '跟进指派、截止时间与执行状态' },
     '/notifications': { title: '通知', description: '集中处理提醒和团队动态' },
     '/fatigue/survey': { title: '疲劳调查', description: '记录今天的实际疲劳感受' },
+    '/fatigue/report': { title: '疲劳回顾', description: '周 / 月疲劳与负荷回顾报告' },
     '/reminders': { title: '提醒记录', description: '查看待发送与历史提醒' },
     '/profile': { title: '个人中心', description: '管理偏好、模块和账号信息' },
     '/profile/settings': { title: '个人设置', description: '更新资料、安全与时区' },
@@ -111,6 +113,7 @@ function openCreateSchedule() {
           <component :is="Component" :key="route.path" />
         </transition>
       </router-view>
+      <ComplianceFooter />
     </section>
     <div v-if="store.toast" class="toast">{{ store.toast }}</div>
   </main>

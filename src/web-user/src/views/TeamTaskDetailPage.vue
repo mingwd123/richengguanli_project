@@ -3,6 +3,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { Sparkles } from 'lucide-vue-next'
+import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import { canCorrectTeamTaskAssignee, canDeleteTeamTask, formatTime, countdown, getDisplayTimezone, statusLabel, toDatetimeLocalInTimezone, urgency, zonedDateTimeToIso } from '../utils/helpers'
 import type { TeamTask, TeamTaskAssignee, TeamTaskReassignmentCandidate, TaskGroup } from '../types'
 
@@ -13,6 +14,8 @@ const eventTypeLabels: Record<string, string> = {
   assignee_removed: '成员移除',
   time_updated: '修改时间', status_corrected: '修正状态'
 }
+
+const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -28,6 +31,40 @@ const taskGroups = ref<TaskGroup[]>([])
 const editForm = reactive({ title: '', description: '', groupId: '', startTime: '', deadlineTime: '', remindAt: '' })
 const initialRemindAt = ref('')
 const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
+const completingFatigueLevel = ref(3)
+const completingSubmitting = ref(false)
+const completeOpen = ref(false)
+const fatigueTrackingOn = computed(() => Boolean(store.fatigueProfile?.fatigueTrackingEnabled && store.fatigueProfile?.featureEnabled))
+const isActionable = computed(() => Boolean(task.value && ['active', 'unassigned'].includes(task.value.status)))
+const myAssignStatus = computed(() => task.value?.assignStatus || '')
+
+async function handleMyAction(action: 'accept' | 'reject') {
+  if (!task.value) return
+  const teamId = task.value.teamId
+  try {
+    await store.request(`/team-tasks/${task.value.id}/${action}`, { method: 'POST' })
+    await Promise.all([loadDetail(), store.loadAll(), store.loadTeamTasks(teamId)])
+    store.notify(action === 'accept' ? '已接受任务' : '已拒绝任务')
+  } catch (e: any) { store.notify(e.message || '操作失败') }
+}
+
+function handleComplete() {
+  if (!task.value) return
+  if (fatigueTrackingOn.value) {
+    completingFatigueLevel.value = 3
+    completeOpen.value = true
+    return
+  }
+  store.completeTeamTask(task.value).then(ok => { if (ok) loadDetail() })
+}
+
+async function submitComplete() {
+  if (!task.value) return
+  completingSubmitting.value = true
+  const ok = await store.completeTeamTask(task.value, completingFatigueLevel.value)
+  completingSubmitting.value = false
+  if (ok) { completeOpen.value = false; await loadDetail() }
+}
 async function aiOptimizeDesc() {
   if (!task.value?.description) return
   aiOptimizing.value = true; optimizedDesc.value = ''
@@ -249,6 +286,18 @@ onMounted(loadDetail)
         <div v-if="task.pendingReminders?.length">
           <span class="muted">下次提醒：</span><span>{{ formatTime(task.pendingReminders[0].remindAt) }}</span>
         </div>
+        <div v-if="task.assignStatus === 'completed' && task.completedFatigueLevel">
+          <span class="muted">我的完成疲劳：</span>
+          <span>{{ task.completedFatigueLevel }} · {{ fatigueNames[task.completedFatigueLevel - 1] }}{{ task.completedFatigueWeight ? ` · ${task.completedFatigueWeight} 点` : '' }}</span>
+          <span v-if="task.completedAt" class="muted" style="margin-left:8px">{{ formatTime(task.completedAt) }}</span>
+        </div>
+      </div>
+
+      <!-- 当前执行人的待处理操作 -->
+      <div v-if="isActionable && ['pending', 'accepted'].includes(myAssignStatus)" class="form-actions" style="margin-top:20px">
+        <button v-if="myAssignStatus === 'pending'" class="primary" @click="handleMyAction('accept')">接受任务</button>
+        <button v-if="myAssignStatus === 'accepted'" class="primary" @click="handleComplete">完成任务</button>
+        <button @click="handleMyAction('reject')">拒绝</button>
       </div>
 
       <!-- 执行人状态卡片 -->
@@ -323,6 +372,18 @@ onMounted(loadDetail)
           <label>提醒时间<input v-model="editForm.remindAt" type="datetime-local" /><small class="muted">清空后保存会取消所有执行人的未发送提醒。</small></label>
           <div class="form-actions"><button type="button" @click="editOpen = false">取消</button><button class="primary">保存</button></div>
         </form>
+      </section>
+    </div>
+
+    <div v-if="completeOpen" class="modal-backdrop" @click.self="completeOpen = false">
+      <section class="modal-panel" style="max-width: 480px;">
+        <div class="modal-head"><h2>完成团队任务</h2><button class="modal-close" aria-label="关闭" @click="completeOpen = false">✕</button></div>
+        <p class="muted" style="margin-bottom: 12px;">「{{ task?.title }}」完成后，请选择这项任务给你带来的实际疲劳程度。</p>
+        <ScheduleLevelControl v-model="completingFatigueLevel" label="完成疲劳度" :labels="fatigueNames" :weights="store.fatigueProfile?.weights" />
+        <div class="form-actions" style="margin-top:18px">
+          <button @click="completeOpen = false">取消</button>
+          <button class="primary" :disabled="completingSubmitting" @click="submitComplete">{{ completingSubmitting ? '完成中...' : '确认完成' }}</button>
+        </div>
       </section>
     </div>
   </section>

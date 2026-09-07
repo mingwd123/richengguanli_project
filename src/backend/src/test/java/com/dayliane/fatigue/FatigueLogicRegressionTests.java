@@ -294,6 +294,38 @@ class FatigueLogicRegressionTests {
     }
 
     @Test
+    void sameFatigueLevelUsesIndependentPerUserWeightsAndCapacity() {
+        long userA = register("15100001019", "Isolation User A");
+        long userB = register("15100001020", "Isolation User B");
+        LocalDate date = LocalDate.now(USER_ZONE);
+        fatigueService.profile(userA);
+        fatigueService.profile(userB);
+        jdbc.update("update user_fatigue_profile set level_5_weight=9.5 where user_id=?", userA);
+
+        long scheduleA = id(scheduleService.createSchedule(userA, Map.of(
+                "title", "Same level A",
+                "timeType", "deadline_task",
+                "deadlineTime", at(date, 10),
+                "fatigueLevel", 5)));
+        long scheduleB = id(scheduleService.createSchedule(userB, Map.of(
+                "title", "Same level B",
+                "timeType", "deadline_task",
+                "deadlineTime", at(date, 10),
+                "fatigueLevel", 5)));
+
+        assertThat(decimal(fatigueService.daily(userA, date), "plannedLoad")).isEqualByComparingTo("9.5");
+        assertThat(decimal(fatigueService.daily(userB, date), "plannedLoad")).isEqualByComparingTo("8");
+
+        scheduleService.setScheduleStatus(scheduleA, userA, "completed");
+        scheduleService.setScheduleStatus(scheduleB, userB, "completed");
+
+        assertThat(decimal(jdbc.queryForObject("select completed_fatigue_weight from schedule where id=?", BigDecimal.class, scheduleA))).isEqualByComparingTo("9.5");
+        assertThat(decimal(jdbc.queryForObject("select completed_fatigue_weight from schedule where id=?", BigDecimal.class, scheduleB))).isEqualByComparingTo("8");
+        assertThat(decimal(fatigueService.daily(userA, date), "completedLoad")).isEqualByComparingTo("9.5");
+        assertThat(decimal(fatigueService.daily(userB, date), "completedLoad")).isEqualByComparingTo("8");
+    }
+
+    @Test
     void surveySkipsRemainIndependentForTodayAndYesterday() {
         ZoneId zone = ZoneOffset.UTC;
         long userId = authService.register("15100001013", "Abc12345", "Two Day Skip User", zone.getId());

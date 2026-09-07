@@ -27,6 +27,12 @@ public class AiController {
         return ApiResponse.success(aiService.parseSchedule(userId, text(req), recordUsage(req)));
     }
 
+    @PostMapping("/schedules/arrange")
+    public ApiResponse<Map<String, Object>> arrangeSchedules(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(aiService.arrangeSchedules(userId, req == null || recordUsage(req)));
+    }
+
     @PostMapping("/team-tasks/breakdown")
     public ApiResponse<Map<String, Object>> breakdownTeamTask(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));

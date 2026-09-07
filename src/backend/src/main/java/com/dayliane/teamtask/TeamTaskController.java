@@ -151,9 +151,9 @@ public class TeamTaskController {
     }
 
     @PostMapping("/team-tasks/{id}/complete")
-    public ApiResponse<Map<String, Object>> complete(HttpServletRequest request, @PathVariable long id) {
+    public ApiResponse<Map<String, Object>> complete(HttpServletRequest request, @PathVariable long id, @RequestBody(required = false) Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(teamTaskService.teamTaskAssigneeTransition(id, userId, "completed", List.of("accepted")));
+        return ApiResponse.success(teamTaskService.completeTeamTask(id, userId, req == null ? Map.of() : req));
     }
 
     @PostMapping("/team-tasks/{id}/cancel")

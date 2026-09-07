@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowRight, CalendarCheck2, Eye, EyeOff, LoaderCircle, RefreshCw, Sparkles } from 'lucide-vue-next'
 import EmailVerificationFields from '../components/EmailVerificationFields.vue'
+import ComplianceFooter from '../components/ComplianceFooter.vue'
 import { useAppStore } from '../stores/app'
 import { isValidEmailCode, isValidOptionalPhone, isValidPassword } from '../utils/auth'
 
@@ -229,6 +230,8 @@ onBeforeUnmount(() => {
 
       <p class="hint demo-account">演示账号&nbsp; 13800138000&nbsp; /&nbsp; Abc12345</p>
     </section>
+
+    <ComplianceFooter />
 
     <div v-if="store.toast" class="toast login-toast" role="alert">{{ store.toast }}</div>
   </main>

@@ -5,7 +5,8 @@ import { useAppStore } from '../stores/app'
 import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
 import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
-import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, toSchedulePayload, urgency } from '../utils/helpers'
+import RepeatRuleEditor from '../components/RepeatRuleEditor.vue'
+import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, toSchedulePayload, urgency, describeRrule } from '../utils/helpers'
 import type { FatiguePreview, Schedule, TimeType } from '../types'
 
 const props = defineProps<{ id: string }>()
@@ -16,7 +17,8 @@ const store = useAppStore()
 const schedule = ref<Schedule | null>(null)
 const loading = ref(false)
 const editing = ref(false)
-const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
+const editScope = ref<'occurrence' | 'series'>('occurrence')
+const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] as string[] })
 const initialRemindAt = ref('')
 const editFatiguePreview = ref<FatiguePreview | null>(null)
 const openedFromHome = computed(() => route.query.from === 'home')
@@ -26,6 +28,8 @@ const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezon
 const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
 const reminderBaseTime = computed(() => editForm.timeType === 'deadline_task' ? editForm.deadlineTime : editForm.startTime)
 const reminderBaseLabel = computed(() => editForm.timeType === 'deadline_task' ? '截止时间' : '开始时间')
+const isRecurring = computed(() => Boolean(schedule.value?.seriesId || schedule.value?.rrule))
+const repeatLabel = computed(() => describeRrule(schedule.value?.rrule))
 const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
 const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
 
@@ -45,6 +49,8 @@ function fillEditForm(item: Schedule) {
   editForm.remindAt = toDatetimeLocal(item.pendingReminders?.[0]?.remindAt || '')
   editForm.urgencyLevel = item.urgencyLevel || 3
   editForm.fatigueLevel = item.fatigueLevel || 3
+  editForm.rrule = item.rrule || ''
+  editForm.excludedDates = [...(item.excludedDates || [])]
   initialRemindAt.value = editForm.remindAt
 }
 
@@ -53,6 +59,11 @@ async function loadDetail() {
   try {
     const data = await store.request<Schedule>(`/schedules/${props.id}`)
     schedule.value = data
+    const arrangeTo = typeof route.query.arrangeTo === 'string' ? route.query.arrangeTo : ''
+    if (arrangeTo) {
+      applyArrangedDate(arrangeTo)
+      store.notify('已按建议将日期调整为 ' + arrangeTo + '，请确认后保存')
+    }
   } catch (e: any) {
     store.notify(e.message || '加载日程详情失败')
   } finally {
@@ -63,6 +74,29 @@ async function loadDetail() {
 function openEdit() {
   if (!schedule.value) return
   fillEditForm(schedule.value)
+  editScope.value = 'occurrence'
+  editing.value = true
+}
+
+function replaceDatePart(datetimeLocal: string, date: string) {
+  if (!datetimeLocal || !date) return datetimeLocal
+  const idx = datetimeLocal.indexOf('T')
+  if (idx < 0) return `${date}T${editForm.startTime ? datetimeLocal.slice(11) : '09:00'}`
+  return `${date}${datetimeLocal.slice(idx)}`
+}
+
+function applyArrangedDate(date: string) {
+  if (!schedule.value) return
+  fillEditForm(schedule.value)
+  if (editForm.timeType === 'duration_task') {
+    editForm.startTime = replaceDatePart(editForm.startTime, date)
+    editForm.endTime = replaceDatePart(editForm.endTime, date)
+  } else if (editForm.timeType === 'deadline_task') {
+    editForm.deadlineTime = replaceDatePart(editForm.deadlineTime, date)
+  } else {
+    editForm.startTime = replaceDatePart(editForm.startTime, date)
+  }
+  editScope.value = 'occurrence'
   editing.value = true
 }
 
@@ -99,10 +133,13 @@ watch([
 
 async function saveEdit() {
   if (!schedule.value) return
-  const ok = await store.updateSchedule(schedule.value.id, {
-    ...editForm,
-    reminderChanged: editForm.remindAt !== initialRemindAt.value
-  })
+  const reminderChanged = editForm.remindAt !== initialRemindAt.value
+  let ok: boolean
+  if (isRecurring.value && editScope.value === 'series') {
+    ok = await store.updateSeries(schedule.value.seriesId || '', { ...editForm, reminderChanged })
+  } else {
+    ok = await store.editOccurrence(schedule.value.id, { ...editForm, reminderChanged })
+  }
   if (!ok) return
   editing.value = false
   await loadDetail()
@@ -117,6 +154,12 @@ async function handleDelete() {
   if (!schedule.value) return
   if (!confirm('确认删除此日程？')) return
   if (await store.deleteSchedule(Number(schedule.value.id))) await router.push(returnTarget.value)
+}
+
+async function handleDeleteSeries() {
+  if (!schedule.value?.seriesId) return
+  if (!confirm('确认删除整个重复系列？未完成实例将被删除，已完成实例保留。')) return
+  if (await store.deleteSeries(schedule.value.seriesId)) await router.push(returnTarget.value)
 }
 
 function goBack() {
@@ -187,6 +230,11 @@ onUnmounted(() => clearTimeout(previewTimer))
           <span class="muted">状态：</span>
           <span :class="['tag', schedule.status === 'completed' ? 'blue' : schedule.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(schedule.status) }}</span>
         </div>
+        <div v-if="isRecurring">
+          <span class="muted">重复：</span>
+          <span class="tag blue">{{ repeatLabel || '重复' }}</span>
+          <span v-if="schedule.occurrenceDate" class="muted" style="margin-left:8px">本次：{{ schedule.occurrenceDate }}</span>
+        </div>
         <div v-if="schedule.completedAt">
           <span class="muted">完成快照：</span>
           <span>于 {{ formatTime(schedule.completedAt) }} 完成，实际疲劳 {{ schedule.completedFatigueLevel || '-' }} · {{ schedule.completedFatigueWeight || '-' }} 点</span>
@@ -212,6 +260,7 @@ onUnmounted(() => clearTimeout(previewTimer))
         <button v-if="schedule.status === 'cancelled'" @click="handleAction('restore')">恢复</button>
         <button v-if="schedule.status === 'pending'" @click="handleAction('cancel')">取消日程</button>
         <button @click="handleDelete">删除</button>
+        <button v-if="isRecurring" class="danger" @click="handleDeleteSeries">删除整个系列</button>
       </div>
     </section>
 
@@ -224,6 +273,11 @@ onUnmounted(() => clearTimeout(previewTimer))
           <button class="modal-close" @click="editing = false">✕</button>
         </div>
         <form @submit.prevent="saveEdit">
+          <div v-if="isRecurring" class="edit-scope">
+            <span class="muted">编辑范围</span>
+            <label><input type="radio" value="occurrence" v-model="editScope" /> 仅此实例</label>
+            <label><input type="radio" value="series" v-model="editScope" /> 整个系列</label>
+          </div>
           <label>标题<input v-model="editForm.title" /></label>
           <label>描述<textarea v-model="editForm.description" rows="3" placeholder="可选"></textarea></label>
           <label>模块<select v-model="editForm.groupId"><option v-for="group in store.taskGroups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label>
@@ -238,6 +292,7 @@ onUnmounted(() => clearTimeout(previewTimer))
             <label>开始时间<input v-model="editForm.startTime" type="datetime-local" /></label>
             <label>结束时间<input v-model="editForm.endTime" type="datetime-local" /></label>
           </template>
+          <RepeatRuleEditor v-if="editScope === 'series'" v-model:rrule="editForm.rrule" v-model:excluded-dates="editForm.excludedDates" />
           <FatiguePreviewInline v-if="editFatiguePreview" :preview="editFatiguePreview" />
           <ReminderShortcutPicker v-model="editForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="reminderPresets" :timezone="userTimezone" @error="store.notify" />
           <small class="muted">保持原值不会替换提醒；清空后保存会取消未发送提醒。</small>

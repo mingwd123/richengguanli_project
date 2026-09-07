@@ -44,6 +44,10 @@ export interface Schedule {
   reminderCount: number
   pendingReminders: Reminder[]
   remindAt?: string
+  rrule?: string | null
+  seriesId?: string | null
+  occurrenceDate?: string | null
+  excludedDates?: string[]
   createdAt: string
   updatedAt: string
 }
@@ -98,6 +102,9 @@ export interface TeamTaskAssignee {
   assignStatus: AssignStatus
   assignRound: number
   isCurrent: boolean
+  completedAt?: string | null
+  completedFatigueLevel?: ScheduleLevel | null
+  completedFatigueWeight?: number | null
 }
 
 export interface TeamTaskReassignmentCandidate {
@@ -140,6 +147,12 @@ export interface TeamTask {
   reassignmentCandidates?: TeamTaskReassignmentCandidate[]
   events: TeamTaskEvent[]
   pendingReminders: Reminder[]
+  assigneeId?: number
+  assignStatus?: AssignStatus
+  assignRound?: number
+  completedAt?: string | null
+  completedFatigueLevel?: ScheduleLevel | null
+  completedFatigueWeight?: number | null
   createdAt: string
   updatedAt: string
 }
@@ -168,6 +181,9 @@ export interface MyTask {
   createdAt: string
   assigneeId?: number
   assignRound?: number
+  completedAt?: string | null
+  completedFatigueLevel?: ScheduleLevel | null
+  completedFatigueWeight?: number | null
 }
 
 export interface NotificationPreference {
@@ -356,6 +372,8 @@ export interface ScheduleForm {
   remindAt: string
   urgencyLevel: ScheduleLevel
   fatigueLevel: ScheduleLevel
+  rrule?: string
+  excludedDates?: string[]
 }
 
 export interface GroupForm {
@@ -441,6 +459,8 @@ export interface FatigueDailySummary {
   timezone: string
   plannedLoad: number
   completedLoad: number
+  teamCompletedLoad?: number
+  totalCompletedLoad?: number
   predictedScore: number
   actualLoadScore: number
   pendingCount: number
@@ -530,6 +550,40 @@ export interface FatigueHistory {
   disclaimer: string
 }
 
+export interface FatigueReportTrendItem {
+  localDate: string
+  plannedLoad: number
+  completedLoad: number
+  teamCompletedLoad: number
+  totalCompletedLoad: number
+  predictedScore: number
+  surveyScore: number | null
+}
+
+export interface FatigueReportSummary {
+  surveyScoreAvg: number | null
+  predictedScoreAvg: number | null
+  peakDay: string | null
+  peakDayLoad: number
+  personalPlannedLoad: number
+  personalCompletedLoad: number
+  teamCompletedLoad: number
+  totalCompletedLoad: number
+  personalScheduleCount: number
+  personalCompletedCount: number
+  personalCompletionRate: number | null
+}
+
+export interface FatigueReport {
+  period: 'week' | 'month'
+  dateFrom: string
+  dateTo: string
+  timezone: string
+  summary: FatigueReportSummary
+  trend: FatigueReportTrendItem[]
+  disclaimer: string
+}
+
 export interface FatigueProjection {
   plannedLoad: number
   capacity75: number
@@ -558,4 +612,32 @@ export interface FatiguePreview {
   dates: FatiguePreviewDate[]
   shouldWarn: boolean
   disclaimer: string
+}
+
+export interface SubscribeToken {
+  token: string
+  path: string
+}
+
+export interface AiArrangeSuggestion {
+  type: 'reschedule' | 'reorder' | 'split'
+  scheduleId?: number
+  title?: string
+  fromDate?: string
+  targetDate?: string
+  date?: string
+  scheduleIds?: number[]
+  titles?: string[]
+  fatigueLevel?: number
+  reason: string
+}
+
+export interface AiArrangeResult {
+  disabled: boolean
+  reason?: string
+  today?: string
+  horizonEnd?: string
+  capacity75?: number
+  highLoadDays?: string[]
+  suggestions?: AiArrangeSuggestion[]
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, BrainCircuit, Clock3, KeyRound, Mail, ShieldCheck, UserRound } from 'lucide-vue-next'
+import { ArrowLeft, BookOpen, BrainCircuit, CalendarDays, Clock3, Copy, KeyRound, Mail, RotateCcw, ShieldCheck, UserRound } from 'lucide-vue-next'
 import EmailVerificationFields from '../components/EmailVerificationFields.vue'
 import { useAppStore } from '../stores/app'
 import { normalizeEmail } from '../utils/auth'
@@ -12,12 +12,52 @@ const emailVerification = ref<InstanceType<typeof EmailVerificationFields> | nul
 const emailSubmitting = ref(false)
 const currentPasswordError = ref('')
 const emailForm = reactive({ email: '', code: '', currentPassword: '' })
+const icalSubscribing = ref(false)
 
 const hasEmail = computed(() => !!store.profile?.email)
 const emailPurpose = computed(() => hasEmail.value ? 'change_email' as const : 'bind_email' as const)
 
+onMounted(async () => {
+  try {
+    await store.loadSubscribeToken()
+  } catch {
+    // 订阅信息加载失败不阻断设置页
+  }
+})
+
 function goBack() {
   router.push('/profile')
+}
+
+function fullIcalUrl(path?: string) {
+  if (!path) return ''
+  if (/^https?:\/\//i.test(path)) return path
+  return `${location.origin}${path}`
+}
+
+async function copyIcalPath() {
+  const text = fullIcalUrl(store.subscribeTokenInfo?.path)
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    store.notify('订阅链接已复制')
+  } catch {
+    store.notify('复制失败，请手动复制')
+  }
+}
+
+async function resetIcalToken() {
+  if (icalSubscribing.value) return
+  if (!confirm('重置订阅 Token？重置后旧链接将立即失效，需要重新订阅。')) return
+  icalSubscribing.value = true
+  try {
+    await store.resetSubscribeToken()
+    store.notify('订阅 Token 已重置')
+  } catch (e: any) {
+    store.notify(e.message || '重置失败')
+  } finally {
+    icalSubscribing.value = false
+  }
 }
 
 async function sendProfileEmailCode(email: string) {
@@ -214,6 +254,33 @@ onBeforeUnmount(() => {
           <button class="primary">保存时区</button>
         </div>
       </form>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <span><CalendarDays :size="18" /></span>
+        <div>
+          <h2>日历订阅</h2>
+          <p>将个人日程和团队任务同步到系统日历</p>
+        </div>
+      </div>
+      <div class="ical-subscription">
+        <div class="subscription-path">
+          <input type="text" :value="fullIcalUrl(store.subscribeTokenInfo?.path)" readonly placeholder="加载订阅链接..." />
+          <button type="button" class="plain-button" :disabled="!store.subscribeTokenInfo?.path" @click="copyIcalPath">
+            <Copy :size="14" /> 复制
+          </button>
+        </div>
+        <div class="subscription-actions">
+          <button type="button" class="plain-button" :disabled="icalSubscribing" @click="resetIcalToken">
+            <RotateCcw :size="14" /> {{ icalSubscribing ? '重置中...' : '重置订阅 Token' }}
+          </button>
+          <p class="hint">重置后旧链接立即失效，请重新订阅。</p>
+        </div>
+        <RouterLink class="plain-button subscription-help-link" to="/profile/settings/calendar-subscription">
+          <BookOpen :size="14" /> 查看使用文档：各日历客户端订阅方法
+        </RouterLink>
+      </div>
     </section>
 
     <section class="settings-section">

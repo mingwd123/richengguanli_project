@@ -561,13 +561,28 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> adminCorrectAssigneeStatus(long adminId, long taskId, long assigneeId, String status, String ipAddress, String userAgent) {
-        if (!List.of("pending", "accepted", "rejected", "completed").contains(status)) throw new BusinessException(400, "status is invalid");
+        if (!List.of("pending", "accepted", "rejected").contains(status)) throw new BusinessException(400, "status is invalid");
         lockAdminTeamTask(taskId);
         Map<String, Object> before = adminTeamTaskDetail(taskId);
         if (!"approved".equals(before.get("approvalStatus"))) throw new BusinessException(400, "task assignment is not approved");
         if ("completed".equals(before.get("status"))) throw new BusinessException(400, "completed task cannot be reopened");
-        int updated = jdbc.update("update team_task_assignee set status=?, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, adminId, assigneeId, taskId);
-        if (updated == 0) throw new BusinessException(404, "assignee not found");
+        Long correctedUserId;
+        try {
+            correctedUserId = jdbc.queryForObject("select user_id from team_task_assignee where id=? and task_id=? and is_active=true", Long.class, assigneeId, taskId);
+        } catch (EmptyResultDataAccessException ex) {
+            throw new BusinessException(404, "assignee not found");
+        }
+        String timeColumn = "accepted".equals(status) ? "accepted_at" : "rejected".equals(status) ? "rejected_at" : null;
+        int updated;
+        if (timeColumn == null) {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, accepted_at=null, rejected_at=null, status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, adminId, assigneeId, taskId);
+        } else if ("accepted_at".equals(timeColumn)) {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, rejected_at=null, accepted_at=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, adminId, assigneeId, taskId);
+        } else {
+            updated = jdbc.update("update team_task_assignee set status=?, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null, accepted_at=null, rejected_at=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=? and task_id=? and is_active=true", status, adminId, assigneeId, taskId);
+        }
+        if (updated == 0) throw new BusinessException(409, "assignee not found or state has changed");
+        fatigueService.touchDataRevision(correctedUserId);
         recalculateAdminTeamTaskStatus(taskId);
         syncAdminAssigneeReminders(taskId, assigneeId, status);
         jdbc.update("insert into team_task_event (task_id, actor_id, actor_type, event_type, content) values (?,?,'admin',?,?)", taskId, adminId, "status_corrected", "管理员修正执行人状态为: " + statusLabel(status));

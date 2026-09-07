@@ -3,6 +3,8 @@ package com.dayliane.schedule;
 import com.dayliane.auth.AuthService;
 import com.dayliane.common.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -92,6 +94,49 @@ public class ScheduleController {
     public ApiResponse<Map<String, Object>> calendar(HttpServletRequest request, @RequestParam int year, @RequestParam int month) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
         return ApiResponse.success(scheduleService.calendar(userId, year, month));
+    }
+
+    @GetMapping("/ical")
+    public ResponseEntity<String> ical(@RequestParam String token) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("text/calendar;charset=UTF-8"))
+                .body(scheduleService.calendarIcs(token));
+    }
+
+    @GetMapping("/subscribe-token")
+    public ApiResponse<Map<String, Object>> subscribeToken(HttpServletRequest request) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.subscribeToken(userId));
+    }
+
+    @PostMapping("/subscribe-token")
+    public ApiResponse<Map<String, Object>> resetSubscribeToken(HttpServletRequest request) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.resetSubscribeToken(userId));
+    }
+
+    @PostMapping("/repeat")
+    public ApiResponse<Map<String, Object>> materializeRepeat(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.materializeRepeat(userId, req));
+    }
+
+    @PutMapping("/{id}/occurrence")
+    public ApiResponse<Map<String, Object>> editOccurrence(HttpServletRequest request, @PathVariable long id, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.editOccurrence(id, userId, req));
+    }
+
+    @PutMapping("/series/{seriesId}")
+    public ApiResponse<Map<String, Object>> updateSeries(HttpServletRequest request, @PathVariable String seriesId, @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.updateSeries(userId, seriesId, req));
+    }
+
+    @DeleteMapping("/series/{seriesId}")
+    public ApiResponse<Map<String, Object>> deleteSeries(HttpServletRequest request, @PathVariable String seriesId, @RequestBody(required = false) Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.deleteSeries(userId, seriesId, req == null ? Map.of() : req));
     }
 
     private ApiResponse<Map<String, Object>> status(HttpServletRequest request, long id, String status) {

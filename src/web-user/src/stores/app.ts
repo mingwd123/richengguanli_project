@@ -7,8 +7,8 @@ import type {
   LoginForm, RegisterForm, PageResult, UpcomingOverview, NotificationPreference,
   ScheduleListResult, ScheduleViewMode, SectionSummary, FatigueProfile,
   FatigueDailySummary, FatigueHistory, FatiguePreview, FatigueSurveyComparison,
-  FatigueSurveyToday, EmailCodeRequest, EmailCodeResponse, ResetPasswordForm,
-  UpdateEmailForm
+  FatigueSurveyToday, FatigueReport, EmailCodeRequest, EmailCodeResponse, ResetPasswordForm,
+  UpdateEmailForm, SubscribeToken, AiArrangeResult
 } from '../types'
 import {
   fetchRegistrationStatus,
@@ -104,13 +104,15 @@ export const useAppStore = defineStore('app', () => {
   const fatigueSurveyToday = ref<FatigueSurveyToday | null>(null)
   const fatigueSurveyComparison = ref<FatigueSurveyComparison | null>(null)
   const fatigueHistory = ref<FatigueHistory | null>(null)
+  const fatigueReport = ref<FatigueReport | null>(null)
+  const subscribeTokenInfo = ref<SubscribeToken | null>(null)
   const notificationDetail = ref<Notification | null>(null)
   const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, fatigueAlertEnabled: true, fatigueSurveyEnabled: true, quietStartTime: '', quietEndTime: '', reminderPresetMinutes: [15, 30, 60, 1440] })
   const selectedDate = ref('')
 
   const loginForm = reactive<LoginForm>({ account: '13800138000', password: 'Abc12345' })
   const registerForm = reactive<RegisterForm>({ email: '', code: '', phone: '', password: '', confirmPassword: '', nickname: '' })
-  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
+  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] })
   const groupForm = reactive({ name: '' })
   const teamForm = reactive({ name: '' })
   const taskForm = reactive<TaskForm>({ teamId: '', groupId: '', title: '', description: '', deadlineTime: '', startTime: '', remindAt: '', assigneeUserIds: [] })
@@ -611,6 +613,26 @@ export const useAppStore = defineStore('app', () => {
     } catch (e: any) { notify(e.message || '加载疲劳历史失败'); return null }
   }
 
+  async function loadFatigueReport(period: 'week' | 'month') {
+    fatigueReport.value = await request<FatigueReport>(`/fatigue/report?period=${period}`)
+    return fatigueReport.value
+  }
+
+  async function loadSubscribeToken() {
+    subscribeTokenInfo.value = await request<SubscribeToken>('/schedules/subscribe-token')
+    return subscribeTokenInfo.value
+  }
+
+  async function resetSubscribeToken() {
+    subscribeTokenInfo.value = await request<SubscribeToken>('/schedules/subscribe-token', { method: 'POST' })
+    return subscribeTokenInfo.value
+  }
+
+  async function arrangeSchedules() {
+    const result = await aiRequest('/schedules/arrange', {})
+    return result as unknown as AiArrangeResult
+  }
+
   async function previewFatigue(payload: Record<string, unknown>) {
     try {
       return await request<FatiguePreview>('/fatigue/preview', { method: 'POST', body: JSON.stringify(payload) })
@@ -831,7 +853,7 @@ export const useAppStore = defineStore('app', () => {
     if (!scheduleForm.groupId) return notify('请先创建分组')
     try {
       await request('/schedules', { method: 'POST', body: JSON.stringify(toSchedulePayload(scheduleForm, profile.value?.timezone)) })
-      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3 })
+      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] })
       if (taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       await loadAll(); scheduleModalOpen.value = false; notify('日程已创建')
     } catch (e: any) { notify(e.message) }
@@ -856,6 +878,34 @@ export const useAppStore = defineStore('app', () => {
   async function deleteSchedule(id: number) {
     try { await request(`/schedules/${id}`, { method: 'DELETE' }); await loadAll(); notify('日程已删除'); return true } catch (e: any) { notify(e.message); return false }
   }
+  async function editOccurrence(id: number, form: ScheduleForm & { reminderChanged?: boolean }) {
+    if (!form.title.trim()) return notify('请输入标题')
+    try {
+      const payload = toSchedulePayload(form, profile.value?.timezone)
+      if (form.reminderChanged && !form.remindAt) payload.remindAt = ''
+      if (!form.reminderChanged) delete payload.remindAt
+      delete payload.rrule
+      delete payload.excludedDates
+      await request(`/schedules/${id}/occurrence`, { method: 'PUT', body: JSON.stringify(payload) })
+      await loadAll(); notify('已更新此实例'); return true
+    } catch (e: any) { notify(e.message); return false }
+  }
+
+  async function updateSeries(seriesId: string, form: ScheduleForm & { reminderChanged?: boolean }) {
+    if (!form.title.trim()) return notify('请输入标题')
+    try {
+      const payload = toSchedulePayload(form, profile.value?.timezone)
+      if (form.reminderChanged && !form.remindAt) payload.remindAt = ''
+      if (!form.reminderChanged) delete payload.remindAt
+      await request(`/schedules/series/${seriesId}`, { method: 'PUT', body: JSON.stringify(payload) })
+      await loadAll(); notify('已更新整个系列'); return true
+    } catch (e: any) { notify(e.message); return false }
+  }
+
+  async function deleteSeries(seriesId: string) {
+    try { await request(`/schedules/series/${seriesId}`, { method: 'DELETE' }); await loadAll(); notify('已删除整个系列'); return true } catch (e: any) { notify(e.message); return false }
+  }
+
   async function moveScheduleGroup(id: number, groupId: number | string) {
     try { await request(`/schedules/${id}/move-group`, { method: 'PUT', body: JSON.stringify({ groupId: Number(groupId) }) }); await loadAll(); notify('日程已移动') } catch (e: any) { notify(e.message) }
   }
@@ -918,6 +968,17 @@ export const useAppStore = defineStore('app', () => {
       await request(`/team-tasks/${task.id}/${action}`, { method: 'POST' })
       await loadAll()
       await Promise.all([loadTeamTaskGroups(task.teamId), loadTeamTasks(task.teamId)])
+      loadFatigueDaily()
+      return true
+    } catch (e: any) { notify(e.message); return false }
+  }
+  async function completeTeamTask(task: MyTask, fatigueLevel?: number) {
+    try {
+      const body = fatigueLevel !== undefined ? JSON.stringify({ fatigueLevel }) : undefined
+      await request(`/team-tasks/${task.id}/complete`, { method: 'POST', body })
+      await loadAll()
+      await Promise.all([loadTeamTaskGroups(task.teamId), loadTeamTasks(task.teamId)])
+      loadFatigueDaily()
       return true
     } catch (e: any) { notify(e.message); return false }
   }
@@ -1057,14 +1118,14 @@ export const useAppStore = defineStore('app', () => {
   applyTheme()
 
   return {
-    token, refreshToken, theme, browserNoticePermission, toast, loading, registrationEnabled, registrationStatusLoading, registrationStatusChecked, registrationStatusError, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, notificationDetail, selectedDate,
+    token, refreshToken, theme, browserNoticePermission, toast, loading, registrationEnabled, registrationStatusLoading, registrationStatusChecked, registrationStatusError, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, fatigueReport, subscribeTokenInfo, notificationDetail, selectedDate,
     schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage, scheduleStatusCounts,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
-    request, aiRequest, openScheduleModal, closeScheduleModal, login, loadRegistrationStatus, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
-    createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
+    request, aiRequest, openScheduleModal, closeScheduleModal, login, loadRegistrationStatus, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, loadFatigueReport, loadSubscribeToken, resetSubscribeToken, arrangeSchedules, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
+    createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, editOccurrence, updateSeries, deleteSeries, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
-    createTeam, joinTeam, createTask, taskAction, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,
+    createTeam, joinTeam, createTask, taskAction, completeTeamTask, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,
     readAll, readNotification, markNotificationRead, openNotificationDetail, closeNotificationDetail, requestBrowserNoticePermission, saveNotificationPreferences, updateProfile, changePassword, updateTimezone,
     setMemberRole, removeMember, regenerateInviteCode, notify, primaryTime, toggleAiRecord, toggleTheme
   }

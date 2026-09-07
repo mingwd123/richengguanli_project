@@ -8,6 +8,7 @@ import CountdownPill from '../components/CountdownPill.vue'
 import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
 import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
+import RepeatRuleEditor from '../components/RepeatRuleEditor.vue'
 import { AlertTriangle, BatteryMedium, Clock3, Layers3, MoreHorizontal } from 'lucide-vue-next'
 import { formatTime, getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso } from '../utils/helpers'
 import type { FatiguePreview, Schedule, ScheduleForm, ScheduleViewMode } from '../types'
@@ -661,6 +662,7 @@ const contextItems = computed(() => {
           <template v-if="store.scheduleForm.timeType === 'duration_task'"><label>开始时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label><label>结束时间<input v-model="store.scheduleForm.endTime" type="datetime-local" /></label></template>
           <FatiguePreviewInline v-if="createFatiguePreview" :preview="createFatiguePreview" />
           <ReminderShortcutPicker v-model="store.scheduleForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel()" :presets="reminderPresets" :timezone="userTimezone" :disabled="store.loading" @error="store.notify" />
+          <RepeatRuleEditor v-model:rrule="store.scheduleForm.rrule" v-model:excluded-dates="store.scheduleForm.excludedDates" />
           <div class="form-actions"><button type="button" @click="store.closeScheduleModal()">取消</button><button class="primary" :disabled="store.loading">保存</button></div>
         </form>
       </section>

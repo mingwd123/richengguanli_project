@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
 import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
-import type { Schedule, ScheduleViewMode, TimelineItem } from '../types'
+import type { Schedule, ScheduleViewMode, TimelineItem, AiArrangeResult } from '../types'
 import { buildTodayScheduleSections } from '../utils/scheduleViews'
 import { timelinePresentationStatus, timelineTimeRange } from '../utils/timeline'
 import {
@@ -266,6 +266,24 @@ async function loadAiPlan() {
   } finally { aiLoadingPlan.value = false }
 }
 
+const arrangeResult = ref<AiArrangeResult | null>(null)
+const arrangeLoading = ref(false)
+function arrangeDisabledLabel(result: AiArrangeResult) {
+  return result.reason || 'AI 数据记录已关闭，排程建议已停用'
+}
+async function loadArrangeSuggestions() {
+  arrangeLoading.value = true
+  try {
+    arrangeResult.value = await store.arrangeSchedules()
+  } catch (e: any) {
+    arrangeResult.value = null
+    store.notify('排程建议加载失败: ' + (e.message || '服务不可用'))
+  } finally { arrangeLoading.value = false }
+}
+function applyReschedule(scheduleId: number, targetDate: string) {
+  router.push({ name: 'ScheduleDetail', params: { id: String(scheduleId) }, query: { from: 'home', arrangeTo: targetDate } })
+}
+
 function openCreateSchedule() {
   store.openScheduleModal()
   router.push('/schedules')
@@ -344,7 +362,7 @@ function openSchedules() {
       <div class="home-fatigue-copy">
         <strong>{{ fatigueSurveyPending ? '今天的实际疲劳还没有记录' : '个人日程负荷摘要' }}</strong>
         <span v-if="fatigueSurveyPending">完成一项个人日程后，记录你的真实感受可以帮助模型逐步校准。</span>
-        <span v-else>预计 {{ fatigueSummary?.predictedScore ?? 0 }} 分 · 已完成负荷 {{ fatigueSummary?.completedLoad ?? 0 }} · {{ fatigueSummary?.modelStage === 'default' ? '默认模型' : fatigueSummary?.modelStage || '校准中' }}</span>
+        <span v-else>预计 {{ fatigueSummary?.predictedScore ?? 0 }} 分 · 个人完成 {{ fatigueSummary?.completedLoad ?? 0 }}<template v-if="fatigueSummary?.trackingEnabled"> · 团队完成 {{ fatigueSummary?.teamCompletedLoad ?? 0 }} · 合计 {{ fatigueSummary?.totalCompletedLoad ?? 0 }}</template> · {{ fatigueSummary?.modelStage === 'default' ? '默认模型' : fatigueSummary?.modelStage || '校准中' }}</span>
       </div>
       <div class="home-fatigue-actions">
         <button v-if="fatigueNeedsAlertAction && !fatigueSurveyPending" class="plain-button" @click="suppressFatigueAlerts">今天不再提醒</button>
@@ -365,6 +383,54 @@ function openSchedules() {
         <p v-else class="ai-plan-placeholder">{{ aiLoadingPlan ? '正在整理今天的优先级...' : '生成一份结合日程与团队任务的今日建议' }}</p>
       </div>
       <ArrowRight v-if="!aiPlan && !aiLoadingPlan" class="ai-plan-arrow" :size="18" />
+    </section>
+
+    <section :class="['arrange-section', { loading: arrangeLoading, empty: arrangeResult && arrangeResult.disabled }]">
+      <div class="arrange-head">
+        <span class="ai-plan-icon"><Sparkles :size="20" /></span>
+        <div>
+          <span>AI 排程建议</span>
+          <p v-if="arrangeResult && !arrangeResult.disabled && arrangeResult.highLoadDays?.length">高负荷日：{{ arrangeResult.highLoadDays.join('、') }}，建议优化以下安排</p>
+          <p v-else>基于你的疲劳系数与近期负荷给出安排优化</p>
+        </div>
+        <button class="plain-button" :disabled="arrangeLoading" @click="loadArrangeSuggestions">
+          {{ arrangeLoading ? '分析中...' : arrangeResult && !arrangeResult.disabled ? '重新分析' : '分析' }}
+        </button>
+      </div>
+
+      <div v-if="arrangeResult && arrangeResult.disabled" class="arrange-disabled">
+        <AlertTriangle :size="16" />
+        <span>{{ arrangeDisabledLabel(arrangeResult) }}</span>
+      </div>
+
+      <template v-else-if="arrangeResult && arrangeResult.suggestions?.length">
+        <ul class="arrange-list">
+          <li v-for="(item, index) in arrangeResult.suggestions" :key="index">
+            <span :class="['arrange-type', item.type]">{{ item.type === 'reschedule' ? '调整日期' : item.type === 'reorder' ? '调整顺序' : '拆分任务' }}</span>
+            <div class="arrange-copy">
+              <template v-if="item.type === 'reschedule'">
+                <strong>{{ item.title }}</strong>
+                <span>建议从 {{ item.fromDate }} 挪到 <b>{{ item.targetDate }}</b></span>
+                <button class="plain-button arrange-apply" @click="applyReschedule(item.scheduleId!, item.targetDate!)">应用到草稿</button>
+              </template>
+              <template v-else-if="item.type === 'reorder'">
+                <span>{{ item.date }}：<b>{{ item.titles?.join(' → ') }}</b></span>
+                <span class="arrange-reason">{{ item.reason }}</span>
+              </template>
+              <template v-else>
+                <strong>{{ item.title }}</strong>
+                <span class="arrange-reason">{{ item.reason }}</span>
+              </template>
+            </div>
+          </li>
+        </ul>
+        <p class="arrange-hint">建议仅为草稿，不会自动写入日程。点击"应用到草稿"后请在编辑页确认保存。</p>
+      </template>
+
+      <div v-else-if="arrangeResult && !arrangeResult.disabled && !arrangeResult.suggestions?.length" class="arrange-empty">
+        <Check :size="16" />
+        <span>当前两周的负荷分布比较均衡，暂无需要调整的安排，继续保持节奏。</span>
+      </div>
     </section>
 
     <section class="upcoming-week">

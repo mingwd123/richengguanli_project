@@ -2,6 +2,9 @@ package com.dayliane.schedule;
 
 import com.dayliane.common.BusinessException;
 import com.dayliane.fatigue.FatigueService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -14,15 +17,21 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.security.SecureRandom;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @Service
 public class ScheduleService {
     private static final String COMPLETED_GROUP_SECTION = "__completed__";
     private static final List<String> LEVEL_SECTION_KEYS = List.of("5", "4", "3", "2", "1");
+    private static final Logger log = LoggerFactory.getLogger(ScheduleService.class);
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+    private static final DateTimeFormatter ICAL_UTC = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate named;
     private final FatigueService fatigueService;
@@ -48,6 +57,10 @@ public class ScheduleService {
         if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
         if ("duration_task".equals(timeType)) deadlineTime = null;
         validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
+        String rrule = nullableText(req.get("rrule"));
+        if (rrule != null) RruleExpander.validate(rrule);
+        String seriesId = rrule == null ? null : UUID.randomUUID().toString();
+        List<LocalDate> excludedDates = excludedDateList(req);
         Timestamp storedStartTime = startTime;
         Timestamp storedEndTime = endTime;
         Timestamp storedDeadlineTime = deadlineTime;
@@ -55,7 +68,7 @@ public class ScheduleService {
         int sortOrder = nextScheduleSortOrder(userId, longValue(group.get("id")));
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement("insert into schedule (user_id,title,description,group_id,group_name,sort_order,time_type,start_time,end_time,deadline_time,status,urgency_level,fatigue_level) values (?,?,?,?,?,?,?,?,?,?, 'pending',?,?)", new String[]{"id"});
+            PreparedStatement ps = con.prepareStatement("insert into schedule (user_id,title,description,group_id,group_name,sort_order,time_type,start_time,end_time,deadline_time,status,urgency_level,fatigue_level,rrule,series_id) values (?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", new String[]{"id"});
             ps.setLong(1, userId);
             ps.setString(2, title);
             ps.setString(3, text(req, "description"));
@@ -68,11 +81,22 @@ public class ScheduleService {
             ps.setTimestamp(10, storedDeadlineTime);
             ps.setInt(11, urgencyLevel);
             ps.setInt(12, fatigueLevel);
+            ps.setString(13, rrule);
+            ps.setString(14, seriesId);
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
         createScheduleReminders(userId, id, req);
+        ZoneId zone = userZone(userId);
         Map<String, Object> created = requireSchedule(id, userId);
+        if (seriesId != null) {
+            LocalDate occurrenceDate = plannedDate(created, zone);
+            jdbc.update("update schedule set occurrence_date=? where id=?", java.sql.Date.valueOf(occurrenceDate), id);
+            saveExcludedDates(seriesId, excludedDates);
+            LocalDate[] range = currentMonthRange(zone);
+            materializeRange(userId, seriesId, range[0], range[1], zone);
+        }
+        created = requireSchedule(id, userId);
         recalculateScheduleDates(userId, null, created);
         return created;
     }
@@ -103,6 +127,7 @@ public class ScheduleService {
         if (fromDate != null && toDate != null && toDate.isBefore(fromDate)) {
             throw new BusinessException(400, "dateTo must not be before dateFrom");
         }
+        ensureMonthsMaterialized(userId, fromDate, toDate, zone);
         if (quickScope && (blank(status) || "pending".equals(status))) {
             Instant quickNow = Instant.now();
             Instant quickStart = LocalDate.now(zone).atStartOfDay(zone).toInstant();
@@ -160,6 +185,8 @@ public class ScheduleService {
     }
 
     public List<Map<String, Object>> listSchedulesInRange(long userId, String status, Instant startInclusive, Instant endExclusive) {
+        ZoneId zone = userZone(userId);
+        ensureRangeMaterialized(userId, startInclusive, endExclusive, zone);
         String sql = scheduleSelect() + " from schedule where user_id=? and deleted_at is null"
                 + (status == null ? "" : " and status=?")
                 + " order by coalesce(deadline_time,end_time,start_time,created_at),id";
@@ -179,6 +206,7 @@ public class ScheduleService {
         } catch (DateTimeException ex) {
             throw new BusinessException(400, "year or month is invalid");
         }
+        materializeCalendarMonth(userId, year, month);
         ZoneId zone = userZone(userId);
         Instant monthStart = yearMonth.atDay(1).atStartOfDay(zone).toInstant();
         Instant nextMonthStart = yearMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant();
@@ -331,6 +359,10 @@ public class ScheduleService {
             item.put("pendingReminders", jdbc.query("select id,remind_at remindAt,status from reminder where user_id=? and target_type='schedule' and target_id=? and status='pending' order by remind_at", (rs, i) -> Map.of(
                     "id", rs.getLong("id"), "remindAt", iso(rs.getTimestamp("remindAt")), "status", rs.getString("status")), userId, id));
             addReminderSummary(item, userId);
+            Object seriesId = item.get("seriesId");
+            if (seriesId != null) {
+                item.put("excludedDates", excludedDatesFor(String.valueOf(seriesId)).stream().map(LocalDate::toString).toList());
+            }
             return item;
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "schedule not found");
@@ -448,6 +480,352 @@ public class ScheduleService {
         return requireSchedule(id, userId);
     }
 
+    // Recurring schedule methods
+
+    @Transactional
+    public Map<String, Object> editOccurrence(long id, long userId, Map<String, Object> req) {
+        if (req != null && (req.containsKey("rrule") || req.containsKey("seriesId") || req.containsKey("excludedDates"))) {
+            throw new BusinessException(400, "series fields cannot be changed on a single occurrence");
+        }
+        ZoneId zone = userZone(userId);
+        Map<String, Object> before = requireSchedule(id, userId);
+        LocalDate oldOccurrence = occurrenceDateOf(before);
+        Map<String, Object> updated = updateSchedule(id, userId, req);
+        String seriesId = nullableText(updated.get("seriesId"));
+        if (seriesId != null) {
+            LocalDate occurrence = plannedDate(updated, zone);
+            if (occurrence != null) {
+                int clash = count("select count(*) from schedule where series_id=? and occurrence_date=? and id<>? and user_id=? and deleted_at is null",
+                        seriesId, java.sql.Date.valueOf(occurrence), id, userId);
+                if (clash > 0) throw new BusinessException(409, "another occurrence already exists on this date");
+                jdbc.update("update schedule set occurrence_date=? where id=? and user_id=?", java.sql.Date.valueOf(occurrence), id, userId);
+                if (oldOccurrence != null && !oldOccurrence.equals(occurrence)) {
+                    try {
+                        jdbc.update("insert into schedule_series_exdate (series_id, excluded_date) values (?,?)", seriesId, java.sql.Date.valueOf(oldOccurrence));
+                    } catch (DataIntegrityViolationException ignored) {
+                        // 旧日期已排除，无需重复写入
+                    }
+                }
+            }
+        }
+        return requireSchedule(id, userId);
+    }
+
+    @Transactional
+    public Map<String, Object> updateSeries(long userId, String seriesId, Map<String, Object> req) {
+        Map<String, Object> seed = seedRow(seriesId, userId);
+        ZoneId zone = userZone(userId);
+        String title = req.containsKey("title") ? text(req, "title").trim() : String.valueOf(seed.get("title"));
+        String description = req.containsKey("description") ? text(req, "description") : Objects.toString(seed.get("description"), "");
+        String timeType = req.containsKey("timeType") ? text(req, "timeType") : String.valueOf(seed.get("timeType"));
+        int urgencyLevel = req.containsKey("urgencyLevel") ? scheduleLevel(req, "urgencyLevel", 3) : intValue(seed.get("urgencyLevel"), 3);
+        int fatigueLevel = req.containsKey("fatigueLevel") ? scheduleLevel(req, "fatigueLevel", 3) : intValue(seed.get("fatigueLevel"), 3);
+        String rrule = req.containsKey("rrule") ? nullableText(req.get("rrule")) : nullableText(seed.get("rrule"));
+        if (title.isBlank()) throw new BusinessException(400, "title is required");
+        if (!List.of("point_event", "deadline_task", "duration_task").contains(timeType)) throw new BusinessException(400, "timeType is invalid");
+        if (rrule != null) RruleExpander.validate(rrule);
+
+        Timestamp startTime = req.containsKey("startTime") ? parseEditableTime(req.get("startTime"), "startTime") : (Timestamp) seed.get("startTime");
+        Timestamp endTime = req.containsKey("endTime") ? parseEditableTime(req.get("endTime"), "endTime") : (Timestamp) seed.get("endTime");
+        Timestamp deadlineTime = req.containsKey("deadlineTime") ? parseEditableTime(req.get("deadlineTime"), "deadlineTime") : (Timestamp) seed.get("deadlineTime");
+        if ("point_event".equals(timeType)) { endTime = null; deadlineTime = null; }
+        if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
+        if ("duration_task".equals(timeType)) deadlineTime = null;
+        validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
+
+        Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolvePersonalTaskGroup(userId, req) : null;
+        Object seedGroupId = seed.get("groupId");
+        Long finalGroupId = group == null ? (seedGroupId instanceof Number n ? n.longValue() : null) : longValue(group.get("id"));
+        String finalGroupName = group == null ? (String) seed.get("groupName") : String.valueOf(group.get("name"));
+        int finalSortOrder = group == null ? intValue(seed.get("sortOrder"), 10) : nextScheduleSortOrder(userId, finalGroupId);
+
+        Map<String, Object> template = new LinkedHashMap<>();
+        template.put("title", title); template.put("description", description); template.put("groupId", finalGroupId);
+        template.put("groupName", finalGroupName); template.put("timeType", timeType);
+        template.put("startTime", startTime); template.put("endTime", endTime); template.put("deadlineTime", deadlineTime);
+        template.put("urgencyLevel", urgencyLevel); template.put("fatigueLevel", fatigueLevel); template.put("rrule", rrule);
+
+        List<LocalDate> excludedDates = req.containsKey("excludedDates") ? excludedDateList(req) : excludedDatesFor(seriesId);
+        saveExcludedDates(seriesId, excludedDates);
+        Set<LocalDate> excluded = new HashSet<>(excludedDates);
+
+        LocalDate today = LocalDate.now(zone);
+        long seedId = longValue(seed.get("id"));
+        LocalDate seedDate = (LocalDate) seed.get("occurrenceDate");
+
+        if ("completed".equals(seed.get("status"))) {
+            jdbc.update("update schedule set rrule=? where id=? and user_id=?", rrule, seedId, userId);
+        } else {
+            jdbc.update("update schedule set title=?, description=?, group_id=?, group_name=?, sort_order=?, time_type=?, start_time=?, end_time=?, deadline_time=?, urgency_level=?, fatigue_level=?, rrule=? where id=? and user_id=?",
+                    title, description, finalGroupId, finalGroupName, finalSortOrder, timeType, startTime, endTime, deadlineTime, urgencyLevel, fatigueLevel, rrule, seedId, userId);
+        }
+
+        Set<LocalDate> target = new LinkedHashSet<>();
+        if (rrule != null && seedDate != null) {
+            for (LocalDate date : RruleExpander.expand(rrule, seedDate, today, YearMonth.now(zone).atEndOfMonth())) {
+                if (!excluded.contains(date)) target.add(date);
+            }
+        }
+
+        List<Map<String, Object>> futureRows = jdbc.query(
+                "select id,occurrence_date occurrenceDate from schedule where series_id=? and user_id=? and deleted_at is null and status='pending' and occurrence_date>=? and id<>? order by occurrence_date,id",
+                (rs, i) -> Map.of("id", rs.getLong("id"), "occurrenceDate", rs.getDate("occurrenceDate").toLocalDate()),
+                seriesId, userId, java.sql.Date.valueOf(today), seedId);
+
+        Set<LocalDate> existing = new HashSet<>();
+        Set<LocalDate> affected = new LinkedHashSet<>();
+        for (Map<String, Object> row : futureRows) {
+            long id = longValue(row.get("id"));
+            LocalDate date = (LocalDate) row.get("occurrenceDate");
+            existing.add(date);
+            affected.add(date);
+            if (target.contains(date)) {
+                writeOccurrenceFields(id, userId, template, seedDate, date, zone);
+            } else {
+                detachAndRemoveOccurrence(id, userId);
+                cancelRestorableReminders("schedule", id, userId);
+            }
+        }
+        for (LocalDate date : target) {
+            if (existing.contains(date) || date.equals(seedDate)) continue;
+            insertOccurrence(userId, template, seedDate, seriesId, date, zone);
+            affected.add(date);
+        }
+        if (!affected.isEmpty()) fatigueService.recalculateDates(userId, List.copyOf(affected));
+        return Map.of("seriesId", seriesId, "seedId", seedId, "recreated", target.size());
+    }
+
+    @Transactional
+    public Map<String, Object> deleteSeries(long userId, String seriesId, Map<String, Object> req) {
+        seedRow(seriesId, userId);
+        ZoneId zone = userZone(userId);
+        List<Long> pendingIds = jdbc.queryForList("select id from schedule where series_id=? and user_id=? and deleted_at is null and status='pending'", Long.class, seriesId, userId);
+        Set<LocalDate> affected = new HashSet<>();
+        for (long id : pendingIds) {
+            LocalDate planned = plannedDate(requireSchedule(id, userId), zone);
+            if (planned != null) affected.add(planned);
+            detachAndRemoveOccurrence(id, userId);
+            cancelRestorableReminders("schedule", id, userId);
+        }
+        // Detach kept (completed / cancelled) instances so the series no longer re-materializes.
+        jdbc.update("update schedule set series_id=null, rrule=null, occurrence_date=null where series_id=? and user_id=? and deleted_at is null", seriesId, userId);
+        jdbc.update("delete from schedule_series_exdate where series_id=?", seriesId);
+        fatigueService.recalculateDates(userId, List.copyOf(affected));
+        return Map.of("seriesId", seriesId, "deleted", pendingIds.size());
+    }
+
+    @Transactional
+    public Map<String, Object> materializeRepeat(long userId, Map<String, Object> req) {
+        ZoneId zone = userZone(userId);
+        LocalDate from = YearMonth.now(zone).atDay(1);
+        LocalDate to = YearMonth.now(zone).atEndOfMonth();
+        Object raw = req == null ? null : req.get("seriesId");
+        if (raw != null && !String.valueOf(raw).isBlank()) {
+            String seriesId = String.valueOf(raw);
+            int created = materializeRange(userId, seriesId, from, to, zone);
+            return Map.of("seriesId", seriesId, "created", created);
+        }
+        int total = 0;
+        List<String> seriesIds = jdbc.queryForList("select distinct series_id from schedule where user_id=? and series_id is not null and rrule is not null and deleted_at is null", String.class, userId);
+        for (String seriesId : seriesIds) total += materializeRange(userId, seriesId, from, to, zone);
+        return Map.of("created", total);
+    }
+
+    private void ensureCurrentMonthMaterialized(long userId) {
+        ZoneId zone = userZone(userId);
+        materializeAllSeries(userId, YearMonth.now(zone).atDay(1), YearMonth.now(zone).atEndOfMonth(), zone);
+    }
+
+    public void materializeForRange(long userId, LocalDate from, LocalDate to) {
+        ZoneId zone = userZone(userId);
+        ensureMonthsMaterialized(userId, from, to, zone);
+    }
+
+    private void ensureMonthsMaterialized(long userId, LocalDate from, LocalDate to, ZoneId zone) {
+        YearMonth current = YearMonth.now(zone);
+        YearMonth guardMin = current.minusMonths(12);
+        YearMonth guardMax = current.plusMonths(24);
+        Set<YearMonth> months = new TreeSet<>();
+        months.add(current);
+        if (from != null || to != null) {
+            YearMonth start = from != null ? YearMonth.from(from) : current;
+            YearMonth end = to != null ? YearMonth.from(to) : current;
+            if (start.isAfter(end)) { YearMonth tmp = start; start = end; end = tmp; }
+            for (YearMonth m = start; !m.isAfter(end); m = m.plusMonths(1)) {
+                if (!m.isBefore(guardMin) && !m.isAfter(guardMax)) months.add(m);
+            }
+        }
+        for (YearMonth m : months) materializeAllSeries(userId, m.atDay(1), m.atEndOfMonth(), zone);
+    }
+
+    private void ensureRangeMaterialized(long userId, Instant startInclusive, Instant endExclusive, ZoneId zone) {
+        if (startInclusive == null || endExclusive == null) {
+            ensureCurrentMonthMaterialized(userId);
+            return;
+        }
+        LocalDate start = startInclusive.atZone(zone).toLocalDate();
+        LocalDate end = endExclusive.minusNanos(1).atZone(zone).toLocalDate();
+        ensureMonthsMaterialized(userId, start, end, zone);
+    }
+
+    private void materializeCalendarMonth(long userId, int year, int month) {
+        ZoneId zone = userZone(userId);
+        YearMonth yearMonth = YearMonth.of(year, month);
+        materializeAllSeries(userId, yearMonth.atDay(1), yearMonth.atEndOfMonth(), zone);
+    }
+
+    private void materializeAllSeries(long userId, LocalDate from, LocalDate to, ZoneId zone) {
+        List<String> seriesIds = jdbc.queryForList("select distinct series_id from schedule where user_id=? and series_id is not null and rrule is not null and deleted_at is null", String.class, userId);
+        for (String seriesId : seriesIds) materializeRange(userId, seriesId, from, to, zone);
+    }
+
+    private int materializeRange(long userId, String seriesId, LocalDate from, LocalDate toInclusive, ZoneId zone) {
+        Map<String, Object> seed = seedRowOrNull(seriesId, userId);
+        if (seed == null || blank(nullableText(seed.get("rrule")))) return 0;
+        String rrule = (String) seed.get("rrule");
+        LocalDate seedDate = (LocalDate) seed.get("occurrenceDate");
+        if (seedDate == null) return 0;
+        Map<String, Object> template = pendingTemplateOrNull(seriesId, userId);
+        if (template == null) template = seed;
+        Set<LocalDate> excluded = new HashSet<>(excludedDatesFor(seriesId));
+        Set<LocalDate> existing = existingOccurrenceDates(seriesId, userId);
+        List<LocalDate> candidates = RruleExpander.expand(rrule, seedDate, from, toInclusive);
+        List<LocalDate> newDates = new ArrayList<>();
+        for (LocalDate date : candidates) {
+            if (excluded.contains(date) || existing.contains(date)) continue;
+            newDates.add(date);
+        }
+        for (LocalDate date : newDates) insertOccurrence(userId, template, date, zone);
+        if (!newDates.isEmpty()) fatigueService.recalculateDates(userId, newDates);
+        return newDates.size();
+    }
+
+    private void insertOccurrence(long userId, Map<String, Object> seed, LocalDate date, ZoneId zone) {
+        insertOccurrence(userId, seed, (LocalDate) seed.get("occurrenceDate"), (String) seed.get("seriesId"), date, zone);
+    }
+
+    private void insertOccurrence(long userId, Map<String, Object> seed, LocalDate seedDate, String seriesId, LocalDate date, ZoneId zone) {
+        long dayDelta = ChronoUnit.DAYS.between(seedDate, date);
+        Timestamp start = shiftDays((Timestamp) seed.get("startTime"), dayDelta, zone);
+        Timestamp end = shiftDays((Timestamp) seed.get("endTime"), dayDelta, zone);
+        Timestamp deadline = shiftDays((Timestamp) seed.get("deadlineTime"), dayDelta, zone);
+        try {
+            jdbc.update("insert into schedule (user_id,title,description,group_id,group_name,sort_order,time_type,start_time,end_time,deadline_time,status,urgency_level,fatigue_level,rrule,series_id,occurrence_date) values (?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?,?)",
+                    userId, seed.get("title"), seed.get("description"), seed.get("groupId"), seed.get("groupName"),
+                    intValue(seed.get("sortOrder"), 10), seed.get("timeType"), start, end, deadline,
+                    intValue(seed.get("urgencyLevel"), 3), intValue(seed.get("fatigueLevel"), 3), seed.get("rrule"),
+                    seriesId, java.sql.Date.valueOf(date));
+        } catch (DataIntegrityViolationException ignored) {
+            // idempotent monthly injection: duplicate (series_id, occurrence_date) is a no-op
+        }
+    }
+
+    private void writeOccurrenceFields(long id, long userId, Map<String, Object> template, LocalDate seedDate, LocalDate date, ZoneId zone) {
+        long dayDelta = ChronoUnit.DAYS.between(seedDate, date);
+        Timestamp start = shiftDays((Timestamp) template.get("startTime"), dayDelta, zone);
+        Timestamp end = shiftDays((Timestamp) template.get("endTime"), dayDelta, zone);
+        Timestamp deadline = shiftDays((Timestamp) template.get("deadlineTime"), dayDelta, zone);
+        jdbc.update("update schedule set title=?, description=?, group_id=?, group_name=?, time_type=?, start_time=?, end_time=?, deadline_time=?, urgency_level=?, fatigue_level=?, rrule=?, occurrence_date=? where id=? and user_id=?",
+                template.get("title"), template.get("description"), template.get("groupId"), template.get("groupName"),
+                template.get("timeType"), start, end, deadline,
+                intValue(template.get("urgencyLevel"), 3), intValue(template.get("fatigueLevel"), 3), template.get("rrule"),
+                java.sql.Date.valueOf(date), id, userId);
+    }
+
+    private void detachAndRemoveOccurrence(long id, long userId) {
+        jdbc.update("update schedule set deleted_at=utc_timestamp(), deleted_by=? where id=? and user_id=?", userId, id, userId);
+    }
+
+    private static LocalDate[] currentMonthRange(ZoneId zone) {
+        YearMonth yearMonth = YearMonth.now(zone);
+        return new LocalDate[]{yearMonth.atDay(1), yearMonth.atEndOfMonth()};
+    }
+
+    private static Timestamp shiftDays(Timestamp timestamp, long dayDelta, ZoneId zone) {
+        if (timestamp == null) return null;
+        return Timestamp.from(timestamp.toInstant().atZone(zone).toLocalDateTime().plusDays(dayDelta).atZone(zone).toInstant());
+    }
+
+    private Map<String, Object> seedRow(String seriesId, long userId) {
+        Map<String, Object> seed = seedRowOrNull(seriesId, userId);
+        if (seed == null) throw new BusinessException(404, "series not found");
+        return seed;
+    }
+
+    private Map<String, Object> seedRowOrNull(String seriesId, long userId) {
+        return scheduleTemplateRow(seriesId, userId, null);
+    }
+
+    private Map<String, Object> pendingTemplateOrNull(String seriesId, long userId) {
+        return scheduleTemplateRow(seriesId, userId, "pending");
+    }
+
+    private Map<String, Object> scheduleTemplateRow(String seriesId, long userId, String status) {
+        StringBuilder sql = new StringBuilder(
+                "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,rrule,series_id seriesId,occurrence_date occurrenceDate from schedule where series_id=? and user_id=? and deleted_at is null");
+        List<Object> args = new ArrayList<>(List.of(seriesId, userId));
+        if (status != null) {
+            sql.append(" and status=?");
+            args.add(status);
+        }
+        sql.append(" order by occurrence_date asc, id asc limit 1");
+        List<Map<String, Object>> rows = jdbc.query(sql.toString(),
+                (rs, i) -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", rs.getLong("id")); m.put("userId", rs.getLong("userId"));
+                    m.put("title", rs.getString("title")); m.put("description", rs.getString("description"));
+                    m.put("groupId", rs.getObject("groupId")); m.put("groupName", rs.getString("groupName"));
+                    m.put("sortOrder", rs.getInt("sortOrder")); m.put("timeType", rs.getString("timeType"));
+                    m.put("startTime", rs.getTimestamp("startTime")); m.put("endTime", rs.getTimestamp("endTime"));
+                    m.put("deadlineTime", rs.getTimestamp("deadlineTime")); m.put("status", rs.getString("status"));
+                    m.put("urgencyLevel", rs.getInt("urgencyLevel")); m.put("fatigueLevel", rs.getInt("fatigueLevel"));
+                    m.put("rrule", rs.getString("rrule")); m.put("seriesId", rs.getString("seriesId"));
+                    java.sql.Date occurrence = rs.getDate("occurrenceDate");
+                    m.put("occurrenceDate", occurrence == null ? null : occurrence.toLocalDate());
+                    return m;
+                }, args.toArray());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private Set<LocalDate> existingOccurrenceDates(String seriesId, long userId) {
+        Set<LocalDate> dates = new HashSet<>();
+        jdbc.query("select occurrence_date from schedule where series_id=? and user_id=? and deleted_at is null and occurrence_date is not null",
+                rs -> { dates.add(rs.getDate(1).toLocalDate()); }, seriesId, userId);
+        return dates;
+    }
+
+    private List<LocalDate> excludedDatesFor(String seriesId) {
+        List<LocalDate> dates = new ArrayList<>();
+        jdbc.query("select excluded_date from schedule_series_exdate where series_id=?", rs -> { dates.add(rs.getDate(1).toLocalDate()); }, seriesId);
+        return dates;
+    }
+
+    private void saveExcludedDates(String seriesId, List<LocalDate> dates) {
+        jdbc.update("delete from schedule_series_exdate where series_id=?", seriesId);
+        for (LocalDate date : dates) {
+            try {
+                jdbc.update("insert into schedule_series_exdate (series_id, excluded_date) values (?,?)", seriesId, java.sql.Date.valueOf(date));
+            } catch (DataIntegrityViolationException ignored) {
+                // already excluded
+            }
+        }
+    }
+
+    private List<LocalDate> excludedDateList(Map<String, Object> req) {
+        Object raw = req == null ? null : req.get("excludedDates");
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> list)) throw new BusinessException(400, "excludedDates is invalid");
+        List<LocalDate> result = new ArrayList<>();
+        for (Object value : list) {
+            try {
+                result.add(LocalDate.parse(String.valueOf(value)));
+            } catch (DateTimeException ex) {
+                throw new BusinessException(400, "excludedDates is invalid");
+            }
+        }
+        return result;
+    }
+
     // Task group methods
 
     public Map<String, Object> listTaskGroups(long userId, String scope) {
@@ -518,12 +896,14 @@ public class ScheduleService {
             m.put("fatigueLevel", fatigue); m.put("fatigueLabel", fatigueLabel(fatigue)); m.put("fatigueWeight", fatigueWeight(fatigue));
             m.put("completedAt", iso(rs.getTimestamp("completedAt"))); m.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
             m.put("completedFatigueWeight", rs.getObject("completedFatigueWeight"));
+            m.put("rrule", rs.getString("rrule")); m.put("seriesId", rs.getString("seriesId"));
+            java.sql.Date occurrence = rs.getDate("occurrenceDate"); m.put("occurrenceDate", occurrence == null ? null : occurrence.toLocalDate().toString());
             m.put("status", rs.getString("status")); m.put("createdAt", iso(rs.getTimestamp("createdAt"))); return m;
         };
     }
 
     private static String scheduleSelect() {
-        return "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,created_at createdAt";
+        return "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,rrule,series_id seriesId,occurrence_date occurrenceDate,created_at createdAt";
     }
 
     private Map<Long, Integer> personalGroupOrder(long userId) {
@@ -863,6 +1243,14 @@ public class ScheduleService {
         return instant == null ? null : instant.atZone(zone).toLocalDate();
     }
 
+    private static LocalDate occurrenceDateOf(Map<String, Object> item) {
+        Object raw = item == null ? null : item.get("occurrenceDate");
+        if (raw == null) return null;
+        String text = String.valueOf(raw).trim();
+        if (text.isEmpty()) return null;
+        return LocalDate.parse(text);
+    }
+
     private static LocalDate completedDate(Map<String, Object> item, ZoneId zone) {
         Instant instant = instantValue(item.get("completedAt"));
         return instant == null ? null : instant.atZone(zone).toLocalDate();
@@ -974,4 +1362,194 @@ public class ScheduleService {
     private static Timestamp parseRequiredTime(Object value, String field) { Timestamp parsed = parseTime(String.valueOf(value)); if (parsed == null) throw new BusinessException(400, field + " is invalid"); return parsed; }
     private static void validateScheduleTimes(String timeType, Timestamp startTime, Timestamp endTime, Timestamp deadlineTime) { if ("point_event".equals(timeType) && startTime == null) throw new BusinessException(400, "startTime is required"); if ("deadline_task".equals(timeType) && deadlineTime == null) throw new BusinessException(400, "deadlineTime is required"); if ("duration_task".equals(timeType) && (startTime == null || endTime == null)) throw new BusinessException(400, "startTime and endTime are required"); if (startTime != null && endTime != null && endTime.before(startTime)) throw new BusinessException(400, "endTime must not be before startTime"); }
     private static Timestamp parseTime(String value) { if (value == null || value.isBlank()) return null; try { return Timestamp.from(OffsetDateTime.parse(value).toInstant()); } catch (Exception ignored) {} try { return Timestamp.valueOf(LocalDateTime.parse(value)); } catch (Exception ignored) {} return null; }
+
+    public Map<String, Object> subscribeToken(long userId) {
+        String token = currentSubscribeToken(userId);
+        if (token == null) {
+            token = generateSubscribeToken();
+            jdbc.update("update `user` set subscribe_token=? where id=?", token, userId);
+        }
+        return Map.of("token", token, "path", "/api/v1/schedules/ical?token=" + token);
+    }
+
+    public Map<String, Object> resetSubscribeToken(long userId) {
+        String token = generateSubscribeToken();
+        jdbc.update("update `user` set subscribe_token=? where id=?", token, userId);
+        return Map.of("token", token, "path", "/api/v1/schedules/ical?token=" + token);
+    }
+
+    public String calendarIcs(String token) {
+        Long userId = userIdBySubscribeToken(token);
+        if (userId == null) throw new BusinessException(404, "subscription token is invalid");
+        log.info("iCal subscription served for user {} (token {})", userId, maskToken(token));
+        ZoneId zone = userZone(userId);
+        StringBuilder ics = new StringBuilder(2048);
+        ics.append("BEGIN:VCALENDAR\r\n")
+                .append("VERSION:2.0\r\n")
+                .append("PRODID:-//Dayliane//Schedule//CN\r\n")
+                .append("CALSCALE:GREGORIAN\r\n")
+                .append("METHOD:PUBLISH\r\n")
+                .append("X-WR-CALNAME:Dayliane\r\n")
+                .append("X-WR-TIMEZONE:").append(zone.getId()).append("\r\n");
+
+        String scheduleSql = "select id,title,description,time_type,start_time,end_time,deadline_time,rrule,series_id,occurrence_date from schedule where user_id=? and deleted_at is null and status='pending'";
+        Map<String, List<Map<String, Object>>> seriesGroups = new LinkedHashMap<>();
+        for (Map<String, Object> row : jdbc.queryForList(scheduleSql, userId)) {
+            if (blank(nullableText(row.get("series_id"))) || blank(nullableText(row.get("rrule")))) {
+                Timestamp start = ts(row.get("start_time"));
+                Timestamp end = ts(row.get("end_time"));
+                Timestamp deadline = ts(row.get("deadline_time"));
+                String timeType = String.valueOf(row.get("time_type"));
+                Timestamp dtstart = "deadline_task".equals(timeType) ? deadline : start;
+                Timestamp dtend = "duration_task".equals(timeType) ? end : null;
+                if (dtstart == null) continue;
+                appendVevent(ics, "schedule-" + row.get("id") + "@dayliane", String.valueOf(row.get("title")),
+                        nullableStr(row.get("description")), dtstart, dtend);
+                continue;
+            }
+            seriesGroups.computeIfAbsent(String.valueOf(row.get("series_id")), k -> new ArrayList<>()).add(row);
+        }
+        for (Map.Entry<String, List<Map<String, Object>>> entry : seriesGroups.entrySet()) {
+            appendRecurringSeries(ics, userId, entry.getKey(), entry.getValue());
+        }
+
+        String teamTaskSql = "select tt.id,tt.title,tt.description,tt.start_time,tt.deadline_time from team_task tt "
+                + "join team_task_assignee a on a.task_id=tt.id and a.user_id=? and a.is_active=true "
+                + "where tt.deleted_at is null and tt.approval_status='approved' and tt.status not in ('completed','cancelled') and a.status in ('pending','accepted')";
+        for (Map<String, Object> row : jdbc.queryForList(teamTaskSql, userId)) {
+            Timestamp start = ts(row.get("start_time"));
+            Timestamp deadline = ts(row.get("deadline_time"));
+            Timestamp dtstart = start != null ? start : deadline;
+            if (dtstart == null) continue;
+            Timestamp dtend = (start != null && deadline != null && !deadline.equals(start)) ? deadline : null;
+            appendVevent(ics, "team-task-" + row.get("id") + "@dayliane", String.valueOf(row.get("title")),
+                    nullableStr(row.get("description")), dtstart, dtend);
+        }
+
+        ics.append("END:VCALENDAR\r\n");
+        return ics.toString();
+    }
+
+    private String currentSubscribeToken(long userId) {
+        List<String> tokens = jdbc.queryForList("select subscribe_token from `user` where id=?", String.class, userId);
+        return tokens.isEmpty() ? null : tokens.get(0);
+    }
+
+    private Long userIdBySubscribeToken(String token) {
+        if (blank(token)) return null;
+        List<Long> ids = jdbc.queryForList("select id from `user` where subscribe_token=? and deleted_at is null", Long.class, token);
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    private static String generateSubscribeToken() {
+        byte[] bytes = new byte[32];
+        SECURE_RANDOM.nextBytes(bytes);
+        StringBuilder sb = new StringBuilder(64);
+        for (byte b : bytes) sb.append(String.format("%02x", b & 0xff));
+        return sb.toString();
+    }
+
+    private static String maskToken(String token) {
+        if (token == null || token.length() < 8) return "****";
+        return token.substring(0, 4) + "..." + token.substring(token.length() - 4);
+    }
+
+    private void appendRecurringSeries(StringBuilder ics, long userId, String seriesId, List<Map<String, Object>> occurrences) {
+        Map<String, Object> seed = seedRowOrNull(seriesId, userId);
+        if (seed == null || blank(nullableText(seed.get("rrule")))) {
+            for (Map<String, Object> row : occurrences) {
+                Timestamp start = ts(row.get("start_time"));
+                Timestamp end = ts(row.get("end_time"));
+                Timestamp deadline = ts(row.get("deadline_time"));
+                String timeType = String.valueOf(row.get("time_type"));
+                Timestamp dtstart = "deadline_task".equals(timeType) ? deadline : start;
+                Timestamp dtend = "duration_task".equals(timeType) ? end : null;
+                if (dtstart != null) appendVevent(ics, "schedule-" + row.get("id") + "@dayliane", String.valueOf(row.get("title")), nullableStr(row.get("description")), dtstart, dtend);
+            }
+            return;
+        }
+        String rrule = (String) seed.get("rrule");
+        LocalDate seedDate = (LocalDate) seed.get("occurrenceDate");
+        Timestamp seedStart = (Timestamp) seed.get("startTime");
+        Timestamp seedEnd = (Timestamp) seed.get("endTime");
+        Timestamp seedDeadline = (Timestamp) seed.get("deadlineTime");
+        String seedTimeType = String.valueOf(seed.get("timeType"));
+        Timestamp dtstart = "deadline_task".equals(seedTimeType) ? seedDeadline : seedStart;
+        Timestamp dtend = "duration_task".equals(seedTimeType) ? seedEnd : null;
+        if (dtstart != null && seedDate != null) {
+            appendRecurringVevent(ics, "series-" + seriesId + "@dayliane", String.valueOf(seed.get("title")),
+                    nullableStr(seed.get("description")), dtstart, dtend, rrule, excludedDatesFor(seriesId));
+        }
+        Set<LocalDate> scheduled = new HashSet<>();
+        if (seedDate != null) {
+            scheduled.add(seedDate);
+            try {
+                scheduled.addAll(RruleExpander.expand(rrule, seedDate, seedDate, seedDate.plusMonths(48)));
+            } catch (BusinessException ignored) {
+                // RRULE 无法展开时仅按已物化实例导出
+            }
+        }
+        scheduled.removeAll(new HashSet<>(excludedDatesFor(seriesId)));
+        for (Map<String, Object> row : occurrences) {
+            LocalDate occurrenceDate = toLocalDate(row.get("occurrence_date"));
+            if (occurrenceDate == null || scheduled.contains(occurrenceDate)) continue;
+            Timestamp start = ts(row.get("start_time"));
+            Timestamp end = ts(row.get("end_time"));
+            Timestamp deadline = ts(row.get("deadline_time"));
+            String timeType = String.valueOf(row.get("time_type"));
+            Timestamp dt = "deadline_task".equals(timeType) ? deadline : start;
+            Timestamp de = "duration_task".equals(timeType) ? end : null;
+            if (dt == null) continue;
+            appendVevent(ics, "schedule-" + row.get("id") + "@dayliane", String.valueOf(row.get("title")),
+                    nullableStr(row.get("description")), dt, de);
+        }
+    }
+
+    private static void appendRecurringVevent(StringBuilder ics, String uid, String summary, String description, Timestamp dtstart, Timestamp dtend, String rrule, List<LocalDate> exdates) {
+        ics.append("BEGIN:VEVENT\r\n")
+                .append("UID:").append(icalText(uid)).append("\r\n")
+                .append("DTSTAMP:").append(ICAL_UTC.format(Instant.now())).append("\r\n")
+                .append("DTSTART:").append(ICAL_UTC.format(dtstart.toInstant())).append("\r\n");
+        if (dtend != null) ics.append("DTEND:").append(ICAL_UTC.format(dtend.toInstant())).append("\r\n");
+        ics.append("RRULE:").append(icalText(rrule)).append("\r\n");
+        if (exdates != null && !exdates.isEmpty()) {
+            ics.append("EXDATE:");
+            for (int i = 0; i < exdates.size(); i++) {
+                if (i > 0) ics.append(',');
+                ics.append(exdates.get(i).format(DateTimeFormatter.BASIC_ISO_DATE)).append("T000000Z");
+            }
+            ics.append("\r\n");
+        }
+        ics.append("SUMMARY:").append(icalText(summary)).append("\r\n");
+        if (description != null && !description.isBlank()) ics.append("DESCRIPTION:").append(icalText(description)).append("\r\n");
+        ics.append("END:VEVENT\r\n");
+    }
+
+    private static LocalDate toLocalDate(Object value) {
+        if (value instanceof java.sql.Date d) return d.toLocalDate();
+        if (value instanceof LocalDate d) return d;
+        if (value instanceof Timestamp t) return t.toLocalDateTime().toLocalDate();
+        return null;
+    }
+
+    private static void appendVevent(StringBuilder ics, String uid, String summary, String description, Timestamp dtstart, Timestamp dtend) {
+        ics.append("BEGIN:VEVENT\r\n")
+                .append("UID:").append(icalText(uid)).append("\r\n")
+                .append("DTSTAMP:").append(ICAL_UTC.format(Instant.now())).append("\r\n")
+                .append("DTSTART:").append(ICAL_UTC.format(dtstart.toInstant())).append("\r\n");
+        if (dtend != null) ics.append("DTEND:").append(ICAL_UTC.format(dtend.toInstant())).append("\r\n");
+        ics.append("SUMMARY:").append(icalText(summary)).append("\r\n");
+        if (!description.isBlank()) ics.append("DESCRIPTION:").append(icalText(description)).append("\r\n");
+        ics.append("END:VEVENT\r\n");
+    }
+
+    private static String icalText(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+                .replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n");
+    }
+
+    private static Timestamp ts(Object value) { return value instanceof Timestamp t ? t : null; }
+
+    private static String nullableStr(Object value) { return value == null ? "" : String.valueOf(value); }
 }
