@@ -137,6 +137,11 @@ public class AiService {
         return arrangeSchedules(userId, recordUsage, null);
     }
 
+    /** Server-side preference used by the controller; never trust a client flag. */
+    public boolean aiRecordEnabled(long userId) {
+        return !Boolean.FALSE.equals(userService.userView(userId).get("aiRecordEnabled"));
+    }
+
     public Map<String, Object> arrangeSchedules(long userId, boolean recordUsage, LocalDate anchor) {
         if (!recordUsage) {
             Map<String, Object> disabled = new LinkedHashMap<>();

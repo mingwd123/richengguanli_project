@@ -191,6 +191,104 @@ class ScheduleRepeatTests {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void excludedDtstartIsHiddenAndCanBeRestored() {
+        ZoneId zone = ZoneId.of("Asia/Shanghai");
+        long userId = newUser("15100010009", zone);
+        LocalDate today = LocalDate.now(zone);
+
+        Map<String, Object> created = scheduleService.createSchedule(userId, Map.of(
+                "title", "Hidden first occurrence",
+                "timeType", "deadline_task",
+                "deadlineTime", today.atTime(12, 0).atZone(zone).toInstant().toString(),
+                "rrule", "FREQ=DAILY",
+                "excludedDates", List.of(today.toString())
+        ));
+        long seedId = ((Number) created.get("id")).longValue();
+        String seriesId = String.valueOf(created.get("seriesId"));
+
+        Map<String, Object> hidden = scheduleService.listSchedules(userId, 1, 100, null, null, null,
+                today.toString(), today.toString());
+        assertThat((List<Map<String, Object>>) hidden.get("list"))
+                .extracting(item -> item.get("id"))
+                .doesNotContain(seedId);
+        assertThat(scheduleService.listSchedulesInRange(userId, null,
+                today.atStartOfDay(zone).toInstant(), today.plusDays(1).atStartOfDay(zone).toInstant()))
+                .extracting(item -> item.get("id"))
+                .doesNotContain(seedId);
+        assertThat(jdbc.queryForObject("select status from schedule where id=?", String.class, seedId)).isEqualTo("cancelled");
+        assertThat(jdbc.queryForObject("select occurrence_date from schedule where id=?", java.sql.Date.class, seedId).toLocalDate())
+                .isEqualTo(today);
+
+        scheduleService.updateSeries(userId, seriesId, Map.of("excludedDates", List.of()));
+
+        assertThat(jdbc.queryForObject("select status from schedule where id=?", String.class, seedId)).isEqualTo("pending");
+        assertThat(count("select count(*) from schedule_series_exdate where series_id=?", seriesId)).isZero();
+        Map<String, Object> restored = scheduleService.listSchedules(userId, 1, 100, null, null, null,
+                today.toString(), today.toString());
+        assertThat((List<Map<String, Object>>) restored.get("list"))
+                .extracting(item -> item.get("id"))
+                .contains(seedId);
+    }
+
+    @Test
+    void deletedOccurrenceCanBeMaterializedAgainAfterExdateRemoval() {
+        ZoneId zone = ZoneId.of("Asia/Shanghai");
+        long userId = newUser("15100010010", zone);
+        Map<String, Object> created = createDailySeries(userId, zone);
+        String seriesId = String.valueOf(created.get("seriesId"));
+        LocalDate nextMonthStart = LocalDate.now(zone).plusMonths(1).withDayOfMonth(1);
+        LocalDate nextMonthEnd = nextMonthStart.with(java.time.temporal.TemporalAdjusters.lastDayOfMonth());
+        scheduleService.materializeForRange(userId, nextMonthStart, nextMonthEnd);
+
+        Long occurrenceId = jdbc.queryForObject(
+                "select id from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                Long.class, seriesId, java.sql.Date.valueOf(nextMonthStart));
+        scheduleService.deleteSchedule(occurrenceId, userId);
+
+        assertThat(count("select count(*) from schedule where id=? and series_id is null and occurrence_date is null and deleted_at is not null", occurrenceId)).isOne();
+        assertThat(count("select count(*) from schedule_series_exdate where series_id=? and excluded_date=?",
+                seriesId, java.sql.Date.valueOf(nextMonthStart))).isOne();
+
+        scheduleService.updateSeries(userId, seriesId, Map.of("excludedDates", List.of()));
+        scheduleService.materializeForRange(userId, nextMonthStart, nextMonthEnd);
+
+        assertThat(count("select count(*) from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                seriesId, java.sql.Date.valueOf(nextMonthStart))).isOne();
+        Long restoredId = jdbc.queryForObject(
+                "select id from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                Long.class, seriesId, java.sql.Date.valueOf(nextMonthStart));
+        assertThat(restoredId).isNotEqualTo(occurrenceId);
+    }
+
+    @Test
+    void futureOccurrencesReceivePendingRemindersEvenWhenSeedIsCompleted() {
+        ZoneId zone = ZoneId.of("Asia/Shanghai");
+        long userId = newUser("15100010011", zone);
+        LocalDate today = LocalDate.now(zone);
+        Map<String, Object> created = scheduleService.createSchedule(userId, Map.of(
+                "title", "Daily reminder",
+                "timeType", "deadline_task",
+                "deadlineTime", today.atTime(12, 0).atZone(zone).toInstant().toString(),
+                "remindAt", today.atTime(11, 0).atZone(zone).toInstant().toString(),
+                "rrule", "FREQ=DAILY"
+        ));
+        long seedId = ((Number) created.get("id")).longValue();
+        String seriesId = String.valueOf(created.get("seriesId"));
+        scheduleService.setScheduleStatus(seedId, userId, "completed");
+
+        LocalDate nextMonthStart = today.plusMonths(1).withDayOfMonth(1);
+        LocalDate nextMonthEnd = nextMonthStart.with(java.time.temporal.TemporalAdjusters.lastDayOfMonth());
+        scheduleService.materializeForRange(userId, nextMonthStart, nextMonthEnd);
+        Long nextId = jdbc.queryForObject(
+                "select id from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                Long.class, seriesId, java.sql.Date.valueOf(nextMonthStart));
+
+        assertThat(count("select count(*) from reminder where target_type='schedule' and target_id=? and status='pending'", nextId)).isOne();
+        assertThat(count("select count(*) from reminder where target_type='schedule' and target_id=? and status='paused'", nextId)).isZero();
+    }
+
+    @Test
     void invalidRruleIsRejectedAtCreateTime() {
         ZoneId zone = ZoneId.of("Asia/Shanghai");
         long userId = newUser("15100010007", zone);
@@ -207,6 +305,28 @@ class ScheduleRepeatTests {
                 .isInstanceOf(BusinessException.class)
                 .extracting(ex -> ((BusinessException) ex).getCode())
                 .isEqualTo(400);
+    }
+
+    @Test
+    void unsupportedOrAmbiguousRruleFieldsAreRejected() {
+        for (String invalid : List.of(
+                "FREQ=DAILY;COUNT=5",
+                "FREQ=DAILY;X-UNKNOWN=1",
+                "FREQ=DAILY;FREQ=WEEKLY",
+                "FREQ=DAILY;UNTIL=20260812T235959Z",
+                "FREQ=DAILY;BYDAY=MO",
+                "FREQ=WEEKLY;BYDAY=1MO",
+                "FREQ=MONTHLY;BYMONTHDAY=0",
+                "FREQ=MONTHLY;BYMONTHDAY=1;BYDAY=MO",
+                "FREQ=MONTHLY;BYDAY=MO,1TU",
+                "FREQ=DAILY;"
+        )) {
+            assertThatThrownBy(() -> RruleExpander.validate(invalid))
+                    .as(invalid)
+                    .isInstanceOf(BusinessException.class)
+                    .extracting(ex -> ((BusinessException) ex).getCode())
+                    .isEqualTo(400);
+        }
     }
 
     // --- RruleExpander unit coverage ---

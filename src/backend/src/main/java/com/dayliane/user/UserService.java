@@ -57,7 +57,7 @@ public class UserService {
     public Map<String, Object> requireUserEntity(long userId) {
         try {
             return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,"
-                    + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt "
+                    + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,ai_record_enabled aiRecordEnabled,created_at createdAt "
                     + "from `user` where id=? and deleted_at is null", userMapper(), userId);
         } catch (EmptyResultDataAccessException ex) {
             throw new BusinessException(404, "user not found");
@@ -81,6 +81,10 @@ public class UserService {
                 throw new BusinessException(400, "avatarUrl must be an http(s) URL");
             }
             jdbc.update("update `user` set avatar_url=? where id=? and deleted_at is null", avatarUrl.isBlank() ? null : avatarUrl, userId);
+        }
+        if (req.containsKey("aiRecordEnabled")) {
+            boolean enabled = booleanValue(req.get("aiRecordEnabled"), "aiRecordEnabled");
+            jdbc.update("update `user` set ai_record_enabled=? where id=? and deleted_at is null", enabled, userId);
         }
     }
 
@@ -158,6 +162,7 @@ public class UserService {
             m.put("timezone", rs.getString("timezone"));
             m.put("status", rs.getString("status"));
             m.put("profileVersion", rs.getLong("profileVersion"));
+            m.put("aiRecordEnabled", rs.getBoolean("aiRecordEnabled"));
             m.put("createdAt", iso(rs.getTimestamp("createdAt")));
             return m;
         };
@@ -166,7 +171,7 @@ public class UserService {
     private Map<String, Object> requireUserEntityForUpdate(long userId) {
         try {
             return jdbc.queryForObject("select id,phone,email,email_verified_at emailVerifiedAt,password_hash passwordHash,"
-                            + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,created_at createdAt "
+                            + "nickname,avatar_url avatarUrl,timezone,status,profile_version profileVersion,ai_record_enabled aiRecordEnabled,created_at createdAt "
                             + "from `user` where id=? and deleted_at is null for update",
                     userMapper(), userId);
         } catch (EmptyResultDataAccessException ex) {
@@ -209,6 +214,15 @@ public class UserService {
 
     private static boolean blank(String s) {
         return s == null || s.isBlank();
+    }
+
+    private static boolean booleanValue(Object value, String field) {
+        if (value instanceof Boolean b) return b;
+        if (value instanceof String s) {
+            if ("true".equalsIgnoreCase(s.trim())) return true;
+            if ("false".equalsIgnoreCase(s.trim())) return false;
+        }
+        throw new BusinessException(400, field + " is invalid");
     }
 
     private static String iso(Timestamp ts) {

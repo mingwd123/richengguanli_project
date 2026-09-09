@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
 import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
-import type { Schedule, ScheduleViewMode, TimelineItem, AiArrangeResult } from '../types'
+import { aiSuggestionActionState, buildAiReorderDraft, type AiReorderDraft } from '../utils/aiArrangeDraft'
+import type { Schedule, ScheduleViewMode, TimelineItem, AiArrangeResult, AiArrangeSuggestion } from '../types'
 import { buildTodayScheduleSections } from '../utils/scheduleViews'
 import { timelinePresentationStatus, timelineTimeRange } from '../utils/timeline'
 import {
@@ -16,6 +17,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock3,
   Inbox,
   LoaderCircle,
@@ -23,6 +25,7 @@ import {
   Plus,
   Sparkles,
   UsersRound,
+  X,
 } from 'lucide-vue-next'
 
 const store = useAppStore()
@@ -268,11 +271,17 @@ async function loadAiPlan() {
 
 const arrangeResult = ref<AiArrangeResult | null>(null)
 const arrangeLoading = ref(false)
+const arrangeApplyingKey = ref('')
+const arrangeApplyErrors = ref<Record<string, string>>({})
+const reorderDraft = ref<AiReorderDraft | null>(null)
+const reorderSaving = ref(false)
 function arrangeDisabledLabel(result: AiArrangeResult) {
   return result.reason || 'AI 数据记录已关闭，排程建议已停用'
 }
 async function loadArrangeSuggestions() {
   arrangeLoading.value = true
+  arrangeApplyErrors.value = {}
+  reorderDraft.value = null
   try {
     arrangeResult.value = await store.arrangeSchedules()
   } catch (e: any) {
@@ -280,8 +289,76 @@ async function loadArrangeSuggestions() {
     store.notify('排程建议加载失败: ' + (e.message || '服务不可用'))
   } finally { arrangeLoading.value = false }
 }
-function applyReschedule(scheduleId: number, targetDate: string) {
-  router.push({ name: 'ScheduleDetail', params: { id: String(scheduleId) }, query: { from: 'home', arrangeTo: targetDate } })
+function arrangeSuggestionKey(item: AiArrangeSuggestion, index: number) {
+  return `${item.type}:${item.scheduleId || item.scheduleIds?.join(',') || 'unknown'}:${index}`
+}
+function arrangeActionState(item: AiArrangeSuggestion, index: number) {
+  const validation = aiSuggestionActionState(item)
+  const runtimeError = arrangeApplyErrors.value[arrangeSuggestionKey(item, index)]
+  return runtimeError ? { enabled: false, reason: runtimeError } : validation
+}
+function applyReschedule(item: AiArrangeSuggestion, index: number) {
+  const state = arrangeActionState(item, index)
+  if (!state.enabled) {
+    store.notify(state.reason)
+    return
+  }
+  router.push({ name: 'ScheduleDetail', params: { id: String(item.scheduleId) }, query: { from: 'home', arrangeTo: item.targetDate } })
+}
+async function applyReorder(item: AiArrangeSuggestion, index: number) {
+  const key = arrangeSuggestionKey(item, index)
+  const state = arrangeActionState(item, index)
+  if (!state.enabled || arrangeApplyingKey.value) {
+    if (!state.enabled) store.notify(state.reason)
+    return
+  }
+
+  arrangeApplyingKey.value = key
+  try {
+    const schedules = await Promise.all(item.scheduleIds!.map(id => store.request<Schedule>(`/schedules/${id}`)))
+    const result = buildAiReorderDraft(item, schedules, store.profile?.timezone || getDisplayTimezone())
+    if (!result.draft) {
+      arrangeApplyErrors.value = { ...arrangeApplyErrors.value, [key]: result.reason }
+      store.notify(result.reason)
+      return
+    }
+    reorderDraft.value = result.draft
+  } catch (e: any) {
+    const reason = e.message || '日程已发生变化，请重新分析'
+    arrangeApplyErrors.value = { ...arrangeApplyErrors.value, [key]: reason }
+    store.notify(reason)
+  } finally {
+    arrangeApplyingKey.value = ''
+  }
+}
+function moveReorderDraftItem(index: number, direction: -1 | 1) {
+  if (!reorderDraft.value) return
+  const target = index + direction
+  if (target < 0 || target >= reorderDraft.value.items.length) return
+  const items = [...reorderDraft.value.items]
+  ;[items[index], items[target]] = [items[target], items[index]]
+  reorderDraft.value = { ...reorderDraft.value, items }
+}
+function closeReorderDraft() {
+  if (!reorderSaving.value) reorderDraft.value = null
+}
+async function confirmReorderDraft() {
+  const draft = reorderDraft.value
+  if (!draft || reorderSaving.value) return
+  reorderSaving.value = true
+  try {
+    await store.request('/schedules/sort', {
+      method: 'PUT',
+      body: JSON.stringify({ groupId: draft.groupId, scheduleIds: draft.items.map(item => item.id) }),
+    })
+    await store.loadAll()
+    reorderDraft.value = null
+    store.notify('日程顺序已保存')
+  } catch (e: any) {
+    store.notify(e.message || '保存日程顺序失败')
+  } finally {
+    reorderSaving.value = false
+  }
 }
 
 function openCreateSchedule() {
@@ -411,20 +488,38 @@ function openSchedules() {
               <template v-if="item.type === 'reschedule'">
                 <strong>{{ item.title }}</strong>
                 <span>建议从 {{ item.fromDate }} 挪到 <b>{{ item.targetDate }}</b></span>
-                <button class="plain-button arrange-apply" @click="applyReschedule(item.scheduleId!, item.targetDate!)">应用到草稿</button>
+                <button
+                  class="plain-button arrange-apply"
+                  :disabled="!arrangeActionState(item, index).enabled"
+                  :title="arrangeActionState(item, index).reason || '在编辑页打开日期草稿'"
+                  @click="applyReschedule(item, index)"
+                >应用到草稿</button>
+                <span v-if="!arrangeActionState(item, index).enabled" class="arrange-action-note">{{ arrangeActionState(item, index).reason }}</span>
               </template>
               <template v-else-if="item.type === 'reorder'">
                 <span>{{ item.date }}：<b>{{ item.titles?.join(' → ') }}</b></span>
                 <span class="arrange-reason">{{ item.reason }}</span>
+                <button
+                  class="plain-button arrange-apply"
+                  :disabled="!arrangeActionState(item, index).enabled || Boolean(arrangeApplyingKey)"
+                  :title="arrangeActionState(item, index).reason || '打开顺序草稿'"
+                  @click="applyReorder(item, index)"
+                >
+                  <LoaderCircle v-if="arrangeApplyingKey === arrangeSuggestionKey(item, index)" class="spinning" :size="13" />
+                  {{ arrangeApplyingKey === arrangeSuggestionKey(item, index) ? '准备草稿...' : '应用到草稿' }}
+                </button>
+                <span v-if="!arrangeActionState(item, index).enabled" class="arrange-action-note">{{ arrangeActionState(item, index).reason }}</span>
               </template>
               <template v-else>
                 <strong>{{ item.title }}</strong>
                 <span class="arrange-reason">{{ item.reason }}</span>
+                <button class="plain-button arrange-apply" disabled :title="arrangeActionState(item, index).reason">应用到草稿</button>
+                <span class="arrange-action-note">{{ arrangeActionState(item, index).reason }}</span>
               </template>
             </div>
           </li>
         </ul>
-        <p class="arrange-hint">建议仅为草稿，不会自动写入日程。点击"应用到草稿"后请在编辑页确认保存。</p>
+        <p class="arrange-hint">建议不会自动写入日程。点击“应用到草稿”后仍需确认保存；数据不足的建议会保持禁用并说明原因。</p>
       </template>
 
       <div v-else-if="arrangeResult && !arrangeResult.disabled && !arrangeResult.suggestions?.length" class="arrange-empty">
@@ -432,6 +527,37 @@ function openSchedules() {
         <span>当前两周的负荷分布比较均衡，暂无需要调整的安排，继续保持节奏。</span>
       </div>
     </section>
+
+    <div v-if="reorderDraft" class="modal-backdrop" @click.self="closeReorderDraft">
+      <section class="modal-panel ai-reorder-modal" role="dialog" aria-modal="true" aria-labelledby="ai-reorder-title">
+        <div class="modal-head">
+          <div>
+            <h2 id="ai-reorder-title">AI 顺序草稿</h2>
+            <p>{{ reorderDraft.date }} · {{ reorderDraft.groupName }}</p>
+          </div>
+          <button class="modal-close" :disabled="reorderSaving" title="关闭" aria-label="关闭" @click="closeReorderDraft"><X :size="18" /></button>
+        </div>
+        <p class="ai-reorder-reason">{{ reorderDraft.reason }}</p>
+        <ol class="ai-reorder-list">
+          <li v-for="(item, index) in reorderDraft.items" :key="item.id">
+            <span class="ai-reorder-position">{{ index + 1 }}</span>
+            <strong>{{ item.title }}</strong>
+            <div class="ai-reorder-controls">
+              <button :disabled="reorderSaving || index === 0" title="上移" aria-label="上移" @click="moveReorderDraftItem(index, -1)"><ChevronUp :size="16" /></button>
+              <button :disabled="reorderSaving || index === reorderDraft.items.length - 1" title="下移" aria-label="下移" @click="moveReorderDraftItem(index, 1)"><ChevronDown :size="16" /></button>
+            </div>
+          </li>
+        </ol>
+        <p class="arrange-hint">这里只保存同一模块内的执行顺序，不会修改日程日期或内容。</p>
+        <div class="form-actions ai-reorder-actions">
+          <button :disabled="reorderSaving" @click="closeReorderDraft">取消</button>
+          <button class="primary" :disabled="reorderSaving" @click="confirmReorderDraft">
+            <LoaderCircle v-if="reorderSaving" class="spinning" :size="15" />
+            {{ reorderSaving ? '保存中...' : '确认并保存顺序' }}
+          </button>
+        </div>
+      </section>
+    </div>
 
     <section class="upcoming-week">
       <div class="section-head">

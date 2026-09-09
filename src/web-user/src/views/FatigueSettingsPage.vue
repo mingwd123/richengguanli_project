@@ -62,7 +62,7 @@ async function resetModel() {
 }
 
 async function deleteHistory() {
-  if (!window.confirm('确认删除全部疲劳调查历史？此操作无法撤销。')) return
+  if (!window.confirm('确认删除全部疲劳调查历史及团队完成疲劳快照？完成日期仍会保留，但疲劳等级和权重无法恢复。')) return
   await store.deleteFatigueSurveyHistory()
   await loadHistory()
 }

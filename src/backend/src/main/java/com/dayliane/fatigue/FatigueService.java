@@ -449,10 +449,17 @@ public class FatigueService {
         ensureProfile(userId);
         int deleted = jdbc.update("delete from fatigue_survey where user_id=?", userId);
         jdbc.update("delete from fatigue_survey_skip where user_id=?", userId);
+        // Survey deletion also removes the user's team completion fatigue snapshots.
+        // Keep completed_at so the task history remains auditable; only fatigue data is deleted.
+        int clearedTeamSnapshots = jdbc.update(
+                "update team_task_assignee set completed_fatigue_level=null,completed_fatigue_weight=null " +
+                        "where user_id=? and (completed_fatigue_level is not null or completed_fatigue_weight is not null)",
+                userId);
         resetModelState(userId);
         refreshPersistedSummaries(userId);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("deletedCount", deleted);
+        result.put("clearedTeamSnapshotCount", clearedTeamSnapshots);
         result.put("profile", profile(userId));
         return result;
     }
@@ -772,12 +779,19 @@ public class FatigueService {
     public int cleanupRetention() {
         int safeRetentionDays = Math.max(30, retentionDays);
         LocalDate cutoff = LocalDate.now(ZoneOffset.UTC).minusDays(safeRetentionDays);
+        Timestamp cutoffTimestamp = Timestamp.from(cutoff.atStartOfDay(ZoneOffset.UTC).toInstant());
         List<Long> affectedUsers = jdbc.queryForList("select distinct user_id from fatigue_survey where local_date<?", Long.class, cutoff);
         int deleted = jdbc.update("delete from fatigue_survey where local_date<?", cutoff);
         deleted += jdbc.update("delete from fatigue_survey_skip where local_date<?", cutoff);
         deleted += jdbc.update("delete from fatigue_survey_prompt_log where local_date<?", cutoff);
         deleted += jdbc.update("delete from fatigue_daily_summary where local_date<?", cutoff);
         deleted += jdbc.update("delete from fatigue_alert_log where local_date<?", cutoff);
+        // Retention applies to fatigue snapshots as well, while preserving completion history.
+        deleted += jdbc.update(
+                "update team_task_assignee set completed_fatigue_level=null,completed_fatigue_weight=null " +
+                        "where completed_at is not null and completed_at<? and " +
+                        "(completed_fatigue_level is not null or completed_fatigue_weight is not null)",
+                cutoffTimestamp);
         for (Long userId : affectedUsers) {
             Integer active = jdbc.queryForObject("select count(*) from `user` where id=? and deleted_at is null", Integer.class, userId);
             if (active != null && active > 0) recalibrateModelInternal(userId);

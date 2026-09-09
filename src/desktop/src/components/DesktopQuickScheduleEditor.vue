@@ -11,6 +11,7 @@ const props = defineProps<{
   submitLabel: string
   reminderPresets: number[]
   timezone: string
+  repeatEnabled?: boolean
   aiEnabled?: boolean
   aiBusy?: boolean
   aiError?: string
@@ -106,7 +107,7 @@ const reminderBaseLabel = computed(() => form.value.timeType === 'deadline_task'
 
     <DesktopQuickReminderPicker v-model="form.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="props.reminderPresets" :timezone="props.timezone" :disabled="busy" @error="emit('error', $event)" />
 
-    <RepeatRuleEditor v-model:rrule="form.rrule" v-model:excluded-dates="form.excludedDates" />
+    <RepeatRuleEditor v-if="props.repeatEnabled !== false" v-model:rrule="form.rrule" v-model:excluded-dates="form.excludedDates" />
 
     <label class="quick-editor-field">
       <span>说明 <small>可选</small></span>

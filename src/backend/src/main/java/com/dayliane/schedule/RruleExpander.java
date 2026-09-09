@@ -9,13 +9,16 @@ import java.time.YearMonth;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
- * Minimal RFC 5545 RRULE expansion for personal recurring schedules.
- * Supports FREQ=DAILY/WEEKLY/MONTHLY with INTERVAL, BYDAY, BYMONTHDAY and UNTIL.
- * Instances are materialized per natural month, so COUNT is intentionally not expanded.
+ * Strict RRULE subset used by personal recurring schedules.
+ * Supports FREQ=DAILY/WEEKLY/MONTHLY with INTERVAL, BYDAY, BYMONTHDAY and
+ * date-only UNTIL. Unsupported RFC 5545 fields are rejected instead of being
+ * silently ignored.
  */
 final class RruleExpander {
 
@@ -92,14 +95,16 @@ final class RruleExpander {
             Rule rule = new Rule();
             boolean hasFreq = false;
             if (rrule == null || rrule.isBlank()) throw new BusinessException(400, "rrule is invalid");
-            String[] parts = rrule.trim().split(";");
+            String[] parts = rrule.trim().split(";", -1);
+            Set<String> seenKeys = new HashSet<>();
             for (String rawPart : parts) {
                 String part = rawPart.trim();
-                if (part.isEmpty()) continue;
+                if (part.isEmpty()) throw new BusinessException(400, "rrule is invalid");
                 int eq = part.indexOf('=');
-                if (eq <= 0) throw new BusinessException(400, "rrule is invalid");
+                if (eq <= 0 || eq != part.lastIndexOf('=')) throw new BusinessException(400, "rrule is invalid");
                 String key = part.substring(0, eq).trim().toUpperCase(Locale.ROOT);
                 String value = part.substring(eq + 1).trim();
+                if (value.isEmpty() || !seenKeys.add(key)) throw new BusinessException(400, "rrule is invalid");
                 switch (key) {
                     case "FREQ" -> {
                         rule.freq = switch (value.toUpperCase(Locale.ROOT)) {
@@ -116,37 +121,62 @@ final class RruleExpander {
                     case "BYDAY" -> rule.parseByDay(value);
                     case "BYMONTHDAY" -> rule.parseByMonthDay(value);
                     case "UNTIL" -> rule.until = parseUntil(value);
-                    default -> {
-                        // COUNT and other extensions are tolerated but not expanded per-month.
-                    }
+                    default -> throw new BusinessException(400, "rrule is invalid");
                 }
             }
             if (!hasFreq) throw new BusinessException(400, "rrule is invalid");
+            rule.validateCombinations();
             return rule;
         }
 
         private void parseByDay(String value) {
-            for (String token : value.split(",")) {
+            for (String token : value.split(",", -1)) {
                 String t = token.trim().toUpperCase(Locale.ROOT);
-                if (t.isEmpty()) continue;
+                if (t.isEmpty()) throw new BusinessException(400, "rrule is invalid");
                 int split = 0;
                 while (split < t.length() && !Character.isLetter(t.charAt(split))) split++;
                 String prefix = t.substring(0, split);
                 String weekName = t.substring(split);
                 DayOfWeek day = dayOfWeek(weekName);
                 if (prefix.isEmpty()) {
-                    weekdays.add(day);
+                    if (!weekdays.add(day)) throw new BusinessException(400, "rrule is invalid");
                 } else {
-                    monthOrdinals.add(new OrdinalWeekday(parseInt(prefix, -53, 53, "rrule is invalid"), day));
+                    int ordinal = parseInt(prefix, -5, 5, "rrule is invalid");
+                    if (ordinal == 0) throw new BusinessException(400, "rrule is invalid");
+                    boolean duplicate = monthOrdinals.stream().anyMatch(item -> item.ordinal == ordinal && item.day == day);
+                    if (duplicate) throw new BusinessException(400, "rrule is invalid");
+                    monthOrdinals.add(new OrdinalWeekday(ordinal, day));
                 }
             }
         }
 
         private void parseByMonthDay(String value) {
-            for (String token : value.split(",")) {
+            for (String token : value.split(",", -1)) {
                 String t = token.trim();
-                if (t.isEmpty()) continue;
-                monthDays.add(parseInt(t, -31, 31, "rrule is invalid"));
+                if (t.isEmpty()) throw new BusinessException(400, "rrule is invalid");
+                int day = parseInt(t, -31, 31, "rrule is invalid");
+                if (day == 0 || monthDays.contains(day)) throw new BusinessException(400, "rrule is invalid");
+                monthDays.add(day);
+            }
+        }
+
+        private void validateCombinations() {
+            switch (freq) {
+                case DAILY -> {
+                    if (!weekdays.isEmpty() || !monthOrdinals.isEmpty() || !monthDays.isEmpty()) {
+                        throw new BusinessException(400, "rrule is invalid");
+                    }
+                }
+                case WEEKLY -> {
+                    if (!monthOrdinals.isEmpty() || !monthDays.isEmpty()) {
+                        throw new BusinessException(400, "rrule is invalid");
+                    }
+                }
+                case MONTHLY -> {
+                    boolean hasByDay = !weekdays.isEmpty() || !monthOrdinals.isEmpty();
+                    if (!monthDays.isEmpty() && hasByDay) throw new BusinessException(400, "rrule is invalid");
+                    if (!weekdays.isEmpty() && !monthOrdinals.isEmpty()) throw new BusinessException(400, "rrule is invalid");
+                }
             }
         }
     }
@@ -197,12 +227,10 @@ final class RruleExpander {
 
     private static LocalDate parseUntil(String value) {
         String v = value.trim();
+        if (!v.matches("\\d{8}")) throw new BusinessException(400, "rrule is invalid");
         try {
-            int y = Integer.parseInt(v.substring(0, 4));
-            int m = Integer.parseInt(v.substring(4, 6));
-            int d = Integer.parseInt(v.substring(6, 8));
-            return LocalDate.of(y, m, d);
-        } catch (DateTimeException | IndexOutOfBoundsException | NumberFormatException ex) {
+            return LocalDate.parse(v, java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        } catch (DateTimeException ex) {
             throw new BusinessException(400, "rrule is invalid");
         }
     }

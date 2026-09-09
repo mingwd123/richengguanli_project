@@ -24,31 +24,31 @@ public class AiController {
     @PostMapping("/schedules/parse")
     public ApiResponse<Map<String, Object>> parseSchedule(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.parseSchedule(userId, text(req), recordUsage(req)));
+        return ApiResponse.success(aiService.parseSchedule(userId, text(req), aiService.aiRecordEnabled(userId)));
     }
 
     @PostMapping("/schedules/arrange")
     public ApiResponse<Map<String, Object>> arrangeSchedules(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.arrangeSchedules(userId, req == null || recordUsage(req)));
+        return ApiResponse.success(aiService.arrangeSchedules(userId, aiService.aiRecordEnabled(userId)));
     }
 
     @PostMapping("/team-tasks/breakdown")
     public ApiResponse<Map<String, Object>> breakdownTeamTask(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.breakdownTeamTask(userId, text(req), recordUsage(req)));
+        return ApiResponse.success(aiService.breakdownTeamTask(userId, text(req), aiService.aiRecordEnabled(userId)));
     }
 
     @PostMapping("/home/daily-plan")
     public ApiResponse<Map<String, Object>> dailyPlan(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.dailyPlan(userId, req == null || recordUsage(req)));
+        return ApiResponse.success(aiService.dailyPlan(userId, aiService.aiRecordEnabled(userId)));
     }
 
     @PostMapping("/text/optimize-task-description")
     public ApiResponse<Map<String, Object>> optimizeTaskDescription(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.optimizeTaskDescription(userId, text(req), recordUsage(req)));
+        return ApiResponse.success(aiService.optimizeTaskDescription(userId, text(req), aiService.aiRecordEnabled(userId)));
     }
 
     private static String text(Map<String, Object> req) {
@@ -59,8 +59,4 @@ public class AiController {
         return "";
     }
 
-    private static boolean recordUsage(Map<String, Object> req) {
-        Object value = req.get("recordUsage");
-        return value == null || !(value instanceof Boolean b ? !b : "false".equalsIgnoreCase(String.valueOf(value)));
-    }
 }

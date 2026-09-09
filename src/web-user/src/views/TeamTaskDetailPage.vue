@@ -31,7 +31,7 @@ const taskGroups = ref<TaskGroup[]>([])
 const editForm = reactive({ title: '', description: '', groupId: '', startTime: '', deadlineTime: '', remindAt: '' })
 const initialRemindAt = ref('')
 const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
-const completingFatigueLevel = ref(3)
+const completingFatigueLevel = ref<number | null>(null)
 const completingSubmitting = ref(false)
 const completeOpen = ref(false)
 const fatigueTrackingOn = computed(() => Boolean(store.fatigueProfile?.fatigueTrackingEnabled && store.fatigueProfile?.featureEnabled))
@@ -51,7 +51,7 @@ async function handleMyAction(action: 'accept' | 'reject') {
 function handleComplete() {
   if (!task.value) return
   if (fatigueTrackingOn.value) {
-    completingFatigueLevel.value = 3
+    completingFatigueLevel.value = null
     completeOpen.value = true
     return
   }
@@ -59,7 +59,10 @@ function handleComplete() {
 }
 
 async function submitComplete() {
-  if (!task.value) return
+  if (!task.value || completingFatigueLevel.value === null) {
+    store.notify('请选择完成疲劳程度')
+    return
+  }
   completingSubmitting.value = true
   const ok = await store.completeTeamTask(task.value, completingFatigueLevel.value)
   completingSubmitting.value = false
@@ -286,10 +289,11 @@ onMounted(loadDetail)
         <div v-if="task.pendingReminders?.length">
           <span class="muted">下次提醒：</span><span>{{ formatTime(task.pendingReminders[0].remindAt) }}</span>
         </div>
-        <div v-if="task.assignStatus === 'completed' && task.completedFatigueLevel">
-          <span class="muted">我的完成疲劳：</span>
-          <span>{{ task.completedFatigueLevel }} · {{ fatigueNames[task.completedFatigueLevel - 1] }}{{ task.completedFatigueWeight ? ` · ${task.completedFatigueWeight} 点` : '' }}</span>
-          <span v-if="task.completedAt" class="muted" style="margin-left:8px">{{ formatTime(task.completedAt) }}</span>
+        <div v-if="task.assignStatus === 'completed' && (task.completedAt || task.completedFatigueLevel)">
+          <span class="muted">我的完成记录：</span>
+          <span v-if="task.completedAt">完成于 {{ formatTime(task.completedAt) }}</span>
+          <span v-if="task.completedFatigueLevel" class="muted" style="margin-left:8px">疲劳 {{ task.completedFatigueLevel }} · {{ fatigueNames[task.completedFatigueLevel - 1] }}{{ task.completedFatigueWeight ? ` · ${task.completedFatigueWeight} 点` : '' }}</span>
+          <span v-else class="muted" style="margin-left:8px">未记录疲劳快照</span>
         </div>
       </div>
 
@@ -318,7 +322,7 @@ onMounted(loadDetail)
           </span>
           <span v-if="a.isCurrent" class="tag blue">当前有效</span>
           <span v-else class="tag">历史记录</span>
-          <small>第 {{ a.assignRound }} 轮</small>
+          <small>第 {{ a.assignRound }} 轮<span v-if="a.completedAt" class="muted"> · 完成于 {{ formatTime(a.completedAt) }}</span></small>
           <div class="top-actions">
             <!-- rejected 执行人的重新分配入口 -->
             <button v-if="a.isCurrent && a.assignStatus === 'rejected' && isCreatorOrAdmin && !['completed', 'cancelled', 'approval_rejected'].includes(task.status)" @click="goReassign(a)">重新分配</button>
@@ -382,7 +386,7 @@ onMounted(loadDetail)
         <ScheduleLevelControl v-model="completingFatigueLevel" label="完成疲劳度" :labels="fatigueNames" :weights="store.fatigueProfile?.weights" />
         <div class="form-actions" style="margin-top:18px">
           <button @click="completeOpen = false">取消</button>
-          <button class="primary" :disabled="completingSubmitting" @click="submitComplete">{{ completingSubmitting ? '完成中...' : '确认完成' }}</button>
+          <button class="primary" :disabled="completingSubmitting || completingFatigueLevel === null" @click="submitComplete">{{ completingSubmitting ? '完成中...' : '确认完成' }}</button>
         </div>
       </section>
     </div>

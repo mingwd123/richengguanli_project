@@ -1,6 +1,6 @@
 <script setup lang="ts">
 const props = defineProps<{
-  modelValue: number
+  modelValue: number | null
   label: string
   labels: string[]
   weights?: Record<string, number>
@@ -30,6 +30,7 @@ function select(level: number) {
         <span>{{ labels[level - 1] }}</span>
       </button>
     </div>
-    <small v-if="weights">当前选择系数 {{ weights[String(modelValue)] ?? [1, 2, 3, 5, 8][Number(modelValue || 3) - 1] }} 点</small>
+    <small v-if="weights && modelValue">当前选择系数 {{ weights[String(modelValue)] ?? [1, 2, 3, 5, 8][modelValue - 1] }} 点</small>
+    <small v-else-if="!modelValue">请选择一个等级后再确认</small>
   </fieldset>
 </template>

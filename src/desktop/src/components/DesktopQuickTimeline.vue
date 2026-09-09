@@ -111,7 +111,8 @@ const detailLoading = ref(false)
 const formBusy = ref(false)
 const actionBusy = ref(false)
 const pendingCompleteTask = ref<{ id: number; title: string } | null>(null)
-const completingFatigueLevel = ref(3)
+const completingFatigueLevel = ref<number | null>(null)
+const scheduleEditScope = ref<'occurrence' | 'series'>('occurrence')
 const fatigueTrackingOn = computed(() => Boolean(store.fatigueProfile?.fatigueTrackingEnabled && store.fatigueProfile?.featureEnabled))
 const completionFatigueLabels = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
 const aiParsing = ref(false)
@@ -358,6 +359,8 @@ const fatigueSurveyStatus = computed(() => {
 const schedulePresentation = computed(() => scheduleDetail.value
   ? timelinePresentationStatus(sourceItem(scheduleDetail.value, 'schedule'), now.value)
   : 'unscheduled')
+
+const scheduleIsRecurring = computed(() => Boolean(scheduleDetail.value?.seriesId || scheduleDetail.value?.rrule))
 
 const myTaskAssignment = computed(() => {
   if (!teamTaskDetail.value || !store.profile) return null
@@ -965,17 +968,26 @@ async function submitTeamTaskComplete(id: number, fatigueLevel?: number) {
 
 async function confirmComplete() {
   if (!pendingCompleteTask.value || actionBusy.value) return
+  if (completingFatigueLevel.value === null) {
+    store.notify('请选择完成疲劳程度')
+    return
+  }
   actionBusy.value = true
   const id = pendingCompleteTask.value.id
   try {
     await submitTeamTaskComplete(id, completingFatigueLevel.value)
     store.notify('任务已完成')
+    pendingCompleteTask.value = null
   } catch (error: any) {
     store.notify(error.message || '操作失败')
   } finally {
     actionBusy.value = false
-    pendingCompleteTask.value = null
   }
+}
+
+function closeCompletionModal() {
+  if (actionBusy.value) return
+  pendingCompleteTask.value = null
 }
 
 async function performAction(entry: QuickEntry) {
@@ -995,7 +1007,7 @@ async function performAction(entry: QuickEntry) {
     if (action === 'complete') {
       if (fatigueTrackingOn.value) {
         pendingCompleteTask.value = { id: task.id, title: task.title }
-        completingFatigueLevel.value = 3
+        completingFatigueLevel.value = null
         return
       }
       await submitTeamTaskComplete(task.id)
@@ -1196,6 +1208,7 @@ async function runScheduleAction(action: string) {
 async function openScheduleEdit() {
   if (!scheduleDetail.value) return
   const item = scheduleDetail.value
+  scheduleEditScope.value = 'occurrence'
   scheduleEditForm.value = {
     title: item.title,
     description: item.description || '',
@@ -1219,6 +1232,9 @@ async function saveScheduleEdit() {
   if (!scheduleDetail.value) return
   const error = validateSchedule(scheduleEditForm.value)
   if (error) return store.notify(error)
+  const scheduleId = scheduleDetail.value.id
+  const recurring = scheduleIsRecurring.value
+  const editScope = recurring ? scheduleEditScope.value : null
   formBusy.value = true
   try {
     const payload = schedulePayload(scheduleEditForm.value)
@@ -1226,10 +1242,20 @@ async function saveScheduleEdit() {
     else payload.remindAt = scheduleEditForm.value.remindAt
       ? zonedDatetimeLocalToIso(scheduleEditForm.value.remindAt, timezone.value)
       : ''
-    await store.request(`/schedules/${scheduleDetail.value.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+    let endpoint = `/schedules/${scheduleId}`
+    if (editScope === 'series') {
+      if (!scheduleDetail.value.seriesId) throw new Error('重复系列标识缺失，无法更新整个系列')
+      endpoint = `/schedules/series/${encodeURIComponent(scheduleDetail.value.seriesId)}`
+    } else if (editScope === 'occurrence') {
+      // The occurrence endpoint deliberately rejects series-only fields.
+      delete payload.rrule
+      delete payload.excludedDates
+      endpoint = `/schedules/${scheduleId}/occurrence`
+    }
+    await store.request(endpoint, { method: 'PUT', body: JSON.stringify(payload) })
     await refreshQuickWorkspace()
-    store.notify('日程已更新')
-    await loadScheduleDetail(scheduleDetail.value.id)
+    store.notify(editScope === 'series' ? '重复系列已更新' : editScope === 'occurrence' ? '此实例已更新' : '日程已更新')
+    await loadScheduleDetail(scheduleId)
     await goBack()
   } catch (error: any) {
     store.notify(error.message || '更新日程失败')
@@ -1259,7 +1285,7 @@ async function runTeamTaskAction(action: string) {
   if (action === 'complete') {
     if (fatigueTrackingOn.value) {
       pendingCompleteTask.value = { id: teamTaskDetail.value.id, title: teamTaskDetail.value.title }
-      completingFatigueLevel.value = 3
+      completingFatigueLevel.value = null
       return
     }
     actionBusy.value = true
@@ -1367,7 +1393,13 @@ async function openFullWorkspace() {
 }
 
 function handleEscape(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || viewStack.value.length <= 1 || aiBreakdownSaving.value) return
+  if (event.key !== 'Escape') return
+  if (pendingCompleteTask.value) {
+    if (!actionBusy.value) pendingCompleteTask.value = null
+    event.preventDefault()
+    return
+  }
+  if (viewStack.value.length <= 1 || aiBreakdownSaving.value) return
   event.preventDefault()
   goBack()
 }
@@ -1386,6 +1418,7 @@ watch(() => store.profile?.id, (id, previousId) => {
     quickTeamLoaded.value = false
     quickTeamError.value = ''
     quickAcceptedScheduleRevision.value = null
+    pendingCompleteTask.value = null
     viewStack.value = [{ kind: 'timeline', scrollTop: 0 }]
     quickViewMode.value = 'time'
     quickSource.value = 'personal'
@@ -1558,7 +1591,14 @@ onUnmounted(() => {
       </template>
       <DesktopQuickTeamBreakdown v-else-if="activeView.kind === 'team-breakdown'" v-model="aiBreakdownTasks" :members="teamCreateMembers" :busy="aiBreakdownSaving" @cancel="cancelTeamBreakdown" @submit="submitTeamBreakdown" />
       <DesktopQuickFatigueSurvey v-else-if="activeView.kind === 'fatigue-survey'" :local-date="activeView.localDate" @close="goBack" @updated="refreshQuickWorkspace" />
-      <DesktopQuickScheduleEditor v-else-if="activeView.kind === 'schedule-edit'" v-model="scheduleEditForm" :groups="store.taskGroups" :busy="formBusy" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" submit-label="保存修改" @error="store.notify" @submit="saveScheduleEdit" />
+      <template v-else-if="activeView.kind === 'schedule-edit'">
+        <div v-if="scheduleIsRecurring" class="quick-edit-scope" role="radiogroup" aria-label="编辑范围">
+          <span>编辑范围</span>
+          <label :class="{ active: scheduleEditScope === 'occurrence' }"><input v-model="scheduleEditScope" type="radio" value="occurrence" :disabled="formBusy" />仅此实例</label>
+          <label :class="{ active: scheduleEditScope === 'series' }"><input v-model="scheduleEditScope" type="radio" value="series" :disabled="formBusy" />整个系列</label>
+        </div>
+        <DesktopQuickScheduleEditor v-model="scheduleEditForm" :groups="store.taskGroups" :busy="formBusy" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" :repeat-enabled="!scheduleIsRecurring || scheduleEditScope === 'series'" submit-label="保存修改" @error="store.notify" @submit="saveScheduleEdit" />
+      </template>
       <DesktopQuickTaskEditor v-else-if="activeView.kind === 'task-edit'" v-model="taskEditForm" :groups="teamTaskGroups" :busy="formBusy" :reminder-presets="store.notificationPreferences.reminderPresetMinutes" :timezone="timezone" @error="store.notify" @submit="saveTaskEdit" />
 
       <div v-else-if="detailLoading" class="quick-detail-loading"><RefreshCw class="spinning" :size="20" /><span>加载详情...</span></div>
@@ -1623,5 +1663,23 @@ onUnmounted(() => {
 
       <div v-else class="quick-detail-loading"><span>未找到对应内容</span></div>
     </template>
+
+    <div v-if="pendingCompleteTask" class="quick-modal-backdrop" role="presentation" @click.self="closeCompletionModal">
+      <section class="quick-modal-panel quick-complete-modal" role="dialog" aria-modal="true" aria-labelledby="quick-complete-title">
+        <header class="quick-modal-header">
+          <div><p>团队任务</p><h2 id="quick-complete-title">记录完成时疲劳</h2></div>
+          <button type="button" class="icon-button" title="关闭" aria-label="关闭" :disabled="actionBusy" @click="closeCompletionModal"><XCircle :size="17" /></button>
+        </header>
+        <p class="quick-modal-task-title">{{ pendingCompleteTask.title }}</p>
+        <p class="quick-modal-hint">请选择你完成这项任务时的实际疲劳程度。该记录只计入完成当天。</p>
+        <div class="quick-level-options fatigue quick-completion-levels" role="radiogroup" aria-label="完成疲劳程度">
+          <button v-for="level in 5" :key="`quick-complete-fatigue-${level}`" type="button" :class="{ active: completingFatigueLevel === level }" role="radio" :aria-checked="completingFatigueLevel === level" :aria-label="`完成疲劳度 ${level} ${completionFatigueLabels[level - 1]}`" :disabled="actionBusy" @click="completingFatigueLevel = level"><strong>{{ level }}</strong><small>{{ completionFatigueLabels[level - 1] }}</small></button>
+        </div>
+        <footer class="quick-modal-actions">
+          <button type="button" :disabled="actionBusy" @click="closeCompletionModal">取消</button>
+          <button type="button" class="primary" :disabled="actionBusy || completingFatigueLevel === null" @click="confirmComplete"><Check :size="15" />{{ actionBusy ? '提交中...' : '确认完成' }}</button>
+        </footer>
+      </section>
+    </div>
   </section>
 </template>

@@ -7,6 +7,7 @@ export interface UserProfile {
   nickname: string
   avatarUrl: string
   timezone: string
+  aiRecordEnabled: boolean
   createdAt: string
 }
 

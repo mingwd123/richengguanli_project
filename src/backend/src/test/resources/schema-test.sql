@@ -43,6 +43,7 @@ CREATE TABLE `user` (
   status VARCHAR(20) NOT NULL DEFAULT 'active',
   token_version INT NOT NULL DEFAULT 0,
   profile_version BIGINT NOT NULL DEFAULT 0,
+  ai_record_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   subscribe_token VARCHAR(64),
   deleted_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

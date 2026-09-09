@@ -7,6 +7,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -69,5 +70,14 @@ class ScheduleMigrationSmokeTests {
                 "select distinct index_name from information_schema.indexes where table_name='user'",
                 String.class);
         assertThat(indexes).contains("uk_user_subscribe_token");
+    }
+
+    @Test
+    void userAiRecordPreferenceIsPresentAndRequired() {
+        Map<String, Object> column = jdbc.queryForMap(
+                "select is_nullable,column_default from information_schema.columns " +
+                        "where table_name='user' and column_name='ai_record_enabled'");
+        assertThat(column.get("is_nullable")).isEqualTo("NO");
+        assertThat(String.valueOf(column.get("column_default"))).isIn("TRUE", "true", "1");
     }
 }

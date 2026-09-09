@@ -267,7 +267,7 @@ export const useAppStore = defineStore('app', () => {
 
   async function aiRequest(path: string, payload: Record<string, any> = {}) {
     return request<{ rawText: string; [key: string]: any }>('/ai' + path, {
-      method: 'POST', body: JSON.stringify({ ...payload, recordUsage: aiRecordEnabled.value })
+      method: 'POST', body: JSON.stringify(payload)
     })
   }
 
@@ -459,6 +459,9 @@ export const useAppStore = defineStore('app', () => {
       ])
       if (!isCurrentRequest()) return
       profile.value = me; setDisplayTimezone(me.timezone); profileForm.nickname = me.nickname; profileForm.avatarUrl = me.avatarUrl || ''; profileForm.timezone = me.timezone; timezoneForm.timezone = me.timezone
+      // The server is authoritative so the preference follows the account across devices.
+      aiRecordEnabled.value = me.aiRecordEnabled !== false
+      localStorage.setItem(AI_RECORD_KEY, String(aiRecordEnabled.value))
       loadStoredScheduleView(me.id)
       notificationPreferences.value = preferences
       fatigueProfile.value = fatigueProfileData
@@ -673,7 +676,8 @@ export const useAppStore = defineStore('app', () => {
       fatigueHistory.value = null
       fatigueSurveyComparison.value = null
       await loadFatigueSurveyToday()
-      notify(`已删除 ${result.deletedCount} 条疲劳调查记录`)
+      const cleared = Number((result as any).clearedTeamSnapshotCount || 0)
+      notify(`已删除 ${result.deletedCount} 条疲劳调查记录${cleared ? `，并清除 ${cleared} 条团队完成疲劳快照` : ''}`)
       return true
     } catch (e: any) { notify(e.message || '删除疲劳历史失败'); return false }
   }
@@ -1100,9 +1104,25 @@ export const useAppStore = defineStore('app', () => {
     ;(notify as any)._timer = setTimeout(() => { toast.value = '' }, 2600)
   }
 
-  function toggleAiRecord() {
-    aiRecordEnabled.value = !aiRecordEnabled.value
-    localStorage.setItem(AI_RECORD_KEY, String(aiRecordEnabled.value))
+  async function toggleAiRecord() {
+    const previous = aiRecordEnabled.value
+    const next = !previous
+    aiRecordEnabled.value = next
+    localStorage.setItem(AI_RECORD_KEY, String(next))
+    try {
+      const updated = await request<UserProfile>('/user/profile', {
+        method: 'PUT',
+        body: JSON.stringify({ aiRecordEnabled: next })
+      })
+      profile.value = updated
+      aiRecordEnabled.value = updated.aiRecordEnabled !== false
+      localStorage.setItem(AI_RECORD_KEY, String(aiRecordEnabled.value))
+      notify(aiRecordEnabled.value ? '已开启 AI 数据记录' : '已关闭 AI 数据记录')
+    } catch (e: any) {
+      aiRecordEnabled.value = previous
+      localStorage.setItem(AI_RECORD_KEY, String(previous))
+      notify(e.message || '保存 AI 数据记录设置失败')
+    }
   }
 
   function applyTheme() {

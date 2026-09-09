@@ -62,6 +62,10 @@ async function loadDetail() {
     const arrangeTo = typeof route.query.arrangeTo === 'string' ? route.query.arrangeTo : ''
     if (arrangeTo) {
       applyArrangedDate(arrangeTo)
+      // Consume the one-shot AI draft marker so later reloads do not reopen it.
+      const remainingQuery = { ...route.query }
+      delete remainingQuery.arrangeTo
+      await router.replace({ query: remainingQuery })
       store.notify('已按建议将日期调整为 ' + arrangeTo + '，请确认后保存')
     }
   } catch (e: any) {

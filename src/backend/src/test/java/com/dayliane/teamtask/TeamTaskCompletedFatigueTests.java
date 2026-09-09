@@ -13,6 +13,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -84,6 +86,7 @@ class TeamTaskCompletedFatigueTests {
         assertThat(decimal(fatigueService.daily(member, LocalDate.now(USER_ZONE)), "teamCompletedLoad")).isEqualByComparingTo("0");
         assertThat(decimal(jdbc.queryForObject("select completed_fatigue_weight from team_task_assignee where task_id=? and user_id=?",
                 BigDecimal.class, taskId, member))).isNull();
+        assertThat(detail.get("completedAt")).isNotNull();
     }
 
     @Test
@@ -166,6 +169,77 @@ class TeamTaskCompletedFatigueTests {
 
         Map<String, Object> detailA = teamTaskService.teamTaskDetail(taskId, memberA);
         assertThat(detailA).containsEntry("completedFatigueLevel", 1);
+        assertThat(detailA.get("completedAt")).isNotNull();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> assigneeRowsForA = (List<Map<String, Object>>) detailA.get("assignees");
+        Map<String, Object> rowA = assigneeRowsForA.stream()
+                .filter(row -> ((Number) row.get("userId")).longValue() == memberA)
+                .findFirst().orElseThrow();
+        Map<String, Object> rowB = assigneeRowsForA.stream()
+                .filter(row -> ((Number) row.get("userId")).longValue() == memberB)
+                .findFirst().orElseThrow();
+        assertThat(rowA).containsKeys("completedAt", "completedFatigueLevel", "completedFatigueWeight");
+        assertThat(rowB).doesNotContainKeys("completedAt", "completedFatigueLevel", "completedFatigueWeight");
+
+        Map<String, Object> detailB = teamTaskService.teamTaskDetail(taskId, memberB);
+        assertThat(detailB).containsEntry("completedFatigueLevel", 5);
+        assertThat(detailB.get("completedAt")).isNotNull();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> assigneeRowsForOwner = (List<Map<String, Object>>) teamTaskService.teamTaskDetail(taskId, owner).get("assignees");
+        assertThat(assigneeRowsForOwner).allSatisfy(row ->
+                assertThat(row).doesNotContainKeys("completedAt", "completedFatigueLevel", "completedFatigueWeight"));
+    }
+
+    @Test
+    void deletingSurveyHistoryClearsOnlyMyTeamFatigueSnapshot() {
+        long owner = register("15110000111", "Owner");
+        long member = register("15110000112", "Member");
+        long teamId = id(teamService.createTeam(owner, "Delete history team"));
+        teamService.joinTeam(member, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        long taskId = acceptedTask(teamId, owner, member, "Retain completion date");
+        teamTaskService.completeTeamTask(taskId, member, Map.of("fatigueLevel", 4));
+
+        Map<String, Object> result = fatigueService.deleteSurveyHistory(member);
+
+        assertThat(result).containsEntry("clearedTeamSnapshotCount", 1);
+        assertThat(jdbc.queryForObject("select completed_at from team_task_assignee where task_id=? and user_id=?", Timestamp.class, taskId, member)).isNotNull();
+        assertThat(jdbc.queryForObject("select completed_fatigue_level from team_task_assignee where task_id=? and user_id=?", Integer.class, taskId, member)).isNull();
+        assertThat(jdbc.queryForObject("select completed_fatigue_weight from team_task_assignee where task_id=? and user_id=?", BigDecimal.class, taskId, member)).isNull();
+    }
+
+    @Test
+    void retentionClearsOldTeamFatigueSnapshotButKeepsCompletionDate() {
+        long owner = register("15110000121", "Owner");
+        long member = register("15110000122", "Member");
+        long teamId = id(teamService.createTeam(owner, "Retention team"));
+        teamService.joinTeam(member, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        long taskId = acceptedTask(teamId, owner, member, "Old completion");
+        teamTaskService.completeTeamTask(taskId, member, Map.of("fatigueLevel", 3));
+        Timestamp oldCompletion = Timestamp.from(Instant.now().minus(Duration.ofDays(181)));
+        jdbc.update("update team_task_assignee set completed_at=? where task_id=? and user_id=?", oldCompletion, taskId, member);
+
+        fatigueService.cleanupRetention();
+
+        Timestamp retainedCompletion = jdbc.queryForObject("select completed_at from team_task_assignee where task_id=? and user_id=?", Timestamp.class, taskId, member);
+        assertThat(retainedCompletion).isNotNull();
+        assertThat(retainedCompletion.getTime()).isEqualTo(oldCompletion.getTime());
+        assertThat(jdbc.queryForObject("select completed_fatigue_level from team_task_assignee where task_id=? and user_id=?", Integer.class, taskId, member)).isNull();
+        assertThat(jdbc.queryForObject("select completed_fatigue_weight from team_task_assignee where task_id=? and user_id=?", BigDecimal.class, taskId, member)).isNull();
+    }
+
+    @Test
+    void rejectingAcceptedAssignmentClearsAcceptedTimestamp() {
+        long owner = register("15110000131", "Owner");
+        long member = register("15110000132", "Member");
+        long teamId = id(teamService.createTeam(owner, "Reject team"));
+        teamService.joinTeam(member, text(teamService.teamDetail(teamId, owner), "inviteCode"));
+        long taskId = acceptedTask(teamId, owner, member, "Reject after accept");
+
+        assertThat(jdbc.queryForObject("select accepted_at from team_task_assignee where task_id=? and user_id=?", Timestamp.class, taskId, member)).isNotNull();
+        teamTaskService.teamTaskAssigneeTransition(taskId, member, "rejected", List.of("accepted"));
+
+        assertThat(jdbc.queryForObject("select accepted_at from team_task_assignee where task_id=? and user_id=?", Timestamp.class, taskId, member)).isNull();
+        assertThat(jdbc.queryForObject("select rejected_at from team_task_assignee where task_id=? and user_id=?", Timestamp.class, taskId, member)).isNotNull();
     }
 
     @Test
@@ -296,6 +370,25 @@ class TeamTaskCompletedFatigueTests {
         assertThat(record.get("status")).isEqualTo("completed");
         assertThat(record.get("assignStatus")).isEqualTo("completed");
         assertThat(record.get("isCurrent")).isEqualTo(false);
+
+        Map<String, Object> memberDetail = teamTaskService.teamTaskDetail(taskId, member);
+        assertThat(memberDetail).containsEntry("assignStatus", "completed");
+        assertThat(memberDetail.get("completedAt")).isNotNull();
+        assertThat(memberDetail).containsEntry("completedFatigueLevel", 3);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> memberRows = (List<Map<String, Object>>) memberDetail.get("assignees");
+        Map<String, Object> memberRecord = memberRows.stream()
+                .filter(a -> ((Number) a.get("userId")).longValue() == member)
+                .findFirst().orElseThrow();
+        assertThat(memberRecord.get("completedAt")).isNotNull();
+        assertThat(memberRecord).containsEntry("completedFatigueLevel", 3);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> completedHistory = (List<Map<String, Object>>) teamTaskService
+                .listMyTeamTasks(member, 1, 20, "completed", "", "", "", "manual")
+                .get("list");
+        assertThat(completedHistory).extracting(row -> ((Number) row.get("id")).longValue())
+                .contains(taskId);
     }
 
     // ===== helpers =====

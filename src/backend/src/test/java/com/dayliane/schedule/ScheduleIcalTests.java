@@ -13,6 +13,7 @@ import org.springframework.test.context.ActiveProfiles;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 
@@ -164,6 +165,78 @@ class ScheduleIcalTests {
         assertThat(countOccurrences(ics, "BEGIN:VEVENT")).isEqualTo(1);
         assertThat(ics).contains("UID:series-" + seriesId + "@dayliane");
         assertThat(ics).contains("RRULE:FREQ=DAILY");
+    }
+
+    @Test
+    void repeatSeriesUsesUserTimezoneAndExcludesCompletedAndCancelledOccurrences() {
+        ZoneId zone = ZoneId.of("America/Los_Angeles");
+        long userId = register("15100030008", zone);
+        LocalDate today = LocalDate.now(zone);
+        Map<String, Object> created = scheduleService.createSchedule(userId, Map.of(
+                "title", "Timezone daily",
+                "timeType", "deadline_task",
+                "deadlineTime", today.atTime(12, 0).atZone(zone).toInstant().toString(),
+                "rrule", "FREQ=DAILY"
+        ));
+        long seedId = id(created);
+        String seriesId = String.valueOf(created.get("seriesId"));
+        scheduleService.setScheduleStatus(seedId, userId, "completed");
+
+        LocalDate nextMonthStart = today.plusMonths(1).withDayOfMonth(1);
+        LocalDate nextMonthEnd = nextMonthStart.with(java.time.temporal.TemporalAdjusters.lastDayOfMonth());
+        scheduleService.materializeForRange(userId, nextMonthStart, nextMonthEnd);
+        Long cancelledId = jdbc.queryForObject(
+                "select id from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                Long.class, seriesId, java.sql.Date.valueOf(nextMonthStart));
+        scheduleService.setScheduleStatus(cancelledId, userId, "cancelled");
+
+        String token = String.valueOf(scheduleService.subscribeToken(userId).get("token"));
+        String ics = scheduleService.calendarIcs(token);
+        String seedExdate = today.format(DateTimeFormatter.BASIC_ISO_DATE) + "T120000";
+        String cancelledExdate = nextMonthStart.format(DateTimeFormatter.BASIC_ISO_DATE) + "T120000";
+
+        assertThat(ics).contains("DTSTART;TZID=America/Los_Angeles:");
+        assertThat(ics).contains("EXDATE;TZID=America/Los_Angeles:");
+        assertThat(ics).contains(seedExdate, cancelledExdate);
+        assertThat(ics).doesNotContain("UID:schedule-" + seedId + "@dayliane");
+        assertThat(ics).doesNotContain("UID:schedule-" + cancelledId + "@dayliane");
+    }
+
+    @Test
+    void movedPendingOccurrenceIsExportedAsAnExceptionWithoutChangingItsIdentity() {
+        ZoneId zone = USER_ZONE;
+        long userId = register("15100030009", zone);
+        LocalDate today = LocalDate.now(zone);
+        Map<String, Object> created = scheduleService.createSchedule(userId, Map.of(
+                "title", "Movable daily",
+                "timeType", "deadline_task",
+                "deadlineTime", today.atTime(12, 0).atZone(zone).toInstant().toString(),
+                "rrule", "FREQ=DAILY"
+        ));
+        String seriesId = String.valueOf(created.get("seriesId"));
+        LocalDate nextMonthStart = today.plusMonths(1).withDayOfMonth(1);
+        LocalDate nextMonthEnd = nextMonthStart.with(java.time.temporal.TemporalAdjusters.lastDayOfMonth());
+        scheduleService.materializeForRange(userId, nextMonthStart, nextMonthEnd);
+
+        LocalDate identityDate = nextMonthEnd;
+        Long movedId = jdbc.queryForObject(
+                "select id from schedule where series_id=? and occurrence_date=? and deleted_at is null",
+                Long.class, seriesId, java.sql.Date.valueOf(identityDate));
+        scheduleService.editOccurrence(movedId, userId, Map.of(
+                "deadlineTime", nextMonthStart.atTime(15, 0).atZone(zone).toInstant().toString()
+        ));
+
+        assertThat(jdbc.queryForObject("select occurrence_date from schedule where id=?", java.sql.Date.class, movedId).toLocalDate())
+                .isEqualTo(identityDate);
+        String token = String.valueOf(scheduleService.subscribeToken(userId).get("token"));
+        String ics = scheduleService.calendarIcs(token);
+
+        assertThat(ics).contains("EXDATE;TZID=Asia/Shanghai:");
+        assertThat(ics).contains(identityDate.format(DateTimeFormatter.BASIC_ISO_DATE) + "T120000");
+        assertThat(ics).contains("UID:schedule-" + movedId + "@dayliane");
+        assertThat(ics).contains("DTSTART;TZID=Asia/Shanghai:"
+                + nextMonthStart.format(DateTimeFormatter.BASIC_ISO_DATE) + "T150000");
+        assertThat(countOccurrences(ics, "BEGIN:VEVENT")).isEqualTo(2);
     }
 
     private static int countOccurrences(String haystack, String needle) {

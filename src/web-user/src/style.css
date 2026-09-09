@@ -879,10 +879,25 @@ input:focus, select:focus, textarea:focus {
 .arrange-copy span { color: var(--muted-strong); font-size: 11px; }
 .arrange-copy span b { color: var(--text-strong); }
 .arrange-copy .arrange-reason { color: var(--muted); font-size: 10px; }
-.arrange-apply { justify-self: start; min-height: 24px; padding: 0 10px; font-size: 11px; }
+.arrange-apply { justify-self: start; min-height: 24px; padding: 0 10px; gap: 5px; font-size: 11px; }
+.arrange-apply:disabled { cursor: not-allowed; opacity: .55; }
+.arrange-action-note { color: var(--warning) !important; font-size: 10px !important; line-height: 1.45; }
 .arrange-hint { margin: 10px 2px 0; color: var(--muted); font-size: 10px; }
 .arrange-empty { margin-top: 12px; display: flex; align-items: center; gap: 8px; color: var(--muted-strong); font-size: 12px; }
 .arrange-empty svg { color: var(--success); flex: 0 0 auto; }
+.ai-reorder-modal { width: min(560px, 100%); }
+.ai-reorder-modal .modal-head { margin-bottom: 12px; }
+.ai-reorder-modal .modal-head > div { min-width: 0; }
+.ai-reorder-modal .modal-head p { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.ai-reorder-reason { color: var(--muted-strong); font-size: 12px; line-height: 1.55; }
+.ai-reorder-list { list-style: none; margin: 14px 0 0; padding: 0; border-top: 1px solid var(--border-soft); }
+.ai-reorder-list li { min-height: 52px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-soft); }
+.ai-reorder-list strong { min-width: 0; overflow-wrap: anywhere; color: var(--text-strong); font-size: 13px; }
+.ai-reorder-position { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; background: var(--primary-softer); color: var(--primary); font-size: 11px; font-weight: 700; }
+.ai-reorder-controls { display: flex; gap: 6px; }
+.ai-reorder-controls button { width: 30px; min-height: 30px; padding: 0; display: grid; place-items: center; }
+.ai-reorder-actions { margin-top: 16px; }
+.ai-reorder-actions .primary { display: inline-flex; align-items: center; gap: 7px; }
 .home-fatigue-strip {
   min-height: 58px;
   margin: -5px 0 20px;

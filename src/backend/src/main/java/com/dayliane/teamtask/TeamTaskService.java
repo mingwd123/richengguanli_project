@@ -94,9 +94,12 @@ public class TeamTaskService {
     }
 
     public Map<String, Object> listMyTeamTasks(long userId, int page, int size, String assignStatus, String keyword, String dateFrom, String dateTo, String sort) {
-        StringBuilder from = new StringBuilder(" from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=? and a.is_active=true and t.approval_status='approved' and t.deleted_at is null");
+        boolean completedHistory = "completed".equals(assignStatus);
+        StringBuilder from = new StringBuilder(" from team_task t join team_task_assignee a on a.task_id=t.id join team_member m on m.team_id=t.team_id and m.user_id=? and m.status='active' where a.user_id=?");
+        from.append(completedHistory ? " and a.status='completed'" : " and a.is_active=true");
+        from.append(" and t.approval_status='approved' and t.deleted_at is null");
         List<Object> params = new ArrayList<>(List.of(userId, userId));
-        if (!blank(assignStatus)) { from.append(" and a.status=?"); params.add(assignStatus); }
+        if (!blank(assignStatus) && !completedHistory) { from.append(" and a.status=?"); params.add(assignStatus); }
         if (!blank(keyword)) { from.append(" and t.title like ?"); params.add("%" + keyword + "%"); }
         appendDateOverlap(from, params, dateFrom, dateTo, userZone(userId));
         String order = "completed".equals(assignStatus) && "manual".equals(sort) ? "t.sort_order asc,t.id asc" : teamTaskOrder(sort, false);
@@ -169,8 +172,9 @@ public class TeamTaskService {
             throw new BusinessException(403, "task is awaiting manager review");
         }
         Map<String, Object> creator = userView(longValue(task.get("creatorId")));
+        boolean exposeCompletedFatigue = fatigueService.trackingEnabledFor(userId);
         task.put("teamName", requireTeam(teamId).get("name"));
-        task.put("assignees", teamTaskAssignees(taskId));
+        task.put("assignees", teamTaskAssignees(taskId, userId, exposeCompletedFatigue));
         task.put("reassignmentCandidates", teamTaskReassignmentCandidates(taskId));
         task.put("events", teamTaskEvents(taskId));
         task.put("creator", creator);
@@ -179,15 +183,16 @@ public class TeamTaskService {
         task.put("canReview", teamManager && "pending".equals(task.get("approvalStatus")));
         task.put("pendingReminders", jdbc.query("select id,user_id userId,remind_at remindAt,status from reminder where target_type='team_task' and target_id=? and status='pending' order by remind_at,user_id", (rs, i) -> Map.of(
                 "id", rs.getLong("id"), "userId", rs.getLong("userId"), "remindAt", iso(rs.getTimestamp("remindAt")), "status", rs.getString("status")), taskId));
-        try {
-            Map<String, Object> mine = requireMyActiveAssignee(taskId, userId);
+        Map<String, Object> mine = findMyAssignee(taskId, userId);
+        if (mine != null) {
             task.put("assigneeId", mine.get("id"));
             task.put("assignStatus", mine.get("status"));
             task.put("assignRound", mine.get("assignRound"));
             task.put("completedAt", mine.get("completedAt") == null ? null : iso((Timestamp) mine.get("completedAt")));
-            task.put("completedFatigueLevel", mine.get("completedFatigueLevel"));
-            task.put("completedFatigueWeight", mine.get("completedFatigueWeight"));
-        } catch (BusinessException ignored) {
+            if (exposeCompletedFatigue) {
+                task.put("completedFatigueLevel", mine.get("completedFatigueLevel"));
+                task.put("completedFatigueWeight", mine.get("completedFatigueWeight"));
+            }
         }
         return task;
     }
@@ -250,8 +255,13 @@ public class TeamTaskService {
         Map<String, Object> a = requireMyActiveAssigneeForUpdate(taskId, userId);
         String current = String.valueOf(a.get("status"));
         if (!allowedFrom.contains(current)) throw new BusinessException(400, "invalid status transition");
-        String timeColumn = switch (next) { case "accepted" -> "accepted_at"; case "rejected" -> "rejected_at"; case "completed" -> "completed_at"; default -> "status_updated_at"; };
-        int updated = jdbc.update("update team_task_assignee set status=?, " + timeColumn + "=utc_timestamp(), status_updated_by=?, status_updated_at=utc_timestamp() where id=? and status=? and is_active=true", next, userId, a.get("id"), current);
+        String transitionColumns = switch (next) {
+            case "accepted" -> "accepted_at=utc_timestamp(), rejected_at=null, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null";
+            case "rejected" -> "rejected_at=utc_timestamp(), accepted_at=null, completed_at=null, completed_fatigue_level=null, completed_fatigue_weight=null";
+            case "completed" -> "completed_at=utc_timestamp()";
+            default -> "status_updated_at=utc_timestamp()";
+        };
+        int updated = jdbc.update("update team_task_assignee set status=?, " + transitionColumns + ", status_updated_by=?, status_updated_at=utc_timestamp() where id=? and status=? and is_active=true", next, userId, a.get("id"), current);
         if (updated == 0) throw new BusinessException(409, "assignee status has changed");
         recordEvent(taskId, userId, next, actionLabel(next));
         recalculateTeamTaskStatus(taskId);
@@ -728,27 +738,33 @@ public class TeamTaskService {
 
     private Map<String, Object> teamTaskSummary(long taskId, long userId) {
         Map<String, Object> task = requireTeamTask(taskId);
+        boolean exposeCompletedFatigue = fatigueService.trackingEnabledFor(userId);
         task.put("teamName", requireTeam(longValue(task.get("teamId"))).get("name"));
         task.put("assigneeCount", count("select count(*) from team_task_assignee where task_id=? and is_active=true", taskId));
-        task.put("assignees", teamTaskAssignees(taskId));
+        task.put("assignees", teamTaskAssignees(taskId, userId, exposeCompletedFatigue));
         task.put("reassignmentCandidates", teamTaskReassignmentCandidates(taskId));
         List<Timestamp> reminders = jdbc.query("select min(remind_at) remindAt from reminder where target_type='team_task' and target_id=? and user_id=? and status='pending'", (rs, i) -> rs.getTimestamp("remindAt"), taskId, userId);
         task.put("remindAt", reminders.isEmpty() ? "" : iso(reminders.get(0)));
-        try {
-            Map<String, Object> a = requireMyActiveAssignee(taskId, userId);
-            task.put("assigneeId", a.get("id"));
-            task.put("assignStatus", a.get("status"));
-            task.put("assignRound", a.get("assignRound"));
-            task.put("completedAt", a.get("completedAt") == null ? null : iso((Timestamp) a.get("completedAt")));
-            task.put("completedFatigueLevel", a.get("completedFatigueLevel"));
-            task.put("completedFatigueWeight", a.get("completedFatigueWeight"));
-        } catch (BusinessException ignored) {
+        Map<String, Object> mine = findMyAssignee(taskId, userId);
+        if (mine != null) {
+            task.put("assigneeId", mine.get("id"));
+            task.put("assignStatus", mine.get("status"));
+            task.put("assignRound", mine.get("assignRound"));
+            task.put("completedAt", mine.get("completedAt") == null ? null : iso((Timestamp) mine.get("completedAt")));
+            if (exposeCompletedFatigue) {
+                task.put("completedFatigueLevel", mine.get("completedFatigueLevel"));
+                task.put("completedFatigueWeight", mine.get("completedFatigueWeight"));
+            }
         }
         return task;
     }
 
     private List<Map<String, Object>> teamTaskAssignees(long taskId) {
-        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,u.nickname,u.avatar_url avatarUrl from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and (a.is_active=true or a.status='completed') order by a.is_active desc, a.id", (rs, i) -> {
+        return teamTaskAssignees(taskId, null, false);
+    }
+
+    private List<Map<String, Object>> teamTaskAssignees(long taskId, Long viewerUserId, boolean exposeCompletedFatigue) {
+        return jdbc.query("select a.id,a.user_id userId,a.assign_round assignRound,a.is_active isActive,a.status,a.completed_at completedAt,a.completed_fatigue_level completedFatigueLevel,a.completed_fatigue_weight completedFatigueWeight,u.nickname,u.avatar_url avatarUrl from team_task_assignee a join `user` u on u.id=a.user_id where a.task_id=? and (a.is_active=true or a.status='completed') order by a.is_active desc, a.id", (rs, i) -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", rs.getLong("id"));
             m.put("assigneeId", rs.getLong("id"));
@@ -760,8 +776,35 @@ public class TeamTaskService {
             m.put("assignStatus", rs.getString("status"));
             m.put("nickname", rs.getString("nickname"));
             m.put("avatarUrl", rs.getString("avatarUrl"));
+            if (viewerUserId != null && rs.getLong("userId") == viewerUserId) {
+                Timestamp completedAt = rs.getTimestamp("completedAt");
+                m.put("completedAt", completedAt == null ? null : iso(completedAt));
+                if (exposeCompletedFatigue) {
+                    m.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
+                    m.put("completedFatigueWeight", rs.getBigDecimal("completedFatigueWeight"));
+                }
+            }
             return m;
         }, taskId);
+    }
+
+    private Map<String, Object> findMyAssignee(long taskId, long userId) {
+        List<Map<String, Object>> rows = jdbc.query(
+                "select id,user_id userId,status,assign_round assignRound,is_active isActive,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight " +
+                        "from team_task_assignee where task_id=? and user_id=? order by is_active desc, assign_round desc, id desc limit 1",
+                (rs, i) -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", rs.getLong("id"));
+                    m.put("userId", rs.getLong("userId"));
+                    m.put("status", rs.getString("status"));
+                    m.put("assignRound", rs.getInt("assignRound"));
+                    m.put("isActive", rs.getBoolean("isActive"));
+                    m.put("completedAt", rs.getTimestamp("completedAt"));
+                    m.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
+                    m.put("completedFatigueWeight", rs.getBigDecimal("completedFatigueWeight"));
+                    return m;
+                }, taskId, userId);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private List<Map<String, Object>> teamTaskReassignmentCandidates(long taskId) {
