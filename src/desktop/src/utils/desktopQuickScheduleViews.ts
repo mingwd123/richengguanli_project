@@ -1,6 +1,7 @@
 import type { ScheduleViewMode } from '@web/types'
 
 export type QuickSource = 'personal' | 'team'
+export type QuickScheduleStatus = 'pending' | 'completed' | 'cancelled'
 export type QuickViewKind =
   | 'timeline'
   | 'create'
@@ -25,19 +26,27 @@ export function quickPreferenceKeys(userId: number) {
   }
 }
 
-export function quickScheduleSort(mode: ScheduleViewMode) {
+export function quickScheduleSort(mode: ScheduleViewMode, status: QuickScheduleStatus = 'pending') {
+  if (status === 'completed') {
+    // The API orders completed items by their completion timestamp. Keep the
+    // mode-specific grouping while using that stable recency order in each
+    // section.
+    if (mode === 'urgency') return 'urgency_desc'
+    if (mode === 'fatigue') return 'fatigue_desc'
+    return 'completed_desc'
+  }
   if (mode === 'group') return 'manual'
   if (mode === 'urgency') return 'urgency_desc'
   if (mode === 'fatigue') return 'fatigue_desc'
   return 'time_asc'
 }
 
-export function quickScheduleQuery(mode: ScheduleViewMode) {
+export function quickScheduleQuery(mode: ScheduleViewMode, status: QuickScheduleStatus = 'pending') {
   return new URLSearchParams({
     page: '1',
     size: String(QUICK_SCHEDULE_PAGE_SIZE),
-    status: 'pending',
-    sort: quickScheduleSort(mode),
+    status,
+    sort: quickScheduleSort(mode, status),
     viewMode: mode,
     quickScope: 'true',
   })

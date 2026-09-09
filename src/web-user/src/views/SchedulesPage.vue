@@ -7,8 +7,9 @@ import PaginationBar from '../components/PaginationBar.vue'
 import CountdownPill from '../components/CountdownPill.vue'
 import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
 import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
+import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
 import { AlertTriangle, BatteryMedium, Clock3, Layers3, MoreHorizontal } from 'lucide-vue-next'
-import { getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, reminderTimeForOffset, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso } from '../utils/helpers'
+import { formatTime, getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso } from '../utils/helpers'
 import type { FatiguePreview, Schedule, ScheduleForm, ScheduleViewMode } from '../types'
 
 const router = useRouter()
@@ -21,16 +22,18 @@ const showDraftConfirm = ref(false)
 const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; remindAt: string; description: string; urgencyLevel: number; fatigueLevel: number }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', description: '', urgencyLevel: 3, fatigueLevel: 3 })
 const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; group?: any; schedule?: Schedule } | null>(null)
 const filterKeyword = ref(store.schedulePage.keyword || '')
-const filterStatus = ref(store.schedulePage.status || '')
+const filterStatus = ref(store.schedulePage.status || 'pending')
 const filterDateFrom = ref(store.schedulePage.dateFrom || '')
 const filterDateTo = ref(store.schedulePage.dateTo || '')
+const scheduleStatus = computed(() => (filterStatus.value || 'pending') as 'pending' | 'completed' | 'cancelled')
 const draggingGroupId = ref<number | null>(null)
 const draggingSchedule = ref<{ id: number; fromGroupId: number | null } | null>(null)
-const selectedReminderOffset = ref<number | null>(null)
 const createFatiguePreview = ref<FatiguePreview | null>(null)
 const draftFatiguePreview = ref<FatiguePreview | null>(null)
 const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
 const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
+const aiReminderBaseTime = computed(() => aiDraft.value.timeType === 'deadline_task' ? aiDraft.value.deadlineTime : aiDraft.value.startTime)
+const aiReminderBaseLabel = computed(() => aiDraft.value.timeType === 'deadline_task' ? '截止时间' : '开始时间')
 const isGroupedView = computed(() => store.viewMode === 'group')
 const levelOptions = [1, 2, 3, 4, 5]
 const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
@@ -41,6 +44,11 @@ const viewOptions = [
   { value: 'urgency' as ScheduleViewMode, label: '紧急度', icon: AlertTriangle },
   { value: 'fatigue' as ScheduleViewMode, label: '疲劳度', icon: BatteryMedium },
 ]
+const statusOptions = [
+  { value: 'pending' as const, label: '待处理' },
+  { value: 'completed' as const, label: '已完成' },
+  { value: 'cancelled' as const, label: '已取消' },
+]
 const reminderBaseTime = computed(() => {
   return store.scheduleForm.timeType === 'deadline_task'
     ? store.scheduleForm.deadlineTime
@@ -49,27 +57,6 @@ const reminderBaseTime = computed(() => {
 
 function reminderBaseLabel() {
   return store.scheduleForm.timeType === 'deadline_task' ? '截止时间' : '开始时间'
-}
-
-function reminderPresetLabel(minutes: number) {
-  if (minutes % 1440 === 0) return `提前 ${minutes / 1440} 天`
-  if (minutes % 60 === 0) return `提前 ${minutes / 60} 小时`
-  return `提前 ${minutes} 分钟`
-}
-
-function applyReminderOffset(minutes: number) {
-  if (!reminderBaseTime.value) {
-    store.notify(`请先填写${reminderBaseLabel()}`)
-    return
-  }
-  const reminderTime = reminderTimeForOffset(reminderBaseTime.value, minutes, userTimezone.value)
-  if (!reminderTime) return
-  store.scheduleForm.remindAt = toDatetimeLocal(reminderTime)
-  selectedReminderOffset.value = minutes
-}
-
-function handleManualReminderChange() {
-  selectedReminderOffset.value = null
 }
 
 function toDatetimeLocal(value: string) {
@@ -157,7 +144,7 @@ const filteredSchedules = computed(() => {
 })
 
 let filterTimer: ReturnType<typeof setTimeout> | undefined
-watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo, () => store.urgencyLevelFilter, () => store.fatigueLevelFilter], () => {
+watch([filterKeyword, filterDateFrom, filterDateTo, () => store.urgencyLevelFilter, () => store.fatigueLevelFilter], () => {
   clearTimeout(filterTimer)
   filterTimer = setTimeout(() => store.loadSchedules({
     page: 1,
@@ -170,15 +157,7 @@ watch([filterKeyword, filterStatus, filterDateFrom, filterDateTo, () => store.ur
 watch(() => store.schedulePage.sort, () => {
   if (isGroupedView.value) store.loadSchedules({ page: 1 })
 })
-watch([
-  () => store.scheduleForm.timeType,
-  () => store.scheduleForm.startTime,
-  () => store.scheduleForm.deadlineTime
-], () => {
-  if (selectedReminderOffset.value !== null && reminderBaseTime.value) applyReminderOffset(selectedReminderOffset.value)
-})
 watch(() => store.scheduleModalOpen, isOpen => {
-  if (!isOpen) selectedReminderOffset.value = null
   if (!isOpen) createFatiguePreview.value = null
 })
 
@@ -261,16 +240,24 @@ async function applyView(mode: ScheduleViewMode) {
   await router.replace({ query: { ...route.query, view: mode } })
 }
 
+async function applyStatus(status: 'pending' | 'completed' | 'cancelled') {
+  filterStatus.value = status
+  await store.loadSchedules({ page: 1, status })
+  await router.replace({ query: { ...route.query, view: store.viewMode, status } })
+}
+
 onMounted(async () => {
   const queryView = route.query.view
+  const queryStatus = route.query.status
+  if (['pending', 'completed', 'cancelled'].includes(String(queryStatus))) filterStatus.value = String(queryStatus) as 'pending' | 'completed' | 'cancelled'
+  else filterStatus.value = 'pending'
   if (validView(queryView) && queryView !== store.viewMode) await store.setScheduleViewMode(queryView)
-  else if (!store.schedules.length) await store.loadSchedules({ page: 1 })
-  if (!validView(queryView)) await router.replace({ query: { ...route.query, view: store.viewMode } })
+  await store.loadSchedules({ page: 1, status: filterStatus.value })
+  if (!validView(queryView) || queryStatus !== filterStatus.value) await router.replace({ query: { ...route.query, view: store.viewMode, status: filterStatus.value } })
 })
 
 const scheduleGroups = computed(() => {
-  const completed = filteredSchedules.value.filter(schedule => schedule.status === 'completed')
-  const active = filteredSchedules.value.filter(schedule => schedule.status !== 'completed')
+  const active = filteredSchedules.value
   const groups = store.taskGroups.map(group => ({
     id: group.id,
     name: group.name,
@@ -280,19 +267,19 @@ const scheduleGroups = computed(() => {
   const groupedIds = new Set(store.taskGroups.map(group => group.id))
   const ungrouped = active.filter(schedule => !groupedIds.has(schedule.groupId || 0))
   if (ungrouped.length) groups.push({ id: 0, name: '未分组', sortOrder: Number.MAX_SAFE_INTEGER - 1, items: ungrouped })
-  if (completed.length) groups.push({ id: -1, name: '已完成', sortOrder: Number.MAX_SAFE_INTEGER, items: completed.sort((a, b) => a.sortOrder - b.sortOrder) })
   return groups.sort((a, b) => a.sortOrder - b.sortOrder)
 })
 
 const serverSections = computed(() => {
-  const rows = new Map<string, { id: string; name: string; sortOrder: number; items: Schedule[]; plannedLoad: number; pendingCount: number; total: number }>()
+  const rows = new Map<string, { id: string; name: string; sortOrder: number; items: Schedule[]; plannedLoad: number; completedLoad: number; pendingCount: number; completedCount: number; total: number }>()
   for (const schedule of filteredSchedules.value) {
     const id = schedule.sectionKey || `${store.viewMode}:${schedule.sectionLabel || '未分组'}`
-    const current = rows.get(id) || { id, name: schedule.sectionLabel || '未分组', sortOrder: rows.size, items: [], plannedLoad: 0, pendingCount: 0, total: 0 }
+    const current = rows.get(id) || { id, name: schedule.sectionLabel || '未分组', sortOrder: rows.size, items: [], plannedLoad: 0, completedLoad: 0, pendingCount: 0, completedCount: 0, total: 0 }
     current.items.push(schedule)
     current.total += 1
     if (schedule.status === 'pending') current.pendingCount += 1
-    if (schedule.status !== 'cancelled') current.plannedLoad += Number(schedule.fatigueWeight || 3)
+    if (schedule.status === 'pending') current.plannedLoad += Number(schedule.fatigueWeight || 3)
+    if (schedule.status === 'completed') { current.completedCount += 1; current.completedLoad += Number(schedule.completedFatigueWeight || schedule.fatigueWeight || 3) }
     rows.set(id, current)
   }
   return [...rows.values()].map(section => {
@@ -634,26 +621,7 @@ const contextItems = computed(() => {
           <label v-if="store.scheduleForm.timeType === 'deadline_task'">截止时间<input v-model="store.scheduleForm.deadlineTime" type="datetime-local" /></label>
           <template v-if="store.scheduleForm.timeType === 'duration_task'"><label>开始时间<input v-model="store.scheduleForm.startTime" type="datetime-local" /></label><label>结束时间<input v-model="store.scheduleForm.endTime" type="datetime-local" /></label></template>
           <FatiguePreviewInline v-if="createFatiguePreview" :preview="createFatiguePreview" />
-          <label>提醒时间<input v-model="store.scheduleForm.remindAt" type="datetime-local" @input="handleManualReminderChange" /></label>
-          <div class="reminder-shortcuts" aria-label="快捷提醒时间">
-            <div class="reminder-shortcut-head">
-              <strong>快捷提醒</strong>
-              <small v-if="reminderBaseTime">按{{ reminderBaseLabel() }}计算</small>
-              <small v-else>请先填写{{ reminderBaseLabel() }}</small>
-            </div>
-            <div class="reminder-shortcut-options">
-              <button
-                v-for="minutes in reminderPresets"
-                :key="minutes"
-                type="button"
-                :class="{ active: selectedReminderOffset === minutes }"
-                :disabled="!reminderBaseTime"
-                :aria-pressed="selectedReminderOffset === minutes"
-                @click="applyReminderOffset(minutes)"
-              >{{ reminderPresetLabel(minutes) }}</button>
-              <span v-if="selectedReminderOffset === null && store.scheduleForm.remindAt" class="reminder-custom-state">自定义</span>
-            </div>
-          </div>
+          <ReminderShortcutPicker v-model="store.scheduleForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel()" :presets="reminderPresets" :timezone="userTimezone" :disabled="store.loading" @error="store.notify" />
           <div class="form-actions"><button type="button" @click="store.closeScheduleModal()">取消</button><button class="primary" :disabled="store.loading">保存</button></div>
         </form>
       </section>
@@ -676,7 +644,7 @@ const contextItems = computed(() => {
           <label v-if="aiDraft.timeType === 'deadline_task'">截止时间<input v-model="aiDraft.deadlineTime" type="datetime-local" /></label>
           <template v-if="aiDraft.timeType === 'duration_task'"><label>开始时间<input v-model="aiDraft.startTime" type="datetime-local" /></label><label>结束时间<input v-model="aiDraft.endTime" type="datetime-local" /></label></template>
           <FatiguePreviewInline v-if="draftFatiguePreview" :preview="draftFatiguePreview" />
-          <label>提醒时间<input v-model="aiDraft.remindAt" type="datetime-local" /></label>
+          <ReminderShortcutPicker v-model="aiDraft.remindAt" :base-time="aiReminderBaseTime" :base-label="aiReminderBaseLabel" :presets="reminderPresets" :timezone="userTimezone" @error="store.notify" />
           <div class="form-actions">
             <button type="button" @click="cancelAiDraft">取消</button>
             <button class="primary">确认保存</button>

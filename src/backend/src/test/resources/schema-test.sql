@@ -390,6 +390,7 @@ CREATE TABLE ai_api_key (
   name VARCHAR(100) NOT NULL,
   api_key_masked VARCHAR(100) NOT NULL,
   api_key_ciphertext TEXT NOT NULL,
+  api_base_url VARCHAR(500),
   priority INT NOT NULL,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   remark TEXT,

@@ -63,6 +63,7 @@ import {
   shouldAcceptScheduleRevision,
   shouldDeferQuickTarget,
   type QuickSource,
+  type QuickScheduleStatus,
 } from '../utils/desktopQuickScheduleViews'
 
 type SourceType = 'schedule' | 'team_task'
@@ -121,6 +122,7 @@ const aiBreakdownTasks = ref<QuickTeamBreakdownTask[]>([])
 const aiBreakdownBase = ref<QuickTeamBreakdownBase | null>(null)
 const quickSource = ref<QuickSource>('personal')
 const quickViewMode = ref<ScheduleViewMode>('time')
+const quickScheduleStatus = ref<QuickScheduleStatus>('pending')
 const quickScheduleResults = ref<Record<ScheduleViewMode, ScheduleListResult | null>>(quickModeRecord(() => null))
 const quickPersonalLoading = ref<Record<ScheduleViewMode, boolean>>(quickModeRecord(() => false))
 const quickPersonalErrors = ref<Record<ScheduleViewMode, string>>(quickModeRecord(() => ''))
@@ -184,6 +186,12 @@ const quickViewOptions = [
   { value: 'group' as ScheduleViewMode, label: '分组', icon: Layers3 },
   { value: 'urgency' as ScheduleViewMode, label: '紧急', icon: AlertTriangle },
   { value: 'fatigue' as ScheduleViewMode, label: '疲劳', icon: BatteryMedium },
+]
+
+const quickStatusOptions = [
+  { value: 'pending' as QuickScheduleStatus, label: '待处理' },
+  { value: 'completed' as QuickScheduleStatus, label: '已完成' },
+  { value: 'cancelled' as QuickScheduleStatus, label: '已取消' },
 ]
 
 const nestedViewTitle = computed(() => {

@@ -28,7 +28,7 @@ const store = useAdminStore()
 const configForm = ref({ provider: '', modelName: '', apiBaseUrl: '', remark: '' })
 const keyDialogVisible = ref(false)
 const editingKeyId = ref(null)
-const keyForm = ref({ name: '', apiKey: '', enabled: true, remark: '' })
+const keyForm = ref({ name: '', apiKey: '', apiBaseUrl: '', enabled: true, remark: '' })
 const keyFormError = ref('')
 
 const isEditingKey = computed(() => editingKeyId.value !== null)
@@ -75,7 +75,7 @@ async function toggleAiEnabled(enabled) {
 
 function resetKeyForm() {
   editingKeyId.value = null
-  keyForm.value = { name: '', apiKey: '', enabled: true, remark: '' }
+  keyForm.value = { name: '', apiKey: '', apiBaseUrl: '', enabled: true, remark: '' }
   keyFormError.value = ''
 }
 
@@ -93,6 +93,7 @@ function openEditKey(key) {
   keyForm.value = {
     name: key.name || '',
     apiKey: '',
+    apiBaseUrl: key.apiBaseUrl || '',
     enabled: key.enabled !== false,
     remark: key.remark || '',
   }
@@ -201,8 +202,8 @@ function storedTestLabel(key) {
             <input v-model="configForm.modelName" placeholder="deepseek-chat" />
           </label>
           <label class="wide-field">
-            <span>API Base URL</span>
-            <input v-model="configForm.apiBaseUrl" placeholder="https://api.deepseek.com/v1" />
+            <span>默认 API Base URL（自动补 /v1）</span>
+            <input v-model="configForm.apiBaseUrl" placeholder="https://api.deepseek.com" />
           </label>
           <label class="wide-field">
             <span>备注</span>
@@ -235,7 +236,7 @@ function storedTestLabel(key) {
         <div class="key-table" role="table" aria-label="API Key 优先级列表">
           <div class="key-row key-table-head" role="row">
             <span>优先级</span>
-            <span>名称与凭据</span>
+            <span>名称、凭据与地址</span>
             <span>状态</span>
             <span>备注</span>
             <span>操作</span>
@@ -248,6 +249,9 @@ function storedTestLabel(key) {
             <div class="key-identity" data-label="名称与凭据">
               <div><el-icon><Key /></el-icon><strong>{{ key.name }}</strong></div>
               <code>{{ key.apiKeyMasked || '已加密保存' }}</code>
+              <small class="key-base-url" :title="key.apiBaseUrl || '继承默认 Base URL'">
+                {{ key.apiBaseUrl || '继承默认 Base URL' }}
+              </small>
               <small
                 v-if="store.aiKeyTestResults[key.id]"
                 :class="store.aiKeyTestResults[key.id].ok ? 'test-success' : 'test-failed'"
@@ -307,6 +311,7 @@ function storedTestLabel(key) {
             <div class="key-identity" data-label="名称与凭据">
               <div><el-icon><Key /></el-icon><strong>环境变量兜底</strong><span class="readonly-tag">只读</span></div>
               <code>{{ store.aiEnvironmentFallback.apiKeyMasked || 'AI_API_KEY' }}</code>
+              <small class="key-base-url">使用默认 Base URL</small>
             </div>
             <div class="status-cell" data-label="状态">
               <span :class="['status-badge', store.aiEnvironmentFallback.configured ? 'status-active' : 'status-disabled']">
@@ -331,13 +336,13 @@ function storedTestLabel(key) {
     <el-dialog
       v-model="keyDialogVisible"
       :title="keyDialogTitle"
-      width="520px"
+      width="min(560px, calc(100vw - 32px))"
       append-to-body
       :close-on-click-modal="false"
       :before-close="beforeKeyDialogClose"
       @closed="resetKeyForm"
     >
-      <form class="key-dialog-form" @submit.prevent="submitKey">
+      <form id="ai-key-form" class="key-dialog-form" @submit.prevent="submitKey">
         <label>
           <span>Key 名称</span>
           <input v-model="keyForm.name" maxlength="100" autocomplete="off" placeholder="例如：主线路" />
@@ -352,6 +357,16 @@ function storedTestLabel(key) {
           />
         </label>
         <label>
+          <span>Base URL（可选，自动补 /v1）</span>
+          <input
+            v-model="keyForm.apiBaseUrl"
+            type="url"
+            maxlength="500"
+            autocomplete="url"
+            placeholder="留空继承默认地址"
+          />
+        </label>
+        <label>
           <span>备注</span>
           <textarea v-model="keyForm.remark" maxlength="500" placeholder="可选备注信息"></textarea>
         </label>
@@ -363,7 +378,7 @@ function storedTestLabel(key) {
       </form>
       <template #footer>
         <el-button :disabled="keyDialogLoading" @click="keyDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="keyDialogLoading" @click="submitKey">
+        <el-button type="primary" native-type="submit" form="ai-key-form" :loading="keyDialogLoading">
           {{ isEditingKey ? '保存' : '添加' }}
         </el-button>
       </template>
@@ -399,6 +414,7 @@ function storedTestLabel(key) {
 .key-identity strong { overflow: hidden; color: var(--admin-text-strong); text-overflow: ellipsis; white-space: nowrap; }
 .key-identity code { width: fit-content; max-width: 100%; overflow: hidden; padding: 2px 6px; border-radius: 4px; color: var(--admin-primary); text-overflow: ellipsis; white-space: nowrap; }
 .key-identity small { overflow-wrap: anywhere; font-size: 11px; }
+.key-identity .key-base-url { overflow: hidden; color: var(--admin-muted); text-overflow: ellipsis; white-space: nowrap; }
 .test-success { color: var(--admin-success); }
 .test-failed, .form-error { color: var(--admin-danger); }
 .test-untested { color: var(--admin-muted); }
@@ -442,6 +458,7 @@ function storedTestLabel(key) {
   .key-row { grid-template-columns: 58px minmax(0, 1fr); gap: 9px; padding: 12px; }
   .priority-cell { grid-column: 1; grid-row: 1; }
   .key-identity { grid-column: 2; grid-row: 1; }
+  .key-identity .key-base-url { overflow: visible; text-overflow: clip; white-space: normal; }
   .status-cell, .key-remark, .key-actions, .locked-action { grid-column: 2; grid-row: auto; justify-content: flex-start; }
 }
 </style>

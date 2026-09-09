@@ -76,6 +76,7 @@ export const useAppStore = defineStore('app', () => {
   const urgencyLevelFilter = ref<number | null>(null)
   const fatigueLevelFilter = ref<number | null>(null)
   const sectionSummaries = ref<SectionSummary[]>([])
+  const scheduleStatusCounts = ref<Partial<Record<'pending' | 'completed' | 'cancelled', number>>>({})
   const fatigueProfile = ref<FatigueProfile | null>(null)
   const fatigueDaily = ref<FatigueDailySummary | null>(null)
   const fatigueSurveyToday = ref<FatigueSurveyToday | null>(null)
@@ -161,6 +162,7 @@ export const useAppStore = defineStore('app', () => {
     urgencyLevelFilter.value = null
     fatigueLevelFilter.value = null
     sectionSummaries.value = []
+    scheduleStatusCounts.value = {}
     fatigueProfile.value = null
     fatigueDaily.value = null
     fatigueSurveyToday.value = null
@@ -345,6 +347,7 @@ export const useAppStore = defineStore('app', () => {
       schedules.value = data.list || []
       syncPage(schedulePage, data)
       sectionSummaries.value = data.sectionSummaries || []
+      scheduleStatusCounts.value = data.statusCounts || {}
       return schedules.value
     } catch (e: any) {
       if (isCurrentListRequest(schedulePage, listRequest)) notify(e.message || '加载日程失败')
@@ -867,7 +870,7 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     token, refreshToken, theme, browserNoticePermission, toast, loading, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, notificationDetail, selectedDate,
-    schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage,
+    schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage, scheduleStatusCounts,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
     request, aiRequest, openScheduleModal, closeScheduleModal, login, register, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,

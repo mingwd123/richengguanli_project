@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
 import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
+import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
 import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, toSchedulePayload, urgency } from '../utils/helpers'
 import type { FatiguePreview, Schedule, TimeType } from '../types'
 
@@ -22,6 +23,9 @@ const openedFromHome = computed(() => route.query.from === 'home')
 const returnTarget = computed(() => openedFromHome.value ? '/' : '/schedules')
 const returnLabel = computed(() => openedFromHome.value ? '返回首页' : '返回日程列表')
 const userTimezone = computed(() => store.profile?.timezone || getDisplayTimezone())
+const reminderPresets = computed(() => store.notificationPreferences.reminderPresetMinutes || [])
+const reminderBaseTime = computed(() => editForm.timeType === 'deadline_task' ? editForm.deadlineTime : editForm.startTime)
+const reminderBaseLabel = computed(() => editForm.timeType === 'deadline_task' ? '截止时间' : '开始时间')
 const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
 const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
 
@@ -235,7 +239,7 @@ onUnmounted(() => clearTimeout(previewTimer))
             <label>结束时间<input v-model="editForm.endTime" type="datetime-local" /></label>
           </template>
           <FatiguePreviewInline v-if="editFatiguePreview" :preview="editFatiguePreview" />
-          <label>提醒时间<input v-model="editForm.remindAt" type="datetime-local" /></label>
+          <ReminderShortcutPicker v-model="editForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="reminderPresets" :timezone="userTimezone" @error="store.notify" />
           <small class="muted">保持原值不会替换提醒；清空后保存会取消未发送提醒。</small>
           <div class="form-actions"><button type="button" @click="editing = false">取消</button><button class="primary" :disabled="store.loading">保存修改</button></div>
         </form>

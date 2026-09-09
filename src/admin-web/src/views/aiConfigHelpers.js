@@ -11,6 +11,7 @@ export function buildAiKeyPayload(form) {
   const apiKey = String(form.apiKey || '').trim()
   const payload = {
     name: String(form.name || '').trim(),
+    apiBaseUrl: String(form.apiBaseUrl || '').trim(),
     enabled: form.enabled !== false,
     remark: String(form.remark || '').trim(),
   }
@@ -24,6 +25,23 @@ export function buildAiKeyPayload(form) {
 export function validateAiKeyForm(form, editing = false) {
   if (!String(form.name || '').trim()) return '请输入 Key 名称'
   if (!editing && !String(form.apiKey || '').trim()) return '请输入 API Key'
+  const apiBaseUrl = String(form.apiBaseUrl || '').trim()
+  if (!apiBaseUrl) return ''
+  if (apiBaseUrl.length > 500) return 'Base URL 最多 500 个字符'
+  if (/\s/.test(apiBaseUrl)) return 'Base URL 格式不正确'
+
+  let parsed
+  try {
+    parsed = new URL(apiBaseUrl)
+  } catch {
+    return 'Base URL 格式不正确'
+  }
+
+  if (parsed.protocol !== 'https:') return 'Base URL 必须使用 HTTPS'
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash
+    || (parsed.port && parsed.port !== '443')) {
+    return 'Base URL 必须是有效的 HTTPS 地址'
+  }
   return ''
 }
 

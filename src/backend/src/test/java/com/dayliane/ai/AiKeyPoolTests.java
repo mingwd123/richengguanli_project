@@ -12,6 +12,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.io.IOException;
+import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -88,6 +89,95 @@ class AiKeyPoolTests {
                 .doesNotContain("first-secret-1234")
                 .doesNotContain("second-secret-5678")
                 .doesNotContain("apiKeyCiphertext"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void keySpecificBaseUrlsAreNormalizedAndUsedDuringFailover() throws Exception {
+        Map<String, Object> firstConfig = createKeyWithBaseUrl(
+                "Relay", "relay-key-value", "https://1.1.1.1/openai/", true);
+        List<Map<String, Object>> firstKeys = (List<Map<String, Object>>) firstConfig.get("keys");
+        long relayId = id(firstKeys.get(0));
+        assertThat(firstKeys.get(0)).containsEntry("apiBaseUrl", "https://1.1.1.1/openai/v1");
+
+        Map<String, Object> secondConfig = createKey("Default route", "default-route-key", true);
+        List<Map<String, Object>> keys = (List<Map<String, Object>>) secondConfig.get("keys");
+        long defaultRouteId = id(keys.get(1));
+        assertThat(keys.get(1)).containsEntry("apiBaseUrl", "");
+
+        when(transport.send(eq(URI.create("https://1.1.1.1/openai/v1/chat/completions")),
+                anyString(), eq("relay-key-value"), any(Duration.class)))
+                .thenReturn(new AiHttpTransport.Response(429, "busy"));
+        when(transport.send(eq(URI.create("https://8.8.8.8/v1/chat/completions")),
+                anyString(), eq("default-route-key"), any(Duration.class)))
+                .thenReturn(new AiHttpTransport.Response(200, SUCCESS_BODY));
+
+        assertThat(aiService.test(adminId, "127.0.0.1", "test"))
+                .containsEntry("keyId", defaultRouteId)
+                .containsEntry("apiBaseUrl", "https://8.8.8.8/v1")
+                .containsEntry("attempts", 2);
+        verify(transport).send(eq(URI.create("https://1.1.1.1/openai/v1/chat/completions")),
+                anyString(), eq("relay-key-value"), any(Duration.class));
+        verify(transport).send(eq(URI.create("https://8.8.8.8/v1/chat/completions")),
+                anyString(), eq("default-route-key"), any(Duration.class));
+
+        Map<String, Object> updated = aiService.updateApiKey(adminId, relayId,
+                Map.of("apiBaseUrl", "https://1.1.1.1/custom/v1/chat/completions"),
+                "127.0.0.1", "test");
+        List<Map<String, Object>> updatedKeys = (List<Map<String, Object>>) updated.get("keys");
+        assertThat(updatedKeys.get(0)).containsEntry("apiBaseUrl", "https://1.1.1.1/custom/v1");
+        assertThat(jdbc.queryForObject("select last_test_status from ai_api_key where id=?", String.class, relayId)).isNull();
+
+        Map<String, Object> inherited = aiService.updateApiKey(adminId, relayId,
+                Map.of("apiBaseUrl", ""), "127.0.0.1", "test");
+        List<Map<String, Object>> inheritedKeys = (List<Map<String, Object>>) inherited.get("keys");
+        assertThat(inheritedKeys.get(0)).containsEntry("apiBaseUrl", "");
+        assertThat(jdbc.queryForObject("select api_base_url from ai_api_key where id=?", String.class, relayId)).isNull();
+    }
+
+    @Test
+    void keySpecificBaseUrlsRejectUnsafeOrUnsupportedAddresses() {
+        for (String apiBaseUrl : List.of(
+                "http://1.1.1.1",
+                "https://127.0.0.1",
+                "https://10.0.0.1",
+                "https://user:secret@1.1.1.1",
+                "https://1.1.1.1:8443",
+                "https://1.1.1.1/v1?token=secret",
+                "https://1.1.1.1/v1#section")) {
+            assertBusinessCode(400, () -> createKeyWithBaseUrl(
+                    "Invalid relay", "invalid-relay-key", apiBaseUrl, true));
+        }
+        assertBusinessCode(400, () -> createKeyWithBaseUrl(
+                "Long relay", "long-relay-key", "https://1.1.1.1/" + "a".repeat(500), true));
+        String exactlyFiveHundredCharacters = "https://1.1.1.1/" +
+                "a".repeat(500 - "https://1.1.1.1/".length());
+        assertThat(exactlyFiveHundredCharacters).hasSize(500);
+        assertBusinessCode(400, () -> createKeyWithBaseUrl(
+                "Normalized too long", "normalized-long-key", exactlyFiveHundredCharacters, true));
+        assertThat(jdbc.queryForObject("select count(*) from ai_api_key", Integer.class)).isZero();
+    }
+
+    @Test
+    void customRouteFailuresFallThroughToTheNextKey() throws Exception {
+        createKeyWithBaseUrl("Broken relay", "broken-route-key", "https://1.1.1.1", true);
+        long fallbackId = lastKeyId(createKey("Default route", "working-route-key", true));
+        when(transport.send(any(), anyString(), eq("working-route-key"), any(Duration.class)))
+                .thenReturn(new AiHttpTransport.Response(200, SUCCESS_BODY));
+
+        for (AiHttpTransport.Response response : List.of(
+                new AiHttpTransport.Response(302, "redirect"),
+                new AiHttpTransport.Response(400, "unsupported model"),
+                new AiHttpTransport.Response(404, "wrong path"),
+                new AiHttpTransport.Response(200, "{\"choices\":[]}"))) {
+            reset(transport);
+            when(transport.send(any(), anyString(), eq("broken-route-key"), any(Duration.class))).thenReturn(response);
+            when(transport.send(any(), anyString(), eq("working-route-key"), any(Duration.class)))
+                    .thenReturn(new AiHttpTransport.Response(200, SUCCESS_BODY));
+            assertThat(aiService.test(adminId, "127.0.0.1", "test"))
+                    .containsEntry("keyId", fallbackId)
+                    .containsEntry("attempts", 2);
+        }
     }
 
     @Test
@@ -208,9 +298,52 @@ class AiKeyPoolTests {
                 .containsEntry("lastTestStatus", null);
     }
 
+    @Test
+    void staleTestResultDoesNotOverwriteAChangedBaseUrl() throws Exception {
+        long keyId = firstKeyId(createKeyWithBaseUrl(
+                "Moving relay", "moving-relay-key", "https://1.1.1.1/Route", true));
+        when(transport.send(any(), anyString(), eq("moving-relay-key"), any(Duration.class))).thenAnswer(invocation -> {
+            aiService.updateApiKey(adminId, keyId, Map.of("apiBaseUrl", "https://1.1.1.1/route"),
+                    "127.0.0.1", "route change");
+            return new AiHttpTransport.Response(200, SUCCESS_BODY);
+        });
+
+        assertThat(aiService.testApiKey(adminId, keyId, "127.0.0.1", "test"))
+                .containsEntry("ok", true)
+                .containsEntry("apiBaseUrl", "https://1.1.1.1/Route/v1");
+        assertThat(jdbc.queryForMap("select api_base_url apiBaseUrl,last_test_status lastTestStatus from ai_api_key where id=?", keyId))
+                .containsEntry("apiBaseUrl", "https://1.1.1.1/route/v1")
+                .containsEntry("lastTestStatus", null);
+    }
+
+    @Test
+    void staleInheritedTestResultDoesNotSurviveGlobalRoutingChanges() throws Exception {
+        long keyId = firstKeyId(createKey("Inherited route", "inherited-route-key", true));
+        when(transport.send(any(), anyString(), eq("inherited-route-key"), any(Duration.class))).thenAnswer(invocation -> {
+            aiService.updateConfig(adminId, Map.of(
+                            "provider", "test", "modelName", "new-model",
+                            "apiBaseUrl", "https://8.8.8.8/custom", "enabled", false),
+                    "127.0.0.1", "route change");
+            return new AiHttpTransport.Response(200, SUCCESS_BODY);
+        });
+
+        assertThat(aiService.testApiKey(adminId, keyId, "127.0.0.1", "test"))
+                .containsEntry("ok", true)
+                .containsEntry("apiBaseUrl", "https://8.8.8.8/v1");
+        assertThat(jdbc.queryForObject("select last_test_status from ai_api_key where id=?", String.class, keyId))
+                .isNull();
+    }
+
     private Map<String, Object> createKey(String name, String apiKey, boolean enabled) {
         return aiService.createApiKey(adminId,
                 Map.of("name", name, "apiKey", apiKey, "enabled", enabled, "remark", "test key"),
+                "127.0.0.1", "test");
+    }
+
+    private Map<String, Object> createKeyWithBaseUrl(String name, String apiKey, String apiBaseUrl, boolean enabled) {
+        return aiService.createApiKey(adminId,
+                Map.of("name", name, "apiKey", apiKey, "apiBaseUrl", apiBaseUrl,
+                        "enabled", enabled, "remark", "test key"),
                 "127.0.0.1", "test");
     }
 

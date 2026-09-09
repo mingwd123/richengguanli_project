@@ -21,6 +21,7 @@ import java.util.*;
 @Service
 public class ScheduleService {
     private static final String COMPLETED_GROUP_SECTION = "__completed__";
+    private static final List<String> LEVEL_SECTION_KEYS = List.of("5", "4", "3", "2", "1");
     private final JdbcTemplate jdbc;
     private final NamedParameterJdbcTemplate named;
     private final FatigueService fatigueService;
@@ -90,7 +91,6 @@ public class ScheduleService {
     public Map<String, Object> listSchedules(long userId, int page, int size, String status, String groupName, String keyword, String dateFrom, String dateTo, String sort, String viewMode, Integer urgencyLevel, Integer fatigueLevel, boolean quickScope) {
         StringBuilder where = new StringBuilder(" from schedule where user_id=:userId and deleted_at is null");
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
-        if (!blank(status)) { where.append(" and status=:status"); p.addValue("status", status); }
         if (!blank(groupName)) { where.append(" and group_name=:groupName"); p.addValue("groupName", groupName); }
         if (!blank(keyword)) { where.append(" and (title like :keyword or description like :keyword2)"); String kw = "%" + keyword + "%"; p.addValue("keyword", kw); p.addValue("keyword2", kw); }
         String safeViewMode = normalizeViewMode(viewMode);
@@ -123,6 +123,12 @@ public class ScheduleService {
         if (quickScope) {
             all.removeIf(item -> !isQuickTimelineItem(item, zone));
         }
+        Map<String, Long> statusCounts = new LinkedHashMap<>();
+        for (Map<String, Object> item : all) {
+            String itemStatus = String.valueOf(item.getOrDefault("status", ""));
+            statusCounts.merge(itemStatus, 1L, Long::sum);
+        }
+        if (!blank(status)) all.removeIf(item -> !Objects.equals(status, item.get("status")));
         Map<Long, Integer> groupOrder = personalGroupOrder(userId);
         String safeSort = blank(sort) ? "manual" : sort;
         Comparator<Map<String, Object>> comparator = scheduleComparator(safeViewMode, safeSort, status, zone, groupOrder);
@@ -137,6 +143,7 @@ public class ScheduleService {
         Map<String, Object> result = new LinkedHashMap<>(pagedResult(rows, total, safePage, safeSize));
         result.put("viewMode", safeViewMode);
         result.put("sectionSummaries", summaries);
+        result.put("statusCounts", statusCounts);
         result.put("scope", quickScope ? "quick" : "all");
         long revision = fatigueService.currentDataRevision(userId);
         result.put("dataRevision", revision);
@@ -223,8 +230,10 @@ public class ScheduleService {
     }
 
     private static Comparator<Map<String, Object>> scheduleComparator(String viewMode, String sort, String status, ZoneId zone, Map<Long, Integer> groupOrder) {
-        boolean manualCompletedCompatibility = "manual".equals(sort) && "time".equals(viewMode) && "completed".equals(status);
-        if (!"manual".equals(sort) || "group".equals(viewMode) || manualCompletedCompatibility) {
+        if ("completed".equals(status)) {
+            return completedViewComparator(viewMode);
+        }
+        if (!"manual".equals(sort) || "group".equals(viewMode)) {
             return switch (sort) {
                 case "manual" -> manualComparator(zone, groupOrder);
                 case "time_asc" -> timeViewComparator(zone);
@@ -244,6 +253,22 @@ public class ScheduleService {
             case "group" -> groupViewComparator(zone, groupOrder);
             case "urgency" -> urgencyViewComparator(zone);
             case "fatigue" -> fatigueViewComparator(zone);
+            default -> throw new BusinessException(400, "viewMode is invalid");
+        };
+    }
+
+    private static Comparator<Map<String, Object>> completedViewComparator(String viewMode) {
+        Comparator<Map<String, Object>> completedAt = Comparator
+                .comparing(ScheduleService::completedTime, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(Comparator.comparingLong(ScheduleService::scheduleId).reversed());
+        return switch (viewMode) {
+            case "time", "group" -> completedAt;
+            case "urgency" -> Comparator
+                    .comparingInt((Map<String, Object> item) -> intValue(item.get("urgencyLevel"), 3)).reversed()
+                    .thenComparing(completedAt);
+            case "fatigue" -> Comparator
+                    .comparingInt((Map<String, Object> item) -> intValue(item.get("fatigueLevel"), 3)).reversed()
+                    .thenComparing(completedAt);
             default -> throw new BusinessException(400, "viewMode is invalid");
         };
     }
@@ -559,25 +584,44 @@ public class ScheduleService {
             grouped.computeIfAbsent(raw, ignored -> new ArrayList<>()).add(item);
             ranks.merge(raw, sectionRank(item, viewMode, zone, groupOrder), Math::min);
         }
-        List<String> keys = new ArrayList<>(grouped.keySet());
-        keys.sort(Comparator.comparingInt((String key) -> ranks.getOrDefault(key, Integer.MAX_VALUE)).thenComparing(key -> key));
+        List<String> keys;
+        if ("urgency".equals(viewMode) || "fatigue".equals(viewMode)) {
+            keys = LEVEL_SECTION_KEYS;
+        } else {
+            keys = new ArrayList<>(grouped.keySet());
+            keys.sort(Comparator.comparingInt((String key) -> ranks.getOrDefault(key, Integer.MAX_VALUE)).thenComparing(key -> key));
+        }
         List<Map<String, Object>> summaries = new ArrayList<>();
         for (String raw : keys) {
-            List<Map<String, Object>> section = grouped.get(raw);
+            List<Map<String, Object>> section = grouped.getOrDefault(raw, List.of());
             BigDecimal plannedLoad = section.stream()
-                    .filter(item -> !"cancelled".equals(item.get("status")))
+                    .filter(item -> "pending".equals(item.get("status")))
                     .map(item -> decimalValue(item.get("fatigueWeight"), BigDecimal.valueOf(fatigueWeight(intValue(item.get("fatigueLevel"), 3)))))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal completedLoad = section.stream()
+                    .filter(item -> "completed".equals(item.get("status")))
+                    .map(ScheduleService::completedLoad)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
             long pendingCount = section.stream().filter(item -> "pending".equals(item.get("status"))).count();
+            long completedCount = section.stream().filter(item -> "completed".equals(item.get("status"))).count();
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("key", sectionKey(viewMode, raw));
             summary.put("label", sectionLabel(viewMode, raw));
             summary.put("total", section.size());
             summary.put("pendingCount", pendingCount);
+            summary.put("completedCount", completedCount);
             summary.put("plannedLoad", plannedLoad);
+            summary.put("completedLoad", completedLoad);
             summaries.add(summary);
         }
         return summaries;
+    }
+
+    private static BigDecimal completedLoad(Map<String, Object> item) {
+        Object snapshot = item.get("completedFatigueWeight");
+        if (snapshot != null) return decimalValue(snapshot, BigDecimal.ZERO);
+        return decimalValue(item.get("fatigueWeight"),
+                BigDecimal.valueOf(fatigueWeight(intValue(item.get("completedFatigueLevel"), intValue(item.get("fatigueLevel"), 3)))));
     }
 
     private static String sectionKey(String viewMode, String raw) {
@@ -701,6 +745,10 @@ public class ScheduleService {
 
     private static Instant createdTime(Map<String, Object> item) {
         return instantValue(item.get("createdAt"));
+    }
+
+    private static Instant completedTime(Map<String, Object> item) {
+        return instantValue(item.get("completedAt"));
     }
 
     private static long scheduleId(Map<String, Object> item) {

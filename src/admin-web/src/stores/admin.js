@@ -332,7 +332,13 @@ export const useAdminStore = defineStore('admin', () => {
     aiConfigLoading.value = true
     try {
       const data = await request('/admin/ai/config', { method: 'PUT', body: JSON.stringify(payload) })
+      const routingChanged = aiConfig.value?.modelName !== data?.modelName
+        || aiConfig.value?.apiBaseUrl !== data?.apiBaseUrl
       applyAiConfigResponse(data)
+      if (routingChanged) {
+        aiKeyTestResults.value = {}
+        aiTestResult.value = null
+      }
       notify('AI 配置已更新')
       return data
     } catch (error) {
