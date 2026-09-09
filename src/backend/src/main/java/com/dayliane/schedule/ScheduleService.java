@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.*;
@@ -596,7 +597,7 @@ public class ScheduleService {
             List<Map<String, Object>> section = grouped.getOrDefault(raw, List.of());
             BigDecimal plannedLoad = section.stream()
                     .filter(item -> "pending".equals(item.get("status")))
-                    .map(item -> decimalValue(item.get("fatigueWeight"), BigDecimal.valueOf(fatigueWeight(intValue(item.get("fatigueLevel"), 3)))))
+                    .map(item -> loadDecimal(item.get("fatigueWeight"), BigDecimal.valueOf(fatigueWeight(intValue(item.get("fatigueLevel"), 3)))))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
             BigDecimal completedLoad = section.stream()
                     .filter(item -> "completed".equals(item.get("status")))
@@ -619,8 +620,8 @@ public class ScheduleService {
 
     private static BigDecimal completedLoad(Map<String, Object> item) {
         Object snapshot = item.get("completedFatigueWeight");
-        if (snapshot != null) return decimalValue(snapshot, BigDecimal.ZERO);
-        return decimalValue(item.get("fatigueWeight"),
+        if (snapshot != null) return loadDecimal(snapshot, BigDecimal.ZERO);
+        return loadDecimal(item.get("fatigueWeight"),
                 BigDecimal.valueOf(fatigueWeight(intValue(item.get("completedFatigueLevel"), intValue(item.get("fatigueLevel"), 3)))));
     }
 
@@ -835,6 +836,10 @@ public class ScheduleService {
         if (value == null) return fallback;
         try { return new BigDecimal(String.valueOf(value)); }
         catch (NumberFormatException ignored) { return fallback; }
+    }
+
+    private static BigDecimal loadDecimal(Object value, BigDecimal fallback) {
+        return decimalValue(value, fallback).setScale(3, RoundingMode.HALF_UP);
     }
 
     private static LocalDate plannedDate(Map<String, Object> item, ZoneId zone) {
