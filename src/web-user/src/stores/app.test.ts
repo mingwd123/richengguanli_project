@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAppStore } from './app'
+import { REMEMBERED_LOGIN_KEY, readRememberedLogin, saveRememberedLogin } from '../utils/rememberedLogin'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -364,5 +365,166 @@ describe('app store request coordination', () => {
     expect(store.registerForm.code).toBe('')
     expect(store.registerForm.password).toBe('')
     expect(store.registerForm.confirmPassword).toBe('')
+  })
+
+  it('leaves the login form empty until the user asks to be remembered', () => {
+    const store = useAppStore()
+
+    expect(store.rememberPassword).toBe(false)
+    expect(store.loginForm.account).toBe('')
+    expect(store.loginForm.password).toBe('')
+    expect(localStorage.getItem(REMEMBERED_LOGIN_KEY)).toBeNull()
+  })
+
+  it('prefills account and password only from a remembered login', () => {
+    saveRememberedLogin('13800138000', 'Abc12345')
+    setActivePinia(createPinia())
+
+    const store = useAppStore()
+
+    expect(store.rememberPassword).toBe(true)
+    expect(store.loginForm.account).toBe('13800138000')
+    expect(store.loginForm.password).toBe('Abc12345')
+  })
+
+  it('persists the credentials after a successful login when remembering', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ accessToken: 'a', refreshToken: 'r' }))
+    const store = useAppStore()
+
+    store.loginForm.account = '13800138000'
+    store.loginForm.password = 'Abc12345'
+    store.rememberPassword = true
+
+    expect(await store.login()).toBe(true)
+    expect(readRememberedLogin()).toEqual({ account: '13800138000', password: 'Abc12345' })
+    expect(store.loginForm.password).toBe('Abc12345')
+  })
+
+  it('drops remembered credentials when the box is unchecked or login is not remembered', async () => {
+    saveRememberedLogin('13800138000', 'Abc12345')
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ accessToken: 'a', refreshToken: 'r' }))
+    const store = useAppStore()
+
+    // 取消勾选立即清除，不必等到下次登录。
+    store.rememberPassword = false
+    store.syncRememberedLogin()
+    expect(readRememberedLogin()).toBeNull()
+
+    // 未勾选时即便登录成功也不写入。
+    store.loginForm.account = '13800138000'
+    store.loginForm.password = 'Abc12345'
+    expect(await store.login()).toBe(true)
+    expect(readRememberedLogin()).toBeNull()
+    expect(store.loginForm.password).toBe('')
+  })
+})
+
+describe('daily schedule progress', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    vi.stubGlobal('localStorage', storageStub())
+    vi.stubGlobal('document', { documentElement: { dataset: {} } })
+    vi.stubGlobal('window', { fetch: vi.fn(), focus: vi.fn(), location: { href: '' } })
+    setActivePinia(createPinia())
+    localStorage.setItem('dayliane_token', 'access-token')
+    localStorage.setItem('dayliane_refresh_token', 'refresh-token')
+  })
+
+  it('submits cumulative progress with the selected fatigue level', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockImplementation(async (_input, init) => {
+      if (init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({ cumulativeProgress: 70, fatigueLevel: 4 })
+        return response({ scheduleId: 9, progressPercent: 70, items: [] })
+      }
+      return response({ list: [], total: 0, page: 1, size: 12, statusCounts: {}, sectionSummaries: [] })
+    })
+    const store = useAppStore()
+
+    expect(await store.submitScheduleProgress(9, 70, 4)).toBe(true)
+    expect(store.scheduleProgress?.progressPercent).toBe(70)
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/schedules/9/progress'))).toBe(true)
+  })
+
+  it('omits the fatigue level when only recording progress', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockImplementation(async (_input, init) => {
+      if (init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({ cumulativeProgress: 20 })
+        return response({ scheduleId: 9, progressPercent: 20, items: [] })
+      }
+      return response({ list: [], total: 0, page: 1, size: 12, statusCounts: {}, sectionSummaries: [] })
+    })
+    const store = useAppStore()
+
+    expect(await store.submitScheduleProgress(9, 20, null)).toBe(true)
+  })
+
+  it('keeps the last loaded progress payload', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({
+      scheduleId: 3,
+      progressTrackingEnabled: true,
+      progressPercent: 40,
+      status: 'pending',
+      completedAt: '',
+      fatigueTrackingEnabled: true,
+      totalCompletedLoad: 2,
+      items: [{ progressDate: '2026-09-13', progressDelta: 40, cumulativeProgress: 40, fatigueLevel: 4, fatigueWeightSnapshot: 5, completedLoad: 2 }]
+    }))
+    const store = useAppStore()
+
+    const progress = await store.loadScheduleProgress(3)
+    expect(progress?.progressPercent).toBe(40)
+    expect(store.scheduleProgress?.items).toHaveLength(1)
+    expect(store.scheduleProgressLoading).toBe(false)
+  })
+
+  it('reports a failure when the correction endpoint rejects the change', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response(null, 400, 'cumulative daily progress cannot exceed 100'))
+    const store = useAppStore()
+
+    expect(await store.correctScheduleProgress(3, '2026-09-12', 90, 3)).toBe(false)
+    expect(store.toast).toContain('cannot exceed 100')
+  })
+
+  it('clears stale progress before loading another schedule', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    const first = deferred<Response>()
+    const second = deferred<Response>()
+    fetchMock.mockImplementation((input) => String(input).includes('/schedules/1/progress') ? first.promise : second.promise)
+    const store = useAppStore()
+
+    const stale = store.loadScheduleProgress(1)
+    const current = store.loadScheduleProgress(2)
+    // 先发出的旧请求晚于当前请求返回时，不能覆盖当前任务的进度数据。
+    second.resolve(response({ scheduleId: 2, progressPercent: 80, items: [{ progressDate: '2026-09-20' }] }))
+    await current
+    expect(store.scheduleProgress?.scheduleId).toBe(2)
+
+    first.resolve(response({ scheduleId: 1, progressPercent: 10, items: [] }))
+    await stale
+    expect(store.scheduleProgress?.scheduleId).toBe(2)
+    expect(store.scheduleProgress?.progressPercent).toBe(80)
+  })
+
+  it('keeps no progress data when loading fails', async () => {
+    const fetchMock = vi.mocked(window.fetch)
+    fetchMock.mockResolvedValue(response({ scheduleId: 9, progressPercent: 30, items: [{ progressDate: '2026-09-19' }] }))
+    const store = useAppStore()
+    await store.loadScheduleProgress(9)
+    expect(store.scheduleProgress?.progressPercent).toBe(30)
+
+    fetchMock.mockResolvedValue(response(null, 500, '服务器开小差了'))
+    expect(await store.loadScheduleProgress(10)).toBeNull()
+    expect(store.scheduleProgress).toBeNull()
+    expect(store.scheduleProgressError).toContain('服务器开小差了')
+
+    store.resetScheduleProgress()
+    expect(store.scheduleProgress).toBeNull()
+    expect(store.scheduleProgressError).toBe('')
   })
 })

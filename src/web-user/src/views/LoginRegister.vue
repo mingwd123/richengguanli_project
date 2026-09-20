@@ -120,12 +120,12 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <form v-if="activeTab === 'login'" class="login-form" @submit.prevent="handleLogin">
+      <form v-if="activeTab === 'login'" class="login-form" autocomplete="off" @submit.prevent="handleLogin">
         <label>
           邮箱或手机号
           <input
             v-model="store.loginForm.account"
-            autocomplete="username"
+            autocomplete="off"
             placeholder="请输入邮箱或手机号"
             :aria-invalid="!!loginErrors.account"
             @input="loginErrors.account = ''"
@@ -138,7 +138,7 @@ onBeforeUnmount(() => {
             <input
               v-model="store.loginForm.password"
               :type="showLoginPassword ? 'text' : 'password'"
-              autocomplete="current-password"
+              autocomplete="new-password"
               placeholder="请输入密码"
               :aria-invalid="!!loginErrors.password"
               @input="loginErrors.password = ''"
@@ -151,6 +151,10 @@ onBeforeUnmount(() => {
           <small v-if="loginErrors.password" class="field-error">{{ loginErrors.password }}</small>
         </label>
         <div class="auth-form-meta">
+          <label class="remember-toggle">
+            <input v-model="store.rememberPassword" type="checkbox" @change="store.syncRememberedLogin()" />
+            记住密码
+          </label>
           <router-link to="/forgot-password">忘记密码？</router-link>
         </div>
         <button class="primary block login-submit" :disabled="store.loading">
@@ -227,8 +231,6 @@ onBeforeUnmount(() => {
           <ArrowRight :size="17" />
         </button>
       </form>
-
-      <p class="hint demo-account">演示账号&nbsp; 13800138000&nbsp; /&nbsp; Abc12345</p>
     </section>
 
     <ComplianceFooter />

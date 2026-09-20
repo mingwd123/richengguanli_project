@@ -17,6 +17,7 @@ import {
   buildRegistrationSettingsPayload,
   normalizeRegistrationSettings,
 } from '../utils/registrationSettings'
+import { clearRememberedLogin, readRememberedLogin, saveRememberedLogin } from '../utils/rememberedLogin'
 
 const TOKEN_KEY = 'dayliane_admin_token'
 const ROLE_KEY = 'dayliane_admin_role'
@@ -35,7 +36,10 @@ export const useAdminStore = defineStore('admin', () => {
   const isSuperAdmin = computed(() => profile.value?.role === 'super_admin')
   const page = ref({ list: [], total: 0, page: 1, size: 20 })
   const currentDetail = ref(null)
-  const loginForm = reactive({ username: 'admin', password: 'Admin12345' })
+  // 「记住密码」：只有用户勾选并成功登录过，才会在下次打开时自动回填账号与密码。
+  const rememberedLogin = readRememberedLogin()
+  const loginForm = reactive({ username: rememberedLogin?.username || '', password: rememberedLogin?.password || '' })
+  const rememberPassword = ref(Boolean(rememberedLogin))
   const userCreateForm = reactive({ email: '', password: '', phone: '', nickname: '', timezone: 'Asia/Shanghai' })
   const userEditForm = reactive({ id: null, email: '', phone: '', nickname: '', timezone: 'Asia/Shanghai' })
   const userEditOriginal = reactive({ email: '', phone: '', profileVersion: null })
@@ -92,9 +96,14 @@ export const useAdminStore = defineStore('admin', () => {
   async function login() {
     loading.value = true
     try {
-      const data = await apiRequest('/admin/auth/login', { method: 'POST', body: JSON.stringify(loginForm) })
+      const submittedUsername = loginForm.username.trim()
+      const submittedPassword = loginForm.password
+      const data = await apiRequest('/admin/auth/login', { method: 'POST', body: JSON.stringify({ username: submittedUsername, password: submittedPassword }) })
       token.value = data.accessToken
       localStorage.setItem(TOKEN_KEY, data.accessToken)
+      // 只有勾选「记住密码」才落盘，未勾选时同时清掉可能存在的旧记录。
+      if (rememberPassword.value) saveRememberedLogin(submittedUsername, submittedPassword)
+      else clearRememberedLogin()
       await loadProfile()
       await fetchList()
       notify('登录成功')
@@ -103,6 +112,11 @@ export const useAdminStore = defineStore('admin', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  /** 勾选框变化：取消勾选立即清除本地已记住的账号密码（勾选时等登录成功再写入）。 */
+  function syncRememberedLogin() {
+    if (!rememberPassword.value) clearRememberedLogin()
   }
 
   function logout() {
@@ -716,6 +730,7 @@ export const useAdminStore = defineStore('admin', () => {
   return {
     token, theme, activeResource, loading, createLoading, detailLoading, toast, toastType, profile, isSuperAdmin, page, currentDetail,
     loginForm, userCreateForm, userEditForm, userEditOriginal, userEditLoading, adminCreateForm, registrationSettings, registrationSettingsLoading,
+    rememberPassword, syncRememberedLogin,
     registrationSettingsUpdating, resources, currentResource, stats,
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
     aiConfig, aiConfigLoading, aiKeys, aiEnvironmentFallback, aiKeyPoolRevision,

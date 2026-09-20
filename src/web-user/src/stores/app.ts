@@ -8,7 +8,7 @@ import type {
   ScheduleListResult, ScheduleViewMode, SectionSummary, FatigueProfile,
   FatigueDailySummary, FatigueHistory, FatiguePreview, FatigueSurveyComparison,
   FatigueSurveyToday, FatigueReport, EmailCodeRequest, EmailCodeResponse, ResetPasswordForm,
-  UpdateEmailForm, SubscribeToken, AiArrangeResult
+  UpdateEmailForm, SubscribeToken, AiArrangeResult, ScheduleProgress
 } from '../types'
 import {
   fetchRegistrationStatus,
@@ -27,6 +27,7 @@ import {
   normalizeEmail,
 } from '../utils/auth'
 import { toSchedulePayload, toApiTimePayload, normalizeTimelineItem, buildMonthDays, primaryTime, setDisplayTimezone } from '../utils/helpers'
+import { clearRememberedLogin, readRememberedLogin, saveRememberedLogin } from '../utils/rememberedLogin'
 import { buildTimelineStats, isTimelineItemOpen } from '../utils/timeline'
 
 const TOKEN_KEY = 'dayliane_token'
@@ -110,9 +111,12 @@ export const useAppStore = defineStore('app', () => {
   const notificationPreferences = ref<NotificationPreference>({ browserEnabled: false, taskAssignedEnabled: true, taskStatusEnabled: true, reminderEnabled: true, fatigueAlertEnabled: true, fatigueSurveyEnabled: true, quietStartTime: '', quietEndTime: '', reminderPresetMinutes: [15, 30, 60, 1440] })
   const selectedDate = ref('')
 
-  const loginForm = reactive<LoginForm>({ account: '13800138000', password: 'Abc12345' })
+  // 「记住密码」：只有用户勾选并成功登录过，才会在下次打开时自动回填账号与密码。
+  const rememberedLogin = readRememberedLogin()
+  const loginForm = reactive<LoginForm>({ account: rememberedLogin?.account || '', password: rememberedLogin?.password || '' })
+  const rememberPassword = ref(Boolean(rememberedLogin))
   const registerForm = reactive<RegisterForm>({ email: '', code: '', phone: '', password: '', confirmPassword: '', nickname: '' })
-  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] })
+  const scheduleForm = reactive<ScheduleForm>({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [], progressTrackingEnabled: false })
   const groupForm = reactive({ name: '' })
   const teamForm = reactive({ name: '' })
   const taskForm = reactive<TaskForm>({ teamId: '', groupId: '', title: '', description: '', deadlineTime: '', startTime: '', remindAt: '', assigneeUserIds: [] })
@@ -280,15 +284,26 @@ export const useAppStore = defineStore('app', () => {
     if (!loginForm.password) { clearLoginSecret(); notify('请输入密码'); return false }
     loading.value = true
     try {
-      const data = await loginAccount({ account: isValidEmail(account) ? normalizeEmail(account) : account, password: loginForm.password })
+      const submittedAccount = isValidEmail(account) ? normalizeEmail(account) : account
+      const submittedPassword = loginForm.password
+      const data = await loginAccount({ account: submittedAccount, password: submittedPassword })
       establishSession(data.accessToken, data.refreshToken)
+      // 只有勾选「记住密码」才落盘，未勾选时同时清掉可能存在的旧记录。
+      if (rememberPassword.value) saveRememberedLogin(submittedAccount, submittedPassword)
+      else clearRememberedLogin()
       await loadAll()
       notify('登录成功')
       return true
     } catch (e: any) { notify(e.message); return false } finally {
-      loginForm.password = ''
+      // 未勾选记住密码时清空密码框；勾选时保留，避免下次进入还要重新输入。
+      if (!rememberPassword.value) loginForm.password = ''
       loading.value = false
     }
+  }
+
+  /** 勾选框变化：取消勾选立即清除本地已记住的账号密码（勾选时等登录成功再写入）。 */
+  function syncRememberedLogin() {
+    if (!rememberPassword.value) clearRememberedLogin()
   }
 
   async function loadRegistrationStatus() {
@@ -857,7 +872,7 @@ export const useAppStore = defineStore('app', () => {
     if (!scheduleForm.groupId) return notify('请先创建分组')
     try {
       await request('/schedules', { method: 'POST', body: JSON.stringify(toSchedulePayload(scheduleForm, profile.value?.timezone)) })
-      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] })
+      Object.assign(scheduleForm, { title: '', description: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [], progressTrackingEnabled: false })
       if (taskGroups.value[0]) scheduleForm.groupId = String(taskGroups.value[0].id)
       await loadAll(); scheduleModalOpen.value = false; notify('日程已创建')
     } catch (e: any) { notify(e.message) }
@@ -878,6 +893,63 @@ export const useAppStore = defineStore('app', () => {
 
   async function setScheduleStatus(item: Pick<Schedule, 'id'>, action: string) {
     try { await request(`/schedules/${item.id}/${action}`, { method: 'PUT' }); await loadAll(); return true } catch (e: any) { notify(e.message); return false }
+  }
+
+  const scheduleProgress = ref<ScheduleProgress | null>(null)
+  const scheduleProgressLoading = ref(false)
+  const scheduleProgressError = ref('')
+  // P11：请求序列号，避免先发出的旧请求覆盖当前任务的进度数据。
+  let scheduleProgressRequest = 0
+
+  function resetScheduleProgress() {
+    scheduleProgressRequest += 1
+    scheduleProgress.value = null
+    scheduleProgressError.value = ''
+    scheduleProgressLoading.value = false
+  }
+
+  async function loadScheduleProgress(id: number) {
+    const requestId = ++scheduleProgressRequest
+    // 切换任务前先清空旧状态，加载失败时也不残留上一个任务的历史记录。
+    scheduleProgress.value = null
+    scheduleProgressError.value = ''
+    scheduleProgressLoading.value = true
+    try {
+      const data = await request<ScheduleProgress>(`/schedules/${id}/progress`)
+      if (requestId !== scheduleProgressRequest) return null
+      scheduleProgress.value = data
+      return data
+    } catch (e: any) {
+      if (requestId === scheduleProgressRequest) {
+        scheduleProgressError.value = e.message || '加载每日进度失败'
+        notify(scheduleProgressError.value)
+      }
+      return null
+    } finally {
+      if (requestId === scheduleProgressRequest) scheduleProgressLoading.value = false
+    }
+  }
+
+  async function submitScheduleProgress(id: number, cumulativeProgress: number, fatigueLevel?: number | null) {
+    try {
+      const body: Record<string, unknown> = { cumulativeProgress }
+      // P03：关闭疲劳追踪或当日无新增进度时不带等级字段，后端会拒绝多余等级。
+      if (fatigueLevel) body.fatigueLevel = fatigueLevel
+      scheduleProgress.value = await request<ScheduleProgress>(`/schedules/${id}/progress`, { method: 'POST', body: JSON.stringify(body) })
+      await loadAll()
+      return true
+    } catch (e: any) { notify(e.message || '提交每日进度失败'); return false }
+  }
+
+  async function correctScheduleProgress(id: number, date: string, progressDelta: number, fatigueLevel?: number | null) {
+    try {
+      const body: Record<string, unknown> = { progressDelta }
+      if (fatigueLevel) body.fatigueLevel = fatigueLevel
+      scheduleProgress.value = await request<ScheduleProgress>(`/schedules/${id}/progress/${date}`, { method: 'PUT', body: JSON.stringify(body) })
+      await loadAll()
+      notify(`已保存 ${date} 的进度`)
+      return true
+    } catch (e: any) { notify(e.message || '保存每日进度失败'); return false }
   }
   async function deleteSchedule(id: number) {
     try { await request(`/schedules/${id}`, { method: 'DELETE' }); await loadAll(); notify('日程已删除'); return true } catch (e: any) { notify(e.message); return false }
@@ -1141,12 +1213,15 @@ export const useAppStore = defineStore('app', () => {
     token, refreshToken, theme, browserNoticePermission, toast, loading, registrationEnabled, registrationStatusLoading, registrationStatusChecked, registrationStatusError, scheduleModalOpen, profile, schedules, taskGroups, teamTaskGroups, teams, myTasks, createdTasks, teamTasks, notifications, notificationPreferences, today, upcomingSeven, viewMode, urgencyLevelFilter, fatigueLevelFilter, sectionSummaries, fatigueProfile, fatigueDaily, fatigueSurveyToday, fatigueSurveyComparison, fatigueHistory, fatigueReport, subscribeTokenInfo, notificationDetail, selectedDate,
     schedulePage, teamPage, assignedTaskPage, createdTaskPage, teamTaskPage, notificationPage, scheduleStatusCounts,
     loginForm, registerForm, scheduleForm, groupForm, teamForm, taskForm, joinForm, profileForm, passwordForm, timezoneForm,
+    rememberPassword, syncRememberedLogin,
     pendingScheduleCount, activeTaskCount, activeTeam, timelineItems, upcoming, timelineStats, calendarItems, monthDays, loggedIn, aiRecordEnabled,
     request, aiRequest, openScheduleModal, closeScheduleModal, login, loadRegistrationStatus, register, sendEmailCode, resetPassword, updateEmail, logout, loadAll, loadSchedules, setScheduleViewMode, loadFatigueDaily, loadFatigueProfile, loadFatigueSurveyToday, submitFatigueSurvey, updateFatiguePreferences, resetFatigueProfile, loadFatigueHistory, loadFatigueReport, loadSubscribeToken, resetSubscribeToken, arrangeSchedules, previewFatigue, snoozeFatigueSurvey, skipFatigueSurvey, suppressFatigueAlertsToday, deleteFatigueSurveyHistory, exportFatigueHistory, loadTeams, loadAssignedTasks, loadTeamTaskGroups, loadCreatedTasks, loadTeamTasks, loadNotifications, loadUnreadCount, pollNotifications, loadCalendar,
     createSchedule, updateSchedule, setScheduleStatus, deleteSchedule, editOccurrence, updateSeries, deleteSeries, moveScheduleGroup, sortSchedules, sortCompletedSchedules,
     createTaskGroup, createTaskGroupByName, updateTaskGroup, deleteTaskGroup, sortTaskGroups,
     createTeam, joinTeam, createTask, taskAction, completeTeamTask, moveTeamTaskGroup, sortTeamTasks, sortCompletedTeamTasks, createTeamTaskGroup, updateTeamTaskGroup, deleteTeamTaskGroup, sortTeamTaskGroups,
     readAll, readNotification, markNotificationRead, openNotificationDetail, closeNotificationDetail, requestBrowserNoticePermission, saveNotificationPreferences, updateProfile, changePassword, updateTimezone,
-    setMemberRole, removeMember, regenerateInviteCode, notify, primaryTime, toggleAiRecord, toggleTheme
+    setMemberRole, removeMember, regenerateInviteCode, notify, primaryTime, toggleAiRecord, toggleTheme,
+    scheduleProgress, scheduleProgressLoading, loadScheduleProgress, submitScheduleProgress, correctScheduleProgress,
+    scheduleProgressError, resetScheduleProgress
   }
 })

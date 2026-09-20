@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAdminStore } from './admin'
+import { readRememberedLogin, saveRememberedLogin } from '../utils/rememberedLogin'
 
 function response(body) {
   return { json: async () => body }
@@ -203,5 +204,70 @@ describe('admin user editing store', () => {
     expect(store.userEditOriginal.profileVersion).toBe(6)
     expect(store.toast).toBe('用户资料已被其他管理员修改，请刷新后重试')
     expect(store.toastType).toBe('error')
+  })
+})
+
+describe('admin remembered login', () => {
+  function memoryStorage() {
+    const values = new Map()
+    return {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, String(value)),
+      removeItem: (key) => values.delete(key),
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', memoryStorage())
+    vi.stubGlobal('document', { documentElement: { dataset: {} } })
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('leaves the admin login form empty until the user asks to be remembered', () => {
+    // 每次 beforeEach 都换一个新的 pinia，store 的 setup 会重新读取本地记录。
+    const store = useAdminStore()
+
+    expect(store.rememberPassword).toBe(false)
+    expect(store.loginForm.username).toBe('')
+    expect(store.loginForm.password).toBe('')
+    expect(readRememberedLogin()).toBeNull()
+  })
+
+  it('prefills the remembered administrator credentials', () => {
+    saveRememberedLogin('admin', 'Admin12345')
+    setActivePinia(createPinia())
+    const store = useAdminStore()
+
+    expect(store.rememberPassword).toBe(true)
+    expect(store.loginForm.username).toBe('admin')
+    expect(store.loginForm.password).toBe('Admin12345')
+  })
+
+  it('saves on a remembered login and clears when unchecked', async () => {
+    const fetchMock = vi.fn((url) => {
+      if (String(url).includes('/admin/auth/login')) {
+        return Promise.resolve(response({ code: 0, data: { accessToken: 'token' } }))
+      }
+      return Promise.resolve(response({ code: 0, data: { list: [], total: 0 } }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useAdminStore()
+
+    store.loginForm.username = 'admin'
+    store.loginForm.password = 'Admin12345'
+    store.rememberPassword = true
+    await store.login()
+    expect(readRememberedLogin()).toEqual({ username: 'admin', password: 'Admin12345' })
+
+    // 取消勾选立即清除，且之后登录成功也不再写入。
+    store.rememberPassword = false
+    store.syncRememberedLogin()
+    expect(readRememberedLogin()).toBeNull()
+    await store.login()
+    expect(readRememberedLogin()).toBeNull()
   })
 })

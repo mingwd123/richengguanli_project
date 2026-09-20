@@ -116,7 +116,10 @@ onMounted(load)
         </article>
         <article class="report-summary-card">
           <span class="report-summary-icon completed"><Check :size="18" /></span>
-          <div><small>个人完成负荷</small><strong>{{ fmtNum(summary?.personalCompletedLoad) }}</strong><em>{{ summary?.personalCompletedCount ?? 0 }} 项完成</em></div>
+          <div>
+            <small>个人完成负荷</small><strong>{{ fmtNum(summary?.personalCompletedLoad) }}</strong>
+            <em>{{ summary?.personalCompletedCount ?? 0 }} 项完成<template v-if="Number(summary?.personalProgressCompletedLoad) > 0"> · 含每日进度 {{ fmtNum(summary?.personalProgressCompletedLoad) }}</template></em>
+          </div>
         </article>
         <article class="report-summary-card">
           <span class="report-summary-icon team"><Users :size="18" /></span>
@@ -202,7 +205,10 @@ onMounted(load)
               <div v-for="item in trend" :key="item.localDate" class="report-daily-row" :class="{ peak: isPeak(item.localDate) }">
                 <span class="report-daily-date">{{ dayLabel(item.localDate) }}<em v-if="isPeak(item.localDate)">峰值</em></span>
                 <span>{{ fmtNum(item.plannedLoad) }}</span>
-                <span>{{ fmtNum(item.completedLoad) }}</span>
+                <span>
+                  {{ fmtNum(item.completedLoad) }}
+                  <i v-if="Number(item.progressCompletedLoad) > 0" class="report-progress-flag" title="含每日进度上报的负荷">进度</i>
+                </span>
                 <span>{{ fmtNum(item.teamCompletedLoad) }}</span>
                 <span>{{ fmtNum(item.totalCompletedLoad) }}</span>
                 <span>{{ item.predictedScore }}</span>

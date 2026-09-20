@@ -33,9 +33,13 @@ async function handleLogin() {
         <span class="admin-login-icon"><Lock /></span>
         <div><p class="eyebrow">管理员登录</p><h2>进入管理控制台</h2></div>
       </div>
-      <form class="login-form" @submit.prevent="handleLogin">
-        <label>管理员账号<span class="admin-input"><el-icon><User /></el-icon><input v-model="store.loginForm.username" autocomplete="username" placeholder="请输入管理员账号" /></span></label>
-        <label>密码<span class="admin-input"><el-icon><Lock /></el-icon><input v-model="store.loginForm.password" :type="showPassword ? 'text' : 'password'" autocomplete="current-password" placeholder="请输入密码" /><button type="button" :title="showPassword ? '隐藏密码' : '显示密码'" @click="showPassword = !showPassword"><el-icon><Hide v-if="showPassword" /><View v-else /></el-icon></button></span></label>
+      <form class="login-form" autocomplete="off" @submit.prevent="handleLogin">
+        <label>管理员账号<span class="admin-input"><el-icon><User /></el-icon><input v-model="store.loginForm.username" autocomplete="off" placeholder="请输入管理员账号" /></span></label>
+        <label>密码<span class="admin-input"><el-icon><Lock /></el-icon><input v-model="store.loginForm.password" :type="showPassword ? 'text' : 'password'" autocomplete="new-password" placeholder="请输入密码" /><button type="button" :title="showPassword ? '隐藏密码' : '显示密码'" @click="showPassword = !showPassword"><el-icon><Hide v-if="showPassword" /><View v-else /></el-icon></button></span></label>
+        <label class="admin-remember-toggle">
+          <input v-model="store.rememberPassword" type="checkbox" @change="store.syncRememberedLogin()" />
+          <span>记住密码</span>
+        </label>
         <button class="primary admin-login-submit" :disabled="store.loading"><span>{{ store.loading ? '验证中...' : '登录后台' }}</span><el-icon><Right /></el-icon></button>
       </form>
       <p class="admin-login-note">仅限授权管理员访问</p>

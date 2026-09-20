@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { canCorrectTeamTaskAssignee, canDeleteTeamTask, countdown, normalizeTimelineItem, occursOnDate, reminderTimeForOffset, setDisplayTimezone, sortByPriority, toApiTimePayload, toDatetimeLocalInTimezone, toSchedulePayload, urgency, zonedDateTimeToIso } from './helpers'
+import { canCorrectTeamTaskAssignee, canDeleteTeamTask, countdown, normalizeTimelineItem, occursOnDate, reminderTimeForOffset, setDisplayTimezone, sortByPriority, toApiTimePayload, toDatetimeLocalInTimezone, toSchedulePayload, urgency, zonedDateTimeToIso, formatProgressPercent, canTrackDailyProgress, isProgressComplete, progressCompletionActionLabel, progressSubmitDialogTitle } from './helpers'
 import { buildTimelineStats, timelinePresentationStatus, timelineTimeRange } from './timeline'
 
 describe('schedule display helpers', () => {
@@ -130,6 +130,66 @@ describe('schedule display helpers', () => {
 
   it('calculates reminder offsets from a datetime-local value in the user timezone', () => {
     expect(reminderTimeForOffset('2026-01-15T12:45', 60, 'America/New_York')).toBe('2026-01-15T16:45:00.000Z')
+  })
+
+  it('only enables daily progress for non-recurring tasks', () => {
+    const base = {
+      title: 'Long task', description: '', groupId: '1', groupName: 'Work',
+      startTime: '', endTime: '', deadlineTime: '', remindAt: ''
+    }
+    expect(toSchedulePayload({ ...base, timeType: 'duration_task', progressTrackingEnabled: true }))
+      .toMatchObject({ progressTrackingEnabled: true })
+    expect(toSchedulePayload({ ...base, timeType: 'deadline_task', progressTrackingEnabled: true, rrule: 'FREQ=DAILY' }))
+      .toMatchObject({ progressTrackingEnabled: false })
+    expect(toSchedulePayload({ ...base, timeType: 'point_event', progressTrackingEnabled: true }))
+      .toMatchObject({ progressTrackingEnabled: false })
+    expect(toSchedulePayload({ ...base, timeType: 'duration_task', progressTrackingEnabled: false }))
+      .toMatchObject({ progressTrackingEnabled: false })
+  })
+
+  it('omits the daily progress flag when the caller does not carry it', () => {
+    // 桌面端等调用方的表单里没有这个字段，不能因此被当成「关闭每日进度」发出去。
+    const payload = toSchedulePayload({
+      title: 'Desktop edit', description: '', groupId: '1', groupName: 'Work', timeType: 'duration_task',
+      startTime: '', endTime: '', deadlineTime: '', remindAt: ''
+    })
+    expect(Object.prototype.hasOwnProperty.call(payload, 'progressTrackingEnabled')).toBe(false)
+    expect(payload.rrule).toBe('')
+  })
+
+  it('formats daily progress percentages for display', () => {
+    expect(formatProgressPercent(0)).toBe('0%')
+    expect(formatProgressPercent(40)).toBe('40%')
+    expect(formatProgressPercent(33.3)).toBe('33.3%')
+    expect(formatProgressPercent(null)).toBe('0%')
+    expect(formatProgressPercent(undefined)).toBe('0%')
+  })
+
+  it('shares the daily progress availability rule between web and desktop', () => {
+    expect(canTrackDailyProgress({ timeType: 'deadline_task' })).toBe(true)
+    expect(canTrackDailyProgress({ timeType: 'duration_task' })).toBe(true)
+    expect(canTrackDailyProgress({ timeType: 'point_event' })).toBe(false)
+    expect(canTrackDailyProgress({ timeType: 'deadline_task', rrule: 'FREQ=DAILY' })).toBe(false)
+    expect(canTrackDailyProgress({})).toBe(false)
+  })
+
+  // 取消后恢复或修正回退再补回时，任务可能停在「待办 + 累计 100%」，
+  // 此时必须给出「标记完成」入口，不能只剩「完成剩余进度」这种无剩余可提交的动作。
+  it('switches the completion action once progress has reached 100%', () => {
+    expect(isProgressComplete(0)).toBe(false)
+    expect(isProgressComplete(99.9)).toBe(false)
+    expect(isProgressComplete(100)).toBe(true)
+    expect(isProgressComplete(null)).toBe(false)
+
+    expect(progressCompletionActionLabel(70)).toBe('完成剩余进度')
+    expect(progressCompletionActionLabel(100)).toBe('标记完成')
+    expect(progressCompletionActionLabel(null)).toBe('完成剩余进度')
+  })
+
+  it('names the progress dialog after the action it performs', () => {
+    expect(progressSubmitDialogTitle(40, 40)).toBe('提交每日进度')
+    expect(progressSubmitDialogTitle(40, 100)).toBe('提交剩余进度并完成')
+    expect(progressSubmitDialogTitle(100, 100)).toBe('标记任务完成')
   })
 })
 

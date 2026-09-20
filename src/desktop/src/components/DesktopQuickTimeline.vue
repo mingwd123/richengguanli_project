@@ -38,7 +38,9 @@ import type {
   TimelinePresentationStatus,
   TimelineTimeRange,
 } from '@web/types'
-import { countdown, dateKeyInTimezone, formatTime, getDisplayTimezone, statusLabel, toApiTimePayload, toSchedulePayload } from '@web/utils/helpers'
+import { countdown, dateKeyInTimezone, formatTime, getDisplayTimezone, progressCompletionActionLabel, statusLabel, toApiTimePayload, toSchedulePayload } from '@web/utils/helpers'
+// 进度面板与网页端共用，避免桌面端再实现一套每日进度规则。
+import ScheduleProgressPanel from '@web/components/ScheduleProgressPanel.vue'
 import {
   buildTimelineStats,
   timelineOccursOnDate,
@@ -151,6 +153,7 @@ const quickRefreshLoading = computed(() => quickTeamLoading.value
   || Object.values(quickPersonalLoading.value).some(Boolean))
 const quickScrollPositions = ref<Record<ScheduleViewMode, number>>(defaultQuickScrollPositions())
 const scheduleDetail = ref<Schedule | null>(null)
+const quickProgressPanel = ref<{ openSubmit: (target?: number) => void; openBackfill: () => void } | null>(null)
 const teamTaskDetail = ref<TeamTask | null>(null)
 const teamTaskGroups = ref<TaskGroup[]>([])
 const teamCreateGroups = ref<TaskGroup[]>([])
@@ -407,6 +410,7 @@ function newScheduleForm(): ScheduleForm {
     fatigueLevel: 3,
     rrule: '',
     excludedDates: [],
+    progressTrackingEnabled: false,
   }
 }
 
@@ -656,6 +660,8 @@ function displayFatigueLevel(schedule: Schedule) {
 }
 
 function displayFatigueWeight(schedule: Schedule) {
+  // 进度任务的负荷取每日记录累计值，不回退到整项计划疲劳权重。
+  if (schedule.progressTrackingEnabled) return Number(schedule.progressCompletedLoad ?? 0)
   return schedule.status === 'completed' && schedule.completedFatigueWeight != null ? schedule.completedFatigueWeight : schedule.fatigueWeight
 }
 
@@ -1192,6 +1198,11 @@ async function loadScheduleDetail(id: number) {
 
 async function runScheduleAction(action: string) {
   if (!scheduleDetail.value || actionBusy.value) return
+  // P04：进度任务一律走每日进度流程，禁止调用普通完成接口。
+  if (action === 'complete' && scheduleDetail.value.progressTrackingEnabled) {
+    quickProgressPanel.value?.openSubmit(100)
+    return
+  }
   actionBusy.value = true
   try {
     const id = scheduleDetail.value.id
@@ -1223,6 +1234,7 @@ async function openScheduleEdit() {
     fatigueLevel: item.fatigueLevel || 3,
     rrule: item.rrule || '',
     excludedDates: [...(item.excludedDates || [])],
+    progressTrackingEnabled: Boolean(item.progressTrackingEnabled),
   }
   initialScheduleReminder.value = scheduleEditForm.value.remindAt
   await pushView({ kind: 'schedule-edit', id: item.id, scrollTop: 0 })
@@ -1616,8 +1628,18 @@ onUnmounted(() => {
           <div><dt>日程状态</dt><dd>{{ statusLabel(scheduleDetail.status) }}</dd></div>
           <div v-if="scheduleDetail.pendingReminders?.length"><dt>下次提醒</dt><dd>{{ formatTime(scheduleDetail.pendingReminders[0].remindAt) }}</dd></div>
         </dl>
+        <ScheduleProgressPanel
+          v-if="scheduleDetail.progressTrackingEnabled"
+          ref="quickProgressPanel"
+          class="quick-detail-progress"
+          :schedule-id="scheduleDetail.id"
+          :status="scheduleDetail.status"
+          :default-fatigue-level="scheduleDetail.fatigueLevel || 3"
+          @updated="loadScheduleDetail(scheduleDetail.id)"
+        />
         <footer class="quick-detail-actions">
-          <button v-if="scheduleDetail.status === 'pending'" class="primary" :disabled="actionBusy" @click="runScheduleAction('complete')"><Check :size="16" />完成</button>
+          <button v-if="scheduleDetail.status === 'pending' && !scheduleDetail.progressTrackingEnabled" class="primary" :disabled="actionBusy" @click="runScheduleAction('complete')"><Check :size="16" />完成</button>
+          <button v-if="scheduleDetail.status === 'pending' && scheduleDetail.progressTrackingEnabled" class="primary" :disabled="actionBusy" @click="quickProgressPanel?.openSubmit(100)"><Check :size="16" />{{ progressCompletionActionLabel(scheduleDetail.progressPercent) }}</button>
           <button v-if="scheduleDetail.status === 'completed'" :disabled="actionBusy" @click="runScheduleAction('uncomplete')"><RotateCcw :size="15" />恢复待办</button>
           <button v-if="scheduleDetail.status === 'cancelled'" :disabled="actionBusy" @click="runScheduleAction('restore')"><RotateCcw :size="15" />恢复</button>
           <button v-if="scheduleDetail.status === 'pending'" class="danger" :disabled="actionBusy" @click="runScheduleAction('cancel')"><XCircle :size="15" />取消日程</button>

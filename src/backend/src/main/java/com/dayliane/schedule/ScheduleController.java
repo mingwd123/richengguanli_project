@@ -50,6 +50,27 @@ public class ScheduleController {
         return ApiResponse.success(scheduleService.requireSchedule(id, userId));
     }
 
+    @GetMapping("/{id}/progress")
+    public ApiResponse<Map<String, Object>> progress(HttpServletRequest request, @PathVariable long id) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.scheduleProgress(id, userId));
+    }
+
+    @PostMapping("/{id}/progress")
+    public ApiResponse<Map<String, Object>> submitProgress(HttpServletRequest request, @PathVariable long id,
+                                                           @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.submitScheduleProgress(id, userId, req));
+    }
+
+    @PutMapping("/{id}/progress/{date}")
+    public ApiResponse<Map<String, Object>> correctProgress(HttpServletRequest request, @PathVariable long id,
+                                                            @PathVariable String date,
+                                                            @RequestBody Map<String, Object> req) {
+        long userId = authService.requireUser(request.getHeader("Authorization"));
+        return ApiResponse.success(scheduleService.correctScheduleProgress(id, userId, date, req));
+    }
+
     @PutMapping("/sort")
     public ApiResponse<Map<String, Object>> sort(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));

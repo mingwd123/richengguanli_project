@@ -56,6 +56,16 @@ function addExcludedDate() {
 function removeExcludedDate(value: string) {
   store.scheduleForm.excludedDates = (store.scheduleForm.excludedDates || []).filter(d => d !== value)
 }
+
+// 每日进度只适用于任务类型且与重复规则互斥；单日/点事件沿用一次性完成流程。
+const canTrackProgress = computed(() => {
+  const type = store.scheduleForm.timeType
+  return (type === 'deadline_task' || type === 'duration_task') && !store.scheduleForm.rrule
+})
+
+watch(canTrackProgress, (value) => {
+  if (!value) store.scheduleForm.progressTrackingEnabled = false
+})
 </script>
 
 <template>
@@ -147,6 +157,15 @@ function removeExcludedDate(value: string) {
       </div>
     </fieldset>
 
+    <fieldset v-if="canTrackProgress" class="progress-block">
+      <legend>每日进度</legend>
+      <label class="progress-toggle">
+        <input v-model="store.scheduleForm.progressTrackingEnabled" type="checkbox" />
+        启用每日进度
+      </label>
+      <small class="muted">适用于跨天或长期任务：按天提交累计完成比例，并选择当天推进对应的疲劳程度。</small>
+    </fieldset>
+
     <div class="form-actions">
       <button type="button" @click="store.closeScheduleModal()">{{ labels.cancel }}</button>
       <button class="primary">{{ labels.save }}</button>
@@ -210,5 +229,22 @@ function removeExcludedDate(value: string) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.progress-block {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  display: grid;
+  gap: 6px;
+}
+.progress-block legend {
+  font-weight: 600;
+  padding: 0 6px;
+}
+.progress-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

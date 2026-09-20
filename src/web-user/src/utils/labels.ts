@@ -2,7 +2,7 @@ export const labels = {
   appTitle: '日程提醒',
   appSubtitle: '个人日程与小团队任务协作工具。',
   phone: '手机号', password: '密码', login: '登录',
-  demoAccount: '演示账号：13800138000 / Abc12345', user: '用户', logout: '退出登录',
+  user: '用户', logout: '退出登录',
   today: '今天', newItem: '新建', refresh: '刷新', pendingSchedules: '待办日程',
   teamTasks: '团队任务', unreadNotifications: '未读通知', upcomingWork: '近期任务', add: '添加',
   timeline: '时间轴', overdue: '逾期', monthCalendar: '本月日历', items: '项', upcomingItems: '近期事项',

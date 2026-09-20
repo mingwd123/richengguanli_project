@@ -175,6 +175,21 @@ small, .muted { color: #718096; }
 .cal-source-name { color: #94a3b8; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cal-tl-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.2; }
 .cal-tl-countdown { display: block; margin-top: 4px; font-size: 11px; color: #64748b; }
+.cal-progress-chip { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 999px; background: rgba(47, 128, 237, 0.12); color: #2f80ed; font-size: 10px; font-weight: 600; }
+/* 每日进度开关：新建/编辑表单与详情页共用。 */
+.progress-block { border: 1px solid var(--border, #e5e7eb); border-radius: 8px; padding: 12px; margin: 8px 0; display: grid; gap: 6px; }
+.progress-block legend { font-weight: 600; padding: 0 6px; }
+.progress-toggle { display: flex; align-items: center; gap: 8px; }
+/* 弹窗里的 label 默认是 grid（.modal-panel label），这里显式提高优先级让勾选框与文案同行。 */
+.modal-panel label.progress-toggle,
+.progress-block label.progress-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.modal-panel label.progress-toggle input,
+.progress-block label.progress-toggle input { width: auto; margin: 0; }
 .cal-tl-countdown.cal-overdue { color: #e11d48; font-weight: 700; }
 .cal-entry-team .cal-tl-dot-wrap .cal-tl-dot { background: #8b5cf6; box-shadow: 0 0 0 3px #ede9fe; }
 .cal-entry-schedule .cal-tl-dot-wrap .cal-tl-dot { background: #10b981; box-shadow: 0 0 0 3px #ecfdf5; }
@@ -1441,7 +1456,6 @@ input:focus, select:focus, textarea:focus {
   color: #70817f;
 }
 .login-submit { min-height: 44px; margin-top: 3px; justify-content: space-between; padding: 0 16px; }
-.demo-account { margin-top: 14px; text-align: center; color: #82918f; font-size: 10px; }
 .email-code-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 136px;
@@ -1473,8 +1487,20 @@ input:focus, select:focus, textarea:focus {
 .field-success { color: var(--success) !important; }
 input[aria-invalid="true"] { border-color: var(--danger); }
 .optional-label { margin-left: 4px; color: var(--muted); font-size: 10px; font-weight: 500; }
-.auth-form-meta { min-height: 20px; display: flex; justify-content: flex-end; align-items: center; }
+.auth-form-meta { min-height: 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .auth-form-meta a { color: #08766f; font-size: 11px; font-weight: 700; }
+/* 记住密码：登录表单里的 label 默认是 grid，这里必须显式改回 flex 才不会上下堆叠。 */
+.login-form label.remember-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4c605e;
+  cursor: pointer;
+  user-select: none;
+}
+.login-form label.remember-toggle input { width: 14px; height: 14px; margin: 0; flex: 0 0 auto; accent-color: var(--primary); }
 .auth-back-link {
   min-height: 32px;
   margin: -5px 0 15px;
@@ -1837,6 +1863,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .report-daily-row.peak { background: color-mix(in srgb, var(--warning) 7%, transparent); }
 .report-daily-date { display: flex; align-items: center; gap: 6px; color: var(--text-strong); font-weight: 700; }
 .report-daily-date em { padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); font-size: 9px; font-style: normal; }
+.report-progress-flag { margin-left: 4px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--accent, #2f80ed) 16%, transparent); color: var(--accent, #2f80ed); font-size: 9px; font-style: normal; }
 
 @media (max-width: 900px) {
   .report-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

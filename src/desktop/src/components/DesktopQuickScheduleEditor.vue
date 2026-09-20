@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { BatteryMedium, CalendarClock, Flag, Save, Sparkles, Timer, TriangleAlert } from 'lucide-vue-next'
+import { computed, watch } from 'vue'
+import { BatteryMedium, CalendarClock, Flag, Gauge, Save, Sparkles, Timer, TriangleAlert } from 'lucide-vue-next'
 import type { ScheduleForm, TaskGroup, TimeType } from '@web/types'
+import { canTrackDailyProgress } from '@web/utils/helpers'
 import RepeatRuleEditor from '@web/components/RepeatRuleEditor.vue'
 import DesktopQuickReminderPicker from './DesktopQuickReminderPicker.vue'
 
@@ -41,6 +42,13 @@ const reminderBaseTime = computed(() => form.value.timeType === 'deadline_task'
   ? form.value.deadlineTime
   : form.value.startTime)
 const reminderBaseLabel = computed(() => form.value.timeType === 'deadline_task' ? '截止时间' : '开始时间')
+
+// 每日进度只适用于任务类型且与重复规则互斥，与网页端共用同一判断。
+const canTrackProgress = computed(() => canTrackDailyProgress(form.value))
+
+watch(canTrackProgress, (value) => {
+  if (!value) form.value.progressTrackingEnabled = false
+})
 </script>
 
 <template>
@@ -108,6 +116,15 @@ const reminderBaseLabel = computed(() => form.value.timeType === 'deadline_task'
     <DesktopQuickReminderPicker v-model="form.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="props.reminderPresets" :timezone="props.timezone" :disabled="busy" @error="emit('error', $event)" />
 
     <RepeatRuleEditor v-if="props.repeatEnabled !== false" v-model:rrule="form.rrule" v-model:excluded-dates="form.excludedDates" />
+
+    <fieldset v-if="canTrackProgress" class="quick-editor-field">
+      <legend><Gauge :size="14" />每日进度</legend>
+      <label class="quick-progress-toggle">
+        <input v-model="form.progressTrackingEnabled" type="checkbox" />
+        启用每日进度（长期任务按天提交完成比例与疲劳）
+      </label>
+      <small>开启后每天在详情提交累计完成比例，负荷按天计入个人完成负荷。</small>
+    </fieldset>
 
     <label class="quick-editor-field">
       <span>说明 <small>可选</small></span>

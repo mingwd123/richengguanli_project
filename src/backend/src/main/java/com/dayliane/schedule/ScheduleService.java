@@ -29,6 +29,8 @@ import java.util.*;
 public class ScheduleService {
     private static final String COMPLETED_GROUP_SECTION = "__completed__";
     private static final List<String> LEVEL_SECTION_KEYS = List.of("5", "4", "3", "2", "1");
+    /** 每日进度累计上限：达到即视为任务完成。 */
+    private static final BigDecimal PROGRESS_COMPLETE = BigDecimal.valueOf(100);
     private static final String VISIBLE_OCCURRENCE_FILTER = " and not (status<>'completed' and series_id is not null and occurrence_date is not null"
             + " and exists (select 1 from schedule_series_exdate ex where ex.series_id=schedule.series_id and ex.excluded_date=schedule.occurrence_date))";
     private static final Logger log = LoggerFactory.getLogger(ScheduleService.class);
@@ -62,6 +64,8 @@ public class ScheduleService {
         validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
         String rrule = nullableText(req.get("rrule"));
         if (rrule != null) RruleExpander.validate(rrule);
+        boolean progressTrackingEnabled = booleanValue(req.get("progressTrackingEnabled"));
+        validateProgressTracking(progressTrackingEnabled, timeType, rrule);
         String seriesId = rrule == null ? null : UUID.randomUUID().toString();
         List<LocalDate> excludedDates = excludedDateList(req);
         Timestamp storedStartTime = startTime;
@@ -71,7 +75,7 @@ public class ScheduleService {
         int sortOrder = nextScheduleSortOrder(userId, longValue(group.get("id")));
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement("insert into schedule (user_id,title,description,group_id,group_name,sort_order,time_type,start_time,end_time,deadline_time,status,urgency_level,fatigue_level,rrule,series_id) values (?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?)", new String[]{"id"});
+            PreparedStatement ps = con.prepareStatement("insert into schedule (user_id,title,description,group_id,group_name,sort_order,time_type,start_time,end_time,deadline_time,status,urgency_level,fatigue_level,rrule,series_id,progress_tracking_enabled) values (?,?,?,?,?,?,?,?,?,?, 'pending',?,?,?,?,?)", new String[]{"id"});
             ps.setLong(1, userId);
             ps.setString(2, title);
             ps.setString(3, text(req, "description"));
@@ -86,6 +90,7 @@ public class ScheduleService {
             ps.setInt(12, fatigueLevel);
             ps.setString(13, rrule);
             ps.setString(14, seriesId);
+            ps.setBoolean(15, progressTrackingEnabled);
             return ps;
         }, keyHolder);
         long id = Objects.requireNonNull(keyHolder.getKey()).longValue();
@@ -169,6 +174,8 @@ public class ScheduleService {
         Comparator<Map<String, Object>> comparator = scheduleComparator(safeViewMode, safeSort, status, zone, groupOrder);
         all.sort(comparator);
         decorateViewRows(all, safeViewMode, zone);
+        // P06：进度任务的完成负荷按每日记录批量聚合，避免逐条查询；摘要与列表共用同一口径。
+        applyProgressCompletedLoads(userId, all);
         List<Map<String, Object>> summaries = sectionSummaries(all, safeViewMode, zone, groupOrder);
         int total = all.size();
         int from = Math.min((safePage - 1) * safeSize, total);
@@ -362,6 +369,12 @@ public class ScheduleService {
         try {
             Map<String, Object> item = jdbc.queryForObject(scheduleSelect() + " from schedule where id=? and user_id=? and deleted_at is null", scheduleMapper(), id, userId);
             item.put("fatigueWeight", fatigueService.currentWeight(userId, intValue(item.get("fatigueLevel"), 3)));
+            if (Boolean.TRUE.equals(item.get("progressTrackingEnabled"))) {
+                // P06：详情页与列表使用同一口径的进度累计负荷。
+                BigDecimal progressLoad = jdbc.queryForObject("select coalesce(sum(completed_load),0) from schedule_progress_daily where schedule_id=? and user_id=?",
+                        BigDecimal.class, id, userId);
+                item.put("progressCompletedLoad", progressLoad == null ? BigDecimal.ZERO : progressLoad);
+            }
             int reminderCount = count("select count(*) from reminder where target_type='schedule' and target_id=? and status='pending'", id);
             item.put("hasReminder", reminderCount > 0);
             item.put("reminderCount", reminderCount);
@@ -398,10 +411,23 @@ public class ScheduleService {
         if ("deadline_task".equals(timeType)) { startTime = null; endTime = null; }
         if ("duration_task".equals(timeType)) deadlineTime = null;
         validateScheduleTimes(timeType, startTime, endTime, deadlineTime);
+        boolean currentProgressTracking = Boolean.TRUE.equals(current.get("progressTrackingEnabled"));
+        boolean progressTrackingEnabled = req.containsKey("progressTrackingEnabled")
+                ? booleanValue(req.get("progressTrackingEnabled"))
+                : currentProgressTracking;
+        validateProgressTracking(progressTrackingEnabled, timeType, nullableText(current.get("seriesId")));
+        if (progressTrackingEnabled != currentProgressTracking) {
+            if (!"pending".equals(current.get("status"))) {
+                throw new BusinessException(400, "daily progress can only be changed while the schedule is pending");
+            }
+            if (!progressTrackingEnabled && hasProgressRecords(userId, id)) {
+                throw new BusinessException(400, "remove the daily progress records before disabling daily progress");
+            }
+        }
         Map<String, Object> group = req.containsKey("groupId") || req.containsKey("groupName") ? resolvePersonalTaskGroup(userId, req) : null;
         Integer sortOrder = group == null ? null : nextScheduleSortOrder(userId, longValue(group.get("id")));
-        jdbc.update("update schedule set title=?, description=?, group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=?, start_time=?, end_time=?, deadline_time=?, urgency_level=?, fatigue_level=? where id=? and user_id=?",
-                title, description, group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, timeType, startTime, endTime, deadlineTime, urgencyLevel, fatigueLevel, id, userId);
+        jdbc.update("update schedule set title=?, description=?, group_id=coalesce(?,group_id), group_name=coalesce(?,group_name), sort_order=coalesce(?,sort_order), time_type=?, start_time=?, end_time=?, deadline_time=?, urgency_level=?, fatigue_level=?, progress_tracking_enabled=? where id=? and user_id=?",
+                title, description, group == null ? null : longValue(group.get("id")), group == null ? null : String.valueOf(group.get("name")), sortOrder, timeType, startTime, endTime, deadlineTime, urgencyLevel, fatigueLevel, progressTrackingEnabled, id, userId);
         if (req.containsKey("remindAt") || req.containsKey("remindAts")) {
             cancelRestorableReminders("schedule", id, userId);
             createScheduleReminders(userId, id, req);
@@ -449,6 +475,9 @@ public class ScheduleService {
         if (!List.of("pending", "completed", "cancelled").contains(status)) throw new BusinessException(400, "status is invalid");
         if (current.equals(status)) throw new BusinessException(400, "schedule is already " + status);
         if (!"pending".equals(current) && !"pending".equals(status)) throw new BusinessException(400, "schedule must be restored before changing to " + status);
+        if ("completed".equals(status) && Boolean.TRUE.equals(schedule.get("progressTrackingEnabled"))) {
+            throw new BusinessException(400, "schedule with daily progress must be completed by submitting progress up to 100%");
+        }
         if ("completed".equals(status)) {
             Integer level = jdbc.queryForObject("select fatigue_level from schedule where id=? and user_id=?", Integer.class, id, userId);
             int completedLevel = level == null ? 3 : level;
@@ -464,6 +493,418 @@ public class ScheduleService {
         Map<String, Object> updated = requireSchedule(id, userId);
         recalculateScheduleDates(userId, schedule, updated);
         return Map.of("id", id, "status", status);
+    }
+
+    // ------------------------------------------------------------------
+    // 阶段 1A：个人长期任务每日进度与疲劳
+    // ------------------------------------------------------------------
+
+    public Map<String, Object> scheduleProgress(long scheduleId, long userId) {
+        Map<String, Object> schedule = requireSchedule(scheduleId, userId);
+        return progressResponse(userId, schedule);
+    }
+
+    @Transactional
+    public Map<String, Object> submitScheduleProgress(long scheduleId, long userId, Map<String, Object> req) {
+        // P01：并发提交必须在行锁内重新读取状态与累计进度，不能用事务外的旧快照算增量。
+        Map<String, Object> locked = lockProgressSchedule(scheduleId, userId);
+        if (!Boolean.TRUE.equals(locked.get("progressTrackingEnabled"))) {
+            throw new BusinessException(400, "schedule does not enable daily progress");
+        }
+        if (!"pending".equals(String.valueOf(locked.get("status")))) {
+            throw new BusinessException(400, "schedule must be pending to submit daily progress");
+        }
+        BigDecimal cumulative = requiredDecimal(req, "cumulativeProgress");
+        validateProgressPercent(cumulative, "cumulativeProgress");
+        BigDecimal current = decimalValue(locked.get("progressPercent"), BigDecimal.ZERO);
+        BigDecimal delta = cumulative.subtract(current);
+        if (delta.signum() < 0) {
+            throw new BusinessException(400, "progress cannot decrease; use the history correction endpoint");
+        }
+        ZoneId zone = userZone(userId);
+        LocalDate progressDate = LocalDate.now(zone);
+        if (delta.signum() == 0) {
+            // 当日没有新增进度：不重复累计负荷；若累计进度已到 100%（例如任务被重新打开后再完成）则补记完成。
+            LocalDate completedOn = cumulative.compareTo(PROGRESS_COMPLETE) == 0
+                    ? syncProgressCompletion(userId, scheduleId, "pending")
+                    : null;
+            LinkedHashSet<LocalDate> dates = new LinkedHashSet<>();
+            dates.add(progressDate);
+            if (completedOn != null) dates.add(completedOn);
+            assertProgressConsistency(userId, scheduleId);
+            fatigueService.recalculateDates(userId, List.copyOf(dates), false);
+            return scheduleProgress(scheduleId, userId);
+        }
+        boolean trackingOn = fatigueService.trackingEnabledFor(userId);
+        Integer level = null;
+        BigDecimal weight = null;
+        if (trackingOn) {
+            level = requiredScheduleLevel(req, "fatigueLevel");
+            weight = fatigueService.currentWeight(userId, level);
+        } else if (req != null && req.get("fatigueLevel") != null) {
+            throw new BusinessException(400, "fatigueLevel is not allowed when fatigue tracking is disabled");
+        }
+        BigDecimal dayDelta = existingProgressDeltaForUpdate(userId, scheduleId, progressDate).add(delta);
+        if (dayDelta.compareTo(PROGRESS_COMPLETE) > 0) throw new BusinessException(400, "daily progress cannot exceed 100");
+        BigDecimal load = trackingOn ? progressLoad(dayDelta, weight) : BigDecimal.ZERO;
+        saveProgressDaily(userId, scheduleId, progressDate, dayDelta, cumulative, level, weight, load);
+        jdbc.update("update schedule set progress_percent=? where id=? and user_id=? and deleted_at is null", cumulative, scheduleId, userId);
+        LinkedHashSet<LocalDate> touched = new LinkedHashSet<>();
+        touched.add(progressDate);
+        LocalDate completedOn = cumulative.compareTo(PROGRESS_COMPLETE) == 0
+                ? syncProgressCompletion(userId, scheduleId, "pending")
+                : null;
+        if (completedOn != null) touched.add(completedOn);
+        assertProgressConsistency(userId, scheduleId);
+        fatigueService.recalculateDates(userId, List.copyOf(touched), trackingOn);
+        return scheduleProgress(scheduleId, userId);
+    }
+
+    /** 锁内读取进度任务的关键字段：并发下必须以此为准，不能复用事务外快照。 */
+    private Map<String, Object> lockProgressSchedule(long scheduleId, long userId) {
+        List<Map<String, Object>> rows = jdbc.query(
+                "select id,status,progress_percent progressPercent,progress_tracking_enabled progressTrackingEnabled," +
+                        "progress_completed_date progressCompletedDate,completed_at completedAt,start_time startTime,created_at createdAt " +
+                        "from schedule where id=? and user_id=? and deleted_at is null for update",
+                (rs, i) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("status", rs.getString("status"));
+                    row.put("progressPercent", rs.getBigDecimal("progressPercent"));
+                    row.put("progressTrackingEnabled", rs.getBoolean("progressTrackingEnabled"));
+                    java.sql.Date progressCompleted = rs.getDate("progressCompletedDate");
+                    row.put("progressCompletedDate", progressCompleted == null ? null : progressCompleted.toLocalDate());
+                    row.put("completedAt", rs.getTimestamp("completedAt"));
+                    row.put("startTime", rs.getTimestamp("startTime"));
+                    row.put("createdAt", rs.getTimestamp("createdAt"));
+                    return row;
+                }, scheduleId, userId);
+        if (rows.isEmpty()) throw new BusinessException(404, "schedule not found");
+        return rows.get(0);
+    }
+
+    /**
+     * 按每日记录同步进度任务的完成状态与完成日期（P02）。
+     * 返回本次「待处理 -> 完成」使用的进度日期；状态未发生完成转换时返回 null。
+     * 取消状态不会被自动改成完成，必须先恢复为待处理；累计不足 100% 时重新打开任务并保留每日历史。
+     */
+    private LocalDate syncProgressCompletion(long userId, long scheduleId, String status) {
+        LocalDate firstComplete = firstCompleteProgressDate(userId, scheduleId);
+        if (firstComplete == null) {
+            if ("completed".equals(status)) {
+                jdbc.update("update schedule set status='pending', completed_at=null, progress_completed_date=null, completed_fatigue_level=null, completed_fatigue_weight=null where id=? and user_id=?",
+                        scheduleId, userId);
+                resumePausedReminders("schedule", scheduleId, userId);
+            }
+            return null;
+        }
+        if ("pending".equals(status)) {
+            // 只有锁内确认累计进度达到 100% 才允许写入完成状态；只写完成日期，不写整项完成负荷快照。
+            int updated = jdbc.update("update schedule set status='completed', completed_at=utc_timestamp(), progress_completed_date=?, completed_fatigue_level=null, completed_fatigue_weight=null where id=? and user_id=? and status='pending' and progress_percent>=?",
+                    java.sql.Date.valueOf(firstComplete), scheduleId, userId, PROGRESS_COMPLETE);
+            if (updated == 0) return null;
+            pausePendingReminders("schedule", scheduleId, userId);
+            return firstComplete;
+        }
+        if ("completed".equals(status)) {
+            // 历史修正可能改变首次达到 100% 的日期：同步日期但不改变状态。
+            jdbc.update("update schedule set progress_completed_date=? where id=? and user_id=?",
+                    java.sql.Date.valueOf(firstComplete), scheduleId, userId);
+        }
+        return null;
+    }
+
+    /** 首次达到 100% 的进度日期：每日记录中累计首次 >= 100% 的那一天。 */
+    private LocalDate firstCompleteProgressDate(long userId, long scheduleId) {
+        List<LocalDate> rows = jdbc.query("select progress_date from schedule_progress_daily where schedule_id=? and user_id=? and cumulative_progress>=? order by progress_date",
+                (rs, i) -> rs.getDate(1).toLocalDate(), scheduleId, userId, PROGRESS_COMPLETE);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /** 提交前校验：进度与每日增量一致、完成状态必须为 100%、进度任务不得带整项完成快照。 */
+    private void assertProgressConsistency(long userId, long scheduleId) {
+        Map<String, Object> row = requireSchedule(scheduleId, userId);
+        if (!Boolean.TRUE.equals(row.get("progressTrackingEnabled"))) return;
+        BigDecimal percent = decimalValue(row.get("progressPercent"), BigDecimal.ZERO);
+        BigDecimal sum = jdbc.queryForObject("select coalesce(sum(progress_delta),0) from schedule_progress_daily where schedule_id=? and user_id=?",
+                BigDecimal.class, scheduleId, userId);
+        if (sum == null) sum = BigDecimal.ZERO;
+        if (sum.compareTo(percent) != 0) {
+            log.error("daily progress inconsistent: schedule={} user={} percent={} sum={}", scheduleId, userId, percent, sum);
+            throw new IllegalStateException("daily progress is inconsistent with its daily records");
+        }
+        if ("completed".equals(String.valueOf(row.get("status"))) && percent.compareTo(PROGRESS_COMPLETE) != 0) {
+            log.error("daily progress completed below 100%: schedule={} user={} percent={}", scheduleId, userId, percent);
+            throw new IllegalStateException("completed daily progress schedule must be at 100%");
+        }
+        if (row.get("completedFatigueLevel") != null || row.get("completedFatigueWeight") != null) {
+            log.error("daily progress schedule carries a full-task snapshot: schedule={} user={}", scheduleId, userId);
+            throw new IllegalStateException("daily progress schedule must not store a full-task completion snapshot");
+        }
+    }
+
+    @Transactional
+    public Map<String, Object> correctScheduleProgress(long scheduleId, long userId, String dateText, Map<String, Object> req) {
+        Map<String, Object> locked = lockProgressSchedule(scheduleId, userId);
+        requireProgressTracking(locked);
+        String status = String.valueOf(locked.get("status"));
+        LocalDate target = parseFilterDate(dateText, "progressDate");
+        ZoneId zone = userZone(userId);
+        LocalDate today = LocalDate.now(zone);
+        if (target.isAfter(today)) throw new BusinessException(400, "progressDate cannot be in the future");
+        // P08：补录日期不得早于任务有效起始日期，并受现有疲劳保留期限制。
+        LocalDate minDate = progressBackfillMinDate(locked, zone, today);
+        if (target.isBefore(minDate)) {
+            throw new BusinessException(400, "progressDate is earlier than the schedule start date or the retention window");
+        }
+        BigDecimal delta = requiredDecimal(req, "progressDelta");
+        if (delta.signum() < 0) throw new BusinessException(400, "progressDelta cannot be negative");
+        validateProgressPercent(delta, "progressDelta");
+        boolean trackingOn = fatigueService.trackingEnabledFor(userId);
+        Integer level = null;
+        BigDecimal weight = null;
+        // 追踪关闭时只保存进度，不写疲劳等级、权重快照与负荷。
+        if (delta.signum() > 0 && trackingOn) {
+            level = requiredScheduleLevel(req, "fatigueLevel");
+            weight = fatigueService.currentWeight(userId, level);
+        } else if (delta.signum() > 0 && req != null && req.get("fatigueLevel") != null) {
+            throw new BusinessException(400, "fatigueLevel is not allowed when fatigue tracking is disabled");
+        }
+
+        List<Map<String, Object>> rows = progressRows(userId, scheduleId);
+        boolean exists = rows.stream().anyMatch(row -> target.equals(row.get("progressDate")));
+        if (!exists && delta.signum() == 0) throw new BusinessException(400, "no daily progress record for that date");
+        List<Map<String, Object>> kept = new ArrayList<>();
+        for (Map<String, Object> row : rows) if (!target.equals(row.get("progressDate"))) kept.add(row);
+        BigDecimal targetLoad = BigDecimal.ZERO;
+        if (delta.signum() > 0) {
+            targetLoad = trackingOn ? progressLoad(delta, weight) : BigDecimal.ZERO;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("progressDate", target);
+            row.put("progressDelta", delta);
+            row.put("cumulativeProgress", target);
+            row.put("fatigueLevel", level);
+            row.put("fatigueWeightSnapshot", weight);
+            row.put("completedLoad", targetLoad);
+            kept.add(row);
+            kept.sort(Comparator.comparing((Map<String, Object> entry) -> (LocalDate) entry.get("progressDate")));
+        }
+        BigDecimal running = BigDecimal.ZERO;
+        for (Map<String, Object> row : kept) {
+            running = running.add(decimalValue(row.get("progressDelta"), BigDecimal.ZERO));
+            if (running.compareTo(PROGRESS_COMPLETE) > 0) {
+                throw new BusinessException(400, "cumulative daily progress cannot exceed 100");
+            }
+            row.put("cumulativeProgress", running);
+        }
+        BigDecimal total = running;
+
+        LocalDate previousCompletedOn = locked.get("progressCompletedDate") instanceof LocalDate stored
+                ? stored
+                : localDateOf(locked.get("completedAt"), zone);
+        if (delta.signum() == 0) {
+            jdbc.update("delete from schedule_progress_daily where schedule_id=? and user_id=? and progress_date=?",
+                    scheduleId, userId, java.sql.Date.valueOf(target));
+        } else {
+            saveProgressDaily(userId, scheduleId, target, delta, runningFor(kept, target),
+                    level, weight, targetLoad);
+        }
+        updateProgressCumulative(userId, scheduleId, kept);
+        jdbc.update("update schedule set progress_percent=? where id=? and user_id=? and deleted_at is null", total, scheduleId, userId);
+        LocalDate newCompletedOn = syncProgressCompletion(userId, scheduleId, status);
+        assertProgressConsistency(userId, scheduleId);
+
+        LinkedHashSet<LocalDate> touched = new LinkedHashSet<>();
+        for (Map<String, Object> row : kept) touched.add((LocalDate) row.get("progressDate"));
+        touched.add(target);
+        if (previousCompletedOn != null) touched.add(previousCompletedOn);
+        if (newCompletedOn != null) touched.add(newCompletedOn);
+        fatigueService.recalculateDates(userId, List.copyOf(touched), true);
+        return scheduleProgress(scheduleId, userId);
+    }
+
+    /** 补录下限：任务有效起始日期（无开始日期时取创建日期）与疲劳保留期取较晚者。 */
+    private LocalDate progressBackfillMinDate(Map<String, Object> schedule, ZoneId zone, LocalDate today) {
+        LocalDate start = localDateOf(schedule.get("startTime"), zone);
+        if (start == null) start = localDateOf(schedule.get("createdAt"), zone);
+        if (start == null) start = today;
+        LocalDate retention = today.minusDays(Math.max(30, fatigueService.retentionDays()));
+        return start.isAfter(retention) ? start : retention;
+    }
+
+    /** 兼容两种来源：锁定查询返回 Timestamp，展示查询返回 ISO 字符串。 */
+    private static LocalDate localDateOf(Object value, ZoneId zone) {
+        if (value instanceof Timestamp timestamp) return timestamp.toInstant().atZone(zone).toLocalDate();
+        if (value instanceof java.sql.Date date) return date.toLocalDate();
+        Instant instant = instantValue(value);
+        return instant == null ? null : instant.atZone(zone).toLocalDate();
+    }
+
+    private BigDecimal runningFor(List<Map<String, Object>> rows, LocalDate date) {
+        for (Map<String, Object> row : rows) {
+            if (date.equals(row.get("progressDate"))) return decimalValue(row.get("cumulativeProgress"), BigDecimal.ZERO);
+        }
+        return BigDecimal.ZERO;
+    }
+
+    private void updateProgressCumulative(long userId, long scheduleId, List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            jdbc.update("update schedule_progress_daily set cumulative_progress=?, updated_at=utc_timestamp() where schedule_id=? and user_id=? and progress_date=?",
+                    decimalValue(row.get("cumulativeProgress"), BigDecimal.ZERO), scheduleId, userId,
+                    java.sql.Date.valueOf((LocalDate) row.get("progressDate")));
+        }
+    }
+
+    private static BigDecimal progressLoad(BigDecimal delta, BigDecimal weight) {
+        if (delta == null || weight == null || delta.signum() <= 0) return BigDecimal.ZERO;
+        return delta.divide(PROGRESS_COMPLETE, 6, RoundingMode.HALF_UP).multiply(weight).setScale(3, RoundingMode.HALF_UP);
+    }
+
+    private void saveProgressDaily(long userId, long scheduleId, LocalDate date, BigDecimal dayDelta,
+                                   BigDecimal cumulative, Integer level, BigDecimal weight, BigDecimal load) {
+        if (updateProgressDaily(userId, scheduleId, date, dayDelta, cumulative, level, weight, load) > 0) return;
+        try {
+            insertProgressDaily(userId, scheduleId, date, dayDelta, cumulative, level, weight, load);
+        } catch (DataIntegrityViolationException concurrentInsert) {
+            updateProgressDaily(userId, scheduleId, date, dayDelta, cumulative, level, weight, load);
+        }
+    }
+
+    private int updateProgressDaily(long userId, long scheduleId, LocalDate date, BigDecimal dayDelta,
+                                    BigDecimal cumulative, Integer level, BigDecimal weight, BigDecimal load) {
+        java.sql.Date sqlDate = java.sql.Date.valueOf(date);
+        if (level == null) {
+            return jdbc.update("update schedule_progress_daily set progress_delta=?, cumulative_progress=?, fatigue_level=null, fatigue_weight_snapshot=null, completed_load=?, updated_at=utc_timestamp() where schedule_id=? and user_id=? and progress_date=?",
+                    dayDelta, cumulative, load, scheduleId, userId, sqlDate);
+        }
+        return jdbc.update("update schedule_progress_daily set progress_delta=?, cumulative_progress=?, fatigue_level=?, fatigue_weight_snapshot=?, completed_load=?, updated_at=utc_timestamp() where schedule_id=? and user_id=? and progress_date=?",
+                dayDelta, cumulative, level, weight, load, scheduleId, userId, sqlDate);
+    }
+
+    private void insertProgressDaily(long userId, long scheduleId, LocalDate date, BigDecimal dayDelta,
+                                     BigDecimal cumulative, Integer level, BigDecimal weight, BigDecimal load) {
+        java.sql.Date sqlDate = java.sql.Date.valueOf(date);
+        if (level == null) {
+            jdbc.update("insert into schedule_progress_daily (schedule_id,user_id,progress_date,progress_delta,cumulative_progress,fatigue_level,fatigue_weight_snapshot,completed_load) values (?,?,?,?,?,null,null,?)",
+                    scheduleId, userId, sqlDate, dayDelta, cumulative, load);
+            return;
+        }
+        jdbc.update("insert into schedule_progress_daily (schedule_id,user_id,progress_date,progress_delta,cumulative_progress,fatigue_level,fatigue_weight_snapshot,completed_load) values (?,?,?,?,?,?,?,?)",
+                scheduleId, userId, sqlDate, dayDelta, cumulative, level, weight, load);
+    }
+
+    private BigDecimal existingProgressDeltaForUpdate(long userId, long scheduleId, LocalDate date) {
+        List<BigDecimal> rows = jdbc.query("select progress_delta from schedule_progress_daily where schedule_id=? and user_id=? and progress_date=? for update",
+                (rs, i) -> rs.getBigDecimal(1), scheduleId, userId, java.sql.Date.valueOf(date));
+        return rows.isEmpty() || rows.get(0) == null ? BigDecimal.ZERO : rows.get(0);
+    }
+
+    private List<Map<String, Object>> progressRows(long userId, long scheduleId) {
+        return jdbc.query("select id, progress_date progressDate, progress_delta progressDelta, cumulative_progress cumulativeProgress, fatigue_level fatigueLevel, fatigue_weight_snapshot fatigueWeightSnapshot, completed_load completedLoad from schedule_progress_daily where schedule_id=? and user_id=? order by progress_date",
+                (rs, i) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("progressDate", rs.getDate("progressDate").toLocalDate());
+                    row.put("progressDelta", rs.getBigDecimal("progressDelta"));
+                    row.put("cumulativeProgress", rs.getBigDecimal("cumulativeProgress"));
+                    row.put("fatigueLevel", rs.getObject("fatigueLevel"));
+                    row.put("fatigueWeightSnapshot", rs.getBigDecimal("fatigueWeightSnapshot"));
+                    row.put("completedLoad", rs.getBigDecimal("completedLoad"));
+                    return row;
+                }, scheduleId, userId);
+    }
+
+    private Map<String, Object> progressResponse(long userId, Map<String, Object> schedule) {
+        long scheduleId = longValue(schedule.get("id"));
+        List<Map<String, Object>> items = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        for (Map<String, Object> row : progressRows(userId, scheduleId)) {
+            BigDecimal load = decimalValue(row.get("completedLoad"), BigDecimal.ZERO);
+            total = total.add(load);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("progressDate", String.valueOf(row.get("progressDate")));
+            item.put("progressDelta", progressScale(row.get("progressDelta")));
+            item.put("cumulativeProgress", progressScale(row.get("cumulativeProgress")));
+            item.put("fatigueLevel", row.get("fatigueLevel"));
+            item.put("fatigueWeightSnapshot", row.get("fatigueWeightSnapshot"));
+            item.put("completedLoad", progressScale(load));
+            items.add(item);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("scheduleId", scheduleId);
+        result.put("progressTrackingEnabled", Boolean.TRUE.equals(schedule.get("progressTrackingEnabled")));
+        result.put("progressPercent", progressScale(decimalValue(schedule.get("progressPercent"), BigDecimal.ZERO)));
+        result.put("status", schedule.get("status"));
+        result.put("completedAt", schedule.get("completedAt"));
+        result.put("fatigueTrackingEnabled", fatigueService.trackingEnabledFor(userId));
+        result.put("totalCompletedLoad", progressScale(total));
+        result.put("items", items);
+        // §6.1：补录与提交的前端契约。完成日期优先使用进度完成日期，避免把修正操作时间当成完成日。
+        String status = String.valueOf(schedule.get("status"));
+        ZoneId zone = userZone(userId);
+        LocalDate today = LocalDate.now(zone);
+        Object progressCompleted = schedule.get("progressCompletedDate");
+        LocalDate resolvedCompleted = progressCompleted != null
+                ? LocalDate.parse(String.valueOf(progressCompleted))
+                : completedDate(schedule, zone);
+        result.put("completedDate", resolvedCompleted == null ? null : resolvedCompleted.toString());
+        result.put("canSubmitProgress", Boolean.TRUE.equals(schedule.get("progressTrackingEnabled")) && "pending".equals(status));
+        result.put("canBackfill", Boolean.TRUE.equals(schedule.get("progressTrackingEnabled")));
+        result.put("backfillMinDate", progressBackfillMinDate(schedule, zone, today).toString());
+        result.put("backfillMaxDate", today.toString());
+        result.put("retentionDays", Math.max(30, fatigueService.retentionDays()));
+        return result;
+    }
+
+    private static BigDecimal progressScale(Object value) {
+        return decimalValue(value, BigDecimal.ZERO).setScale(3, RoundingMode.HALF_UP);
+    }
+
+    private boolean hasProgressRecords(long userId, long scheduleId) {
+        return count("select count(*) from schedule_progress_daily where schedule_id=? and user_id=?", scheduleId, userId) > 0;
+    }
+
+    private static void requireProgressTracking(Map<String, Object> schedule) {
+        if (!Boolean.TRUE.equals(schedule.get("progressTrackingEnabled"))) {
+            throw new BusinessException(400, "schedule does not enable daily progress");
+        }
+    }
+
+    private static void validateProgressTracking(boolean enabled, String timeType, String seriesMarker) {
+        if (!enabled) return;
+        if (!List.of("deadline_task", "duration_task").contains(timeType)) {
+            throw new BusinessException(400, "daily progress is only available for tasks");
+        }
+        if (seriesMarker != null) throw new BusinessException(400, "daily progress is not available for repeating schedules");
+    }
+
+    private static void validateProgressPercent(BigDecimal value, String field) {
+        if (value == null || value.signum() < 0 || value.compareTo(PROGRESS_COMPLETE) > 0) {
+            throw new BusinessException(400, field + " must be between 0 and 100");
+        }
+    }
+
+    private static BigDecimal requiredDecimal(Map<String, Object> req, String field) {
+        Object raw = req == null ? null : req.get(field);
+        if (raw == null || String.valueOf(raw).isBlank()) throw new BusinessException(400, field + " is required");
+        try {
+            return new BigDecimal(String.valueOf(raw).trim());
+        } catch (NumberFormatException ex) {
+            throw new BusinessException(400, field + " must be a number");
+        }
+    }
+
+    private static int requiredScheduleLevel(Map<String, Object> req, String field) {
+        if (req == null || !req.containsKey(field) || req.get(field) == null) {
+            throw new BusinessException(400, field + " is required when fatigue tracking is enabled");
+        }
+        return scheduleLevel(req, field, 3);
+    }
+
+    private static boolean booleanValue(Object raw) {
+        if (raw == null) return false;
+        if (raw instanceof Boolean value) return value;
+        return Boolean.parseBoolean(String.valueOf(raw).trim());
     }
 
     @Transactional
@@ -1102,12 +1543,15 @@ public class ScheduleService {
             m.put("completedFatigueWeight", rs.getObject("completedFatigueWeight"));
             m.put("rrule", rs.getString("rrule")); m.put("seriesId", rs.getString("seriesId"));
             java.sql.Date occurrence = rs.getDate("occurrenceDate"); m.put("occurrenceDate", occurrence == null ? null : occurrence.toLocalDate().toString());
+            m.put("progressTrackingEnabled", rs.getBoolean("progressTrackingEnabled")); m.put("progressPercent", rs.getBigDecimal("progressPercent"));
+            java.sql.Date progressCompleted = rs.getDate("progressCompletedDate");
+            m.put("progressCompletedDate", progressCompleted == null ? null : progressCompleted.toLocalDate().toString());
             m.put("status", rs.getString("status")); m.put("createdAt", iso(rs.getTimestamp("createdAt"))); return m;
         };
     }
 
     private static String scheduleSelect() {
-        return "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,rrule,series_id seriesId,occurrence_date occurrenceDate,created_at createdAt";
+        return "select id,user_id userId,title,description,group_id groupId,group_name groupName,sort_order sortOrder,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,rrule,series_id seriesId,occurrence_date occurrenceDate,progress_tracking_enabled progressTrackingEnabled,progress_percent progressPercent,progress_completed_date progressCompletedDate,created_at createdAt";
     }
 
     private Map<Long, Integer> personalGroupOrder(long userId) {
@@ -1202,7 +1646,35 @@ public class ScheduleService {
         return summaries;
     }
 
+    /** P06：批量填充进度任务的每日负荷累计值，一次查询覆盖整个列表页。 */
+    private void applyProgressCompletedLoads(long userId, List<Map<String, Object>> items) {
+        List<Long> progressIds = new ArrayList<>();
+        for (Map<String, Object> item : items) {
+            if (!Boolean.TRUE.equals(item.get("progressTrackingEnabled"))) continue;
+            item.put("progressCompletedLoad", BigDecimal.ZERO);
+            progressIds.add(longValue(item.get("id")));
+        }
+        if (progressIds.isEmpty()) return;
+        Map<String, Object> params = new HashMap<>();
+        params.put("userId", userId);
+        params.put("ids", progressIds);
+        Map<Long, BigDecimal> loads = new HashMap<>();
+        named.query("select schedule_id scheduleId, coalesce(sum(completed_load),0) completedLoad from schedule_progress_daily " +
+                        "where user_id=:userId and schedule_id in (:ids) group by schedule_id",
+                params,
+                rs -> { loads.put(rs.getLong("scheduleId"), rs.getBigDecimal("completedLoad")); });
+        for (Map<String, Object> item : items) {
+            if (!Boolean.TRUE.equals(item.get("progressTrackingEnabled"))) continue;
+            BigDecimal load = loads.get(longValue(item.get("id")));
+            item.put("progressCompletedLoad", load == null ? BigDecimal.ZERO : load);
+        }
+    }
+
     private static BigDecimal completedLoad(Map<String, Object> item) {
+        // P06：进度任务的完成负荷只取每日记录的累计值，不回退到计划疲劳权重。
+        if (Boolean.TRUE.equals(item.get("progressTrackingEnabled"))) {
+            return loadDecimal(item.get("progressCompletedLoad"), BigDecimal.ZERO);
+        }
         Object snapshot = item.get("completedFatigueWeight");
         if (snapshot != null) return loadDecimal(snapshot, BigDecimal.ZERO);
         return loadDecimal(item.get("fatigueWeight"),
@@ -1400,20 +1872,34 @@ public class ScheduleService {
     private void recalculateScheduleDates(long userId, Map<String, Object> before, Map<String, Object> after) {
         ZoneId zone = userZone(userId);
         List<LocalDate> dates = new ArrayList<>();
+        boolean progressLoadRemoved = false;
         if (before != null) {
             LocalDate planned = plannedDate(before, zone);
             if (planned != null) dates.add(planned);
             LocalDate completed = completedDate(before, zone);
             if (completed != null) dates.add(completed);
+            List<LocalDate> progressDates = progressDates(userId, before);
+            dates.addAll(progressDates);
+            // 任务被删除时每日进度负荷随之退出汇总，需要重算并让相关日终调查样本失效。
+            progressLoadRemoved = after == null && !progressDates.isEmpty();
         }
         if (after != null) {
             LocalDate planned = plannedDate(after, zone);
             if (planned != null) dates.add(planned);
             LocalDate completed = completedDate(after, zone);
             if (completed != null) dates.add(completed);
+            dates.addAll(progressDates(userId, after));
         }
         if (dates.isEmpty()) fatigueService.touchDataRevision(userId);
-        else fatigueService.recalculateDates(userId, dates, actualLoadChanged(before, after));
+        else fatigueService.recalculateDates(userId, dates, actualLoadChanged(before, after) || progressLoadRemoved);
+    }
+
+    private List<LocalDate> progressDates(long userId, Map<String, Object> item) {
+        if (item == null || !Boolean.TRUE.equals(item.get("progressTrackingEnabled"))) return List.of();
+        Object id = item.get("id");
+        if (id == null) return List.of();
+        return jdbc.query("select progress_date from schedule_progress_daily where schedule_id=? and user_id=?",
+                (rs, i) -> rs.getDate(1).toLocalDate(), longValue(id), userId);
     }
 
     private void applyCurrentFatigueWeights(long userId, List<Map<String, Object>> rows) {

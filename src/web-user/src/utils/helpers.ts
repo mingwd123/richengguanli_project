@@ -113,10 +113,49 @@ export function toSchedulePayload(input: ScheduleForm, timezone = displayTimezon
   if (input.remindAt) out.remindAt = toIso(input.remindAt, timezone)
   out.rrule = input.rrule || ''
   out.excludedDates = Array.isArray(input.excludedDates) ? input.excludedDates : []
+  // 每日进度只适用于任务类型且与重复规则互斥；点事件/单日事项沿用一次性完成流程。
+  // 只有调用方显式携带该字段时才输出，避免不认识它的调用方（如桌面端）把编辑误发成「关闭每日进度」。
+  if (Object.prototype.hasOwnProperty.call(input, 'progressTrackingEnabled')) {
+    out.progressTrackingEnabled = Boolean(input.progressTrackingEnabled)
+      && (input.timeType === 'deadline_task' || input.timeType === 'duration_task')
+      && !input.rrule
+  }
   return out
 }
 
 export function toIso(value: string, timezone = displayTimezone) { return zonedDateTimeToIso(value, timezone) }
+
+/** 每日进度百分比展示：整数直接显示，带小数保留一位。 */
+export function formatProgressPercent(value: number | null | undefined) {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n)) return '0%'
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}%`
+}
+
+/** 每日进度开关的显示条件：仅任务类型且未设置重复规则（网页端与桌面端共用同一判断）。 */
+export function canTrackDailyProgress(input: { timeType?: string; rrule?: string | null }) {
+  const type = input.timeType
+  return (type === 'deadline_task' || type === 'duration_task') && !input.rrule
+}
+
+/** 每日进度是否已满：累计满 100% 时不再有「剩余进度」，动作语义变成把任务标记完成。 */
+export function isProgressComplete(percent: number | null | undefined) {
+  return Number(percent ?? 0) >= 100
+}
+
+/**
+ * 每日进度任务的主操作文案：未满 100% 时是提交剩余进度，
+ * 已满 100% 但任务仍是待办（取消后恢复、或修正回退再补回）时是标记完成。
+ */
+export function progressCompletionActionLabel(percent: number | null | undefined) {
+  return isProgressComplete(percent) ? '标记完成' : '完成剩余进度'
+}
+
+/** 进度提交弹窗标题：按「再加一段进度」「补齐剩余并完成」「标记已满 100% 的任务完成」区分。 */
+export function progressSubmitDialogTitle(percent: number | null | undefined, target: number) {
+  if (isProgressComplete(percent)) return '标记任务完成'
+  return Number(target) === 100 ? '提交剩余进度并完成' : '提交每日进度'
+}
 
 export function reminderTimeForOffset(baseTime: string, offsetMinutes: number, timezone = displayTimezone) {
   if (!baseTime || !Number.isInteger(offsetMinutes) || offsetMinutes <= 0) return ''

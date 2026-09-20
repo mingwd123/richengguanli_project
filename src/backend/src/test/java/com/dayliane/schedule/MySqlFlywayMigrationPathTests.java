@@ -33,14 +33,18 @@ class MySqlFlywayMigrationPathTests {
             assertThat(throughVersion22.info().current().getVersion().getVersion()).isEqualTo("22");
 
             Flyway throughLatest = flyway(databaseUrl, username, password, null);
-            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(4);
-            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("26");
+            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(6);
+            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("28");
 
             JdbcTemplate jdbc = new JdbcTemplate(new DriverManagerDataSource(databaseUrl, username, password));
             assertThat(columnCount(jdbc, database, "team_task_assignee", "completed_fatigue_weight")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "schedule", "rrule")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "user", "subscribe_token")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "user", "ai_record_enabled")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "schedule", "progress_tracking_enabled")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "schedule", "progress_percent")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "schedule", "progress_completed_date")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "schedule_progress_daily", "completed_load")).isEqualTo(1);
         } finally {
             executeAdmin(adminUrl, username, password, "drop database if exists `" + database + "`");
         }

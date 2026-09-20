@@ -5,6 +5,8 @@ import com.dayliane.notification.NotificationService;
 import com.dayliane.schedule.ScheduleService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -41,6 +43,7 @@ import java.util.Set;
 public class FatigueService {
     private static final int ALGORITHM_VERSION = 2;
     private static final BigDecimal DEFAULT_CAPACITY = BigDecimal.valueOf(18);
+    private static final Logger log = LoggerFactory.getLogger(FatigueService.class);
     private static final int DEFAULT_SURVEY_HOUR = 21;
     private static final int DEFAULT_SURVEY_MINUTE = 30;
     private static final int MAX_HISTORY_RANGE_DAYS = 366;
@@ -150,6 +153,7 @@ public class FatigueService {
         }
         dates.addAll(jdbc.query("select local_date from fatigue_daily_summary where user_id=?", (rs, index) -> rs.getDate(1).toLocalDate(), userId));
         dates.addAll(jdbc.query("select local_date from fatigue_survey where user_id=?", (rs, index) -> rs.getDate(1).toLocalDate(), userId));
+        dates.addAll(jdbc.query("select progress_date from schedule_progress_daily where user_id=?", (rs, index) -> rs.getDate(1).toLocalDate(), userId));
 
         int invalidated = 0;
         for (LocalDate date : timezoneUncertainDates) {
@@ -187,6 +191,11 @@ public class FatigueService {
     public boolean trackingEnabledFor(long userId) {
         ensureProfile(userId);
         return trackingEnabled(profileRow(userId));
+    }
+
+    /** 补录下限沿用现有疲劳数据保留期，不新增另一套保留期限。 */
+    public int retentionDays() {
+        return Math.max(30, retentionDays);
     }
 
     @Transactional
@@ -294,27 +303,58 @@ public class FatigueService {
 
         Map<LocalDate, BigDecimal> plannedByDate = new LinkedHashMap<>();
         Map<LocalDate, BigDecimal> completedByDate = new LinkedHashMap<>();
-        int personalScheduleCount = 0;
-        int personalCompletedCount = 0;
+        // P10：先构造统一的周期任务集合，分子分母都从同一集合派生，跨周期完成不会让完成率超过 100%。
+        Map<Long, LocalDate> plannedDateByTask = new LinkedHashMap<>();
+        Map<Long, LocalDate> completedDateByTask = new LinkedHashMap<>();
+        Set<Long> cancelledTaskIds = new LinkedHashSet<>();
         for (Map<String, Object> schedule : schedulesForUser(userId)) {
+            long taskId = number(schedule.get("id"), 0L);
             String status = String.valueOf(schedule.getOrDefault("status", "pending"));
             LocalDate plannedDate = schedulePlannedDate(schedule, zone);
+            LocalDate completedDate = "completed".equals(status) ? scheduleCompletionDate(schedule, zone) : null;
+            plannedDateByTask.put(taskId, plannedDate);
+            if (completedDate != null) completedDateByTask.put(taskId, completedDate);
+            if ("cancelled".equals(status)) cancelledTaskIds.add(taskId);
             if (plannedDate != null && !plannedDate.isBefore(from) && !plannedDate.isAfter(to) && !"cancelled".equals(status)) {
-                personalScheduleCount++;
                 int level = (int) number(schedule.get("fatigueLevel"), 3);
                 BigDecimal weight = currentWeights.getOrDefault(level, BigDecimal.valueOf(defaultWeight(level)));
                 plannedByDate.merge(plannedDate, weight, BigDecimal::add);
             }
-            if ("completed".equals(status)) {
-                LocalDate completedDate = localDate(schedule.get("completedAt"), zone);
-                if (completedDate != null && !completedDate.isBefore(from) && !completedDate.isAfter(to)) {
-                    personalCompletedCount++;
-                    int completedLevel = (int) number(schedule.get("completedFatigueLevel"), number(schedule.get("fatigueLevel"), 3));
-                    BigDecimal completedWeight = decimal(schedule.get("completedFatigueWeight"), BigDecimal.valueOf(defaultWeight(completedLevel)));
-                    completedByDate.merge(completedDate, completedWeight, BigDecimal::add);
-                }
+            if (completedDate != null && !completedDate.isBefore(from) && !completedDate.isAfter(to)
+                    && !Boolean.TRUE.equals(schedule.get("progressTrackingEnabled"))) {
+                // 每日进度任务的完成负荷按 progress_date 归集，完成日不再补写整项完成负荷。
+                int completedLevel = (int) number(schedule.get("completedFatigueLevel"), number(schedule.get("fatigueLevel"), 3));
+                BigDecimal completedWeight = decimal(schedule.get("completedFatigueWeight"), BigDecimal.valueOf(defaultWeight(completedLevel)));
+                completedByDate.merge(completedDate, completedWeight, BigDecimal::add);
             }
         }
+        Set<Long> eligibleTaskIds = new LinkedHashSet<>();
+        for (Map.Entry<Long, LocalDate> entry : plannedDateByTask.entrySet()) {
+            long taskId = entry.getKey();
+            LocalDate plannedDate = entry.getValue();
+            LocalDate completedDate = completedDateByTask.get(taskId);
+            // 排除没有任何完成记录且已取消的任务（取消会清空完成记录）。
+            if (cancelledTaskIds.contains(taskId) && completedDate == null) continue;
+            boolean plannedInPeriod = plannedDate != null && !cancelledTaskIds.contains(taskId)
+                    && !plannedDate.isBefore(from) && !plannedDate.isAfter(to);
+            // 跨周期结转：计划日在本期之前、本期才完成的任务也纳入同一集合，
+            // 使分子始终是分母的子集，完成率不会超过 100%；长期任务需累计 100% 才有完成日。
+            boolean completedInPeriod = completedDate != null && !completedDate.isBefore(from) && !completedDate.isAfter(to);
+            if (plannedInPeriod || completedInPeriod) eligibleTaskIds.add(taskId);
+        }
+        int personalScheduleCount = eligibleTaskIds.size();
+        int personalCompletedCount = 0;
+        for (Long taskId : eligibleTaskIds) {
+            LocalDate completedDate = completedDateByTask.get(taskId);
+            if (completedDate != null && !completedDate.isBefore(from) && !completedDate.isAfter(to)) personalCompletedCount++;
+        }
+        if (personalCompletedCount > personalScheduleCount) {
+            // 结构上不应发生；一旦出现说明任务集合构造有误，记录异常并阻止异常比例进入接口。
+            log.error("personal completion rate exceeded 100%: user={} from={} to={} eligible={} completed={}",
+                    userId, from, to, personalScheduleCount, personalCompletedCount);
+        }
+        Map<LocalDate, BigDecimal> progressByDate = progressLoadByDate(userId, from, to);
+        progressByDate.forEach((day, load) -> completedByDate.merge(day, load, BigDecimal::add));
         Map<LocalDate, BigDecimal> teamByDate = trackingOn ? teamCompletedLoadByDate(userId, from, to, zone) : Map.of();
 
         Map<LocalDate, Integer> surveyScoreByDate = new HashMap<>();
@@ -333,6 +373,7 @@ public class FatigueService {
         List<Map<String, Object>> trend = new ArrayList<>();
         BigDecimal sumPlanned = BigDecimal.ZERO;
         BigDecimal sumCompleted = BigDecimal.ZERO;
+        BigDecimal sumProgressLoad = BigDecimal.ZERO;
         BigDecimal sumTeam = BigDecimal.ZERO;
         BigDecimal peakLoad = BigDecimal.ZERO;
         LocalDate peakDay = null;
@@ -352,6 +393,7 @@ public class FatigueService {
             row.put("localDate", day.toString());
             row.put("plannedLoad", scale(planned));
             row.put("completedLoad", scale(completed));
+            row.put("progressCompletedLoad", scale(progressByDate.getOrDefault(day, BigDecimal.ZERO)));
             row.put("teamCompletedLoad", scale(team));
             row.put("totalCompletedLoad", scale(completed.add(team)));
             row.put("predictedScore", predicted);
@@ -360,6 +402,7 @@ public class FatigueService {
 
             sumPlanned = sumPlanned.add(planned);
             sumCompleted = sumCompleted.add(completed);
+            sumProgressLoad = sumProgressLoad.add(progressByDate.getOrDefault(day, BigDecimal.ZERO));
             sumTeam = sumTeam.add(team);
             if (planned.compareTo(peakLoad) > 0) {
                 peakLoad = planned;
@@ -386,13 +429,16 @@ public class FatigueService {
         summary.put("peakDayTotalCompletedLoad", peak == null ? null : scale(completedByDate.getOrDefault(peak, BigDecimal.ZERO).add(teamByDate.getOrDefault(peak, BigDecimal.ZERO))));
         summary.put("personalPlannedLoad", scale(sumPlanned));
         summary.put("personalCompletedLoad", scale(sumCompleted));
+        summary.put("personalProgressCompletedLoad", scale(sumProgressLoad));
         summary.put("teamCompletedLoad", scale(sumTeam));
         summary.put("totalCompletedLoad", scale(sumCompleted.add(sumTeam)));
         summary.put("personalScheduleCount", personalScheduleCount);
         summary.put("personalCompletedCount", personalCompletedCount);
-        summary.put("personalCompletionRate", personalScheduleCount == 0 ? null
+        // P10：分子必须来自分母同一集合；出现分子大于分母时返回 null 而不是截断成 100%。
+        summary.put("personalCompletionRate", personalScheduleCount == 0 || personalCompletedCount > personalScheduleCount
+                ? null
                 : BigDecimal.valueOf(personalCompletedCount).divide(BigDecimal.valueOf(personalScheduleCount), 4, RoundingMode.HALF_UP).stripTrailingZeros());
-        summary.put("personalCompletionRateNote", "完成率按完成日归属所在周期：本期实际完成数 / 本期计划数，跨周期完成不计入计划日周期。");
+        summary.put("personalCompletionRateNote", "完成率在同一批任务集合内统计：集合包含本期计划任务、期初未完成并延续到本期的任务，以及本期完成的任务（含跨周期结转）；同一任务只计一次，长期任务累计进度达到 100% 才计入完成。");
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("period", normalized);
@@ -486,11 +532,13 @@ public class FatigueService {
             LocalDate yesterday = today.minusDays(1);
             Map<String, Object> yesterdaySurvey = surveyRow(userId, yesterday);
             Map<String, Object> yesterdayDaily = null;
-            if (todaySurvey != null || number(todayDaily.get("completedCount"), 0) > 0) {
+            // P05：调查资格按「个人完成负荷 > 0」判定。每日进度只推进一部分时 completedCount 仍为 0，
+            // 但负荷已经产生，必须同样能进入日终调查。
+            if (todaySurvey != null || hasPersonalCompletedLoad(todayDaily)) {
                 selected = today;
             } else {
                 yesterdayDaily = daily(userId, yesterday);
-                selected = yesterdaySurvey != null || number(yesterdayDaily.get("completedCount"), 0) > 0 ? yesterday : today;
+                selected = yesterdaySurvey != null || hasPersonalCompletedLoad(yesterdayDaily) ? yesterday : today;
             }
         }
 
@@ -502,7 +550,7 @@ public class FatigueService {
         for (LocalDate candidate : List.of(today, today.minusDays(1))) {
             Map<String, Object> candidateSurvey = surveyRow(userId, candidate);
             Map<String, Object> candidateDaily = candidate.equals(selected) ? daily : daily(userId, candidate);
-            if (candidateSurvey != null || number(candidateDaily.get("completedCount"), 0) > 0) {
+            if (candidateSurvey != null || hasPersonalCompletedLoad(candidateDaily)) {
                 availableDates.add(candidate.toString());
             }
         }
@@ -742,7 +790,7 @@ public class FatigueService {
             LocalTime surveyTime = parseSurveyTime(profile.get("surveyTime"));
             if (localNow.isBefore(surveyTime) || isQuietTime(userId, localNow)) continue;
             Map<String, Object> daily = daily(userId, date);
-            if (number(daily.get("completedCount"), 0) <= 0 || surveyRow(userId, date) != null) continue;
+            if (!hasPersonalCompletedLoad(daily) || surveyRow(userId, date) != null) continue;
             if (notificationService.hasNotificationForDate(userId, "fatigue_survey", date)) continue;
             if (!claimSurveyPrompt(userId, date)) continue;
             boolean sent = notificationService.createNotification(userId, "fatigue_survey", "填写今日疲劳调查",
@@ -877,19 +925,38 @@ public class FatigueService {
                 contributor.put("weight", scale(weight));
                 contributors.add(contributor);
             }
-            if ("completed".equals(status) && date.equals(localDate(schedule.get("completedAt"), zone))) {
+            if ("completed".equals(status) && date.equals(scheduleCompletionDate(schedule, zone))) {
                 completedCount++;
-                int completedLevel = (int) number(schedule.get("completedFatigueLevel"), number(schedule.get("fatigueLevel"), 3));
-                BigDecimal completedWeight = decimal(schedule.get("completedFatigueWeight"), BigDecimal.valueOf(defaultWeight(completedLevel)));
-                completed = completed.add(completedWeight);
-                if (completedLevel >= 1 && completedLevel <= 5) completedCounts[completedLevel - 1]++;
-                Map<String, Object> contributor = new LinkedHashMap<>();
-                contributor.put("scheduleId", number(schedule.get("id"), 0L));
-                contributor.put("title", schedule.get("title"));
-                contributor.put("fatigueLevel", completedLevel);
-                contributor.put("weight", scale(completedWeight));
-                completedContributors.add(contributor);
+                // 每日进度任务在达到 100% 时按进度日分别结算负荷，完成日不再补写整项完成负荷，
+                // 避免与 schedule_progress_daily 的当日负荷重复累计。
+                if (!Boolean.TRUE.equals(schedule.get("progressTrackingEnabled"))) {
+                    int completedLevel = (int) number(schedule.get("completedFatigueLevel"), number(schedule.get("fatigueLevel"), 3));
+                    BigDecimal completedWeight = decimal(schedule.get("completedFatigueWeight"), BigDecimal.valueOf(defaultWeight(completedLevel)));
+                    completed = completed.add(completedWeight);
+                    if (completedLevel >= 1 && completedLevel <= 5) completedCounts[completedLevel - 1]++;
+                    Map<String, Object> contributor = new LinkedHashMap<>();
+                    contributor.put("scheduleId", number(schedule.get("id"), 0L));
+                    contributor.put("title", schedule.get("title"));
+                    contributor.put("fatigueLevel", completedLevel);
+                    contributor.put("weight", scale(completedWeight));
+                    contributor.put("source", "completed");
+                    completedContributors.add(contributor);
+                }
             }
+        }
+        for (Map<String, Object> item : progressContributors(userId, date)) {
+            BigDecimal progressLoad = decimal(item.get("completedLoad"));
+            if (progressLoad.signum() <= 0) continue;
+            completed = completed.add(progressLoad);
+            int progressLevel = (int) number(item.get("fatigueLevel"), 0);
+            if (progressLevel >= 1 && progressLevel <= 5) completedCounts[progressLevel - 1]++;
+            Map<String, Object> contributor = new LinkedHashMap<>();
+            contributor.put("scheduleId", item.get("scheduleId"));
+            contributor.put("title", item.get("title"));
+            contributor.put("fatigueLevel", progressLevel);
+            contributor.put("weight", scale(progressLoad));
+            contributor.put("source", "daily_progress");
+            completedContributors.add(contributor);
         }
         contributors.sort(Comparator.comparing((Map<String, Object> item) -> decimal(item.get("weight"))).reversed()
                 .thenComparing(item -> String.valueOf(item.get("title"))));
@@ -1024,10 +1091,15 @@ public class FatigueService {
                 && trackingEnabled(profile)
                 && fatigueSurveysFeatureEnabled
                 && boolValue(profile.get("surveyEnabled"), true)
-                && number(daily.get("completedCount"), 0) > 0
+                && hasPersonalCompletedLoad(daily)
                 && !surveySkipped(profile, date)
                 && !surveySnoozed(profile, Instant.now())
                 && !date.isAfter(LocalDate.now(zone));
+    }
+
+    /** P05：日终调查资格统一按个人完成负荷判定；团队完成负荷不参与，追踪关闭时负荷为 0 自然不触发。 */
+    private static boolean hasPersonalCompletedLoad(Map<String, Object> daily) {
+        return daily != null && decimal(daily.get("completedLoad")).signum() > 0;
     }
 
     private boolean surveySkipped(Map<String, Object> profile, LocalDate date) {
@@ -1143,12 +1215,12 @@ public class FatigueService {
     }
 
     private List<Map<String, Object>> schedulesForUser(long userId) {
-        return jdbc.query("select id,title,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight from schedule where user_id=? and deleted_at is null",
+        return jdbc.query("select id,title,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,progress_tracking_enabled progressTrackingEnabled,progress_completed_date progressCompletedDate from schedule where user_id=? and deleted_at is null",
                 (rs, i) -> scheduleRow(rs), userId);
     }
 
     private Map<String, Object> scheduleForUser(long scheduleId, long userId) {
-        List<Map<String, Object>> rows = jdbc.query("select id,title,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight from schedule where id=? and user_id=? and deleted_at is null",
+        List<Map<String, Object>> rows = jdbc.query("select id,title,time_type timeType,start_time startTime,end_time endTime,deadline_time deadlineTime,status,urgency_level urgencyLevel,fatigue_level fatigueLevel,completed_at completedAt,completed_fatigue_level completedFatigueLevel,completed_fatigue_weight completedFatigueWeight,progress_tracking_enabled progressTrackingEnabled,progress_completed_date progressCompletedDate from schedule where id=? and user_id=? and deleted_at is null",
                 (rs, i) -> scheduleRow(rs), scheduleId, userId);
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -1167,7 +1239,59 @@ public class FatigueService {
         item.put("completedAt", rs.getTimestamp("completedAt"));
         item.put("completedFatigueLevel", rs.getObject("completedFatigueLevel"));
         item.put("completedFatigueWeight", rs.getBigDecimal("completedFatigueWeight"));
+        item.put("progressTrackingEnabled", rs.getBoolean("progressTrackingEnabled"));
+        java.sql.Date progressCompleted = rs.getDate("progressCompletedDate");
+        item.put("progressCompletedDate", progressCompleted == null ? null : progressCompleted.toLocalDate());
         return item;
+    }
+
+    /**
+     * 任务完成日期（P02）：进度任务以「首次达到 100% 的进度日期」为准，
+     * 普通任务继续使用 completed_at 按用户时区转换的日期。
+     */
+    private static LocalDate scheduleCompletionDate(Map<String, Object> schedule, ZoneId zone) {
+        if (Boolean.TRUE.equals(schedule.get("progressTrackingEnabled"))) {
+            Object progressCompleted = schedule.get("progressCompletedDate");
+            if (progressCompleted instanceof LocalDate date) return date;
+            if (progressCompleted != null) {
+                try {
+                    return LocalDate.parse(String.valueOf(progressCompleted));
+                } catch (DateTimeException ignored) {
+                    // 回落到 completed_at
+                }
+            }
+        }
+        return localDate(schedule.get("completedAt"), zone);
+    }
+
+    /** 每日进度负荷按用户时区提交日期归集，仅统计未删除任务的记录。 */
+    private Map<LocalDate, BigDecimal> progressLoadByDate(long userId, LocalDate from, LocalDate to) {
+        Map<LocalDate, BigDecimal> result = new LinkedHashMap<>();
+        jdbc.query("select p.progress_date progressDate, coalesce(sum(p.completed_load), 0) completedLoad " +
+                        "from schedule_progress_daily p join schedule s on s.id = p.schedule_id " +
+                        "where p.user_id=? and s.deleted_at is null and p.progress_date between ? and ? group by p.progress_date",
+                rs -> {
+                    BigDecimal load = rs.getBigDecimal("completedLoad");
+                    if (load != null && load.signum() != 0) result.put(rs.getDate("progressDate").toLocalDate(), load);
+                },
+                userId, from, to);
+        return result;
+    }
+
+    /** 当日每日进度完成负荷明细，用于个人日汇总的完成贡献者展示。 */
+    private List<Map<String, Object>> progressContributors(long userId, LocalDate date) {
+        return jdbc.query("select p.schedule_id scheduleId, p.completed_load completedLoad, p.fatigue_level fatigueLevel, s.title title " +
+                        "from schedule_progress_daily p join schedule s on s.id = p.schedule_id " +
+                        "where p.user_id=? and p.progress_date=? and s.deleted_at is null and p.completed_load > 0 " +
+                        "order by p.completed_load desc",
+                (rs, i) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("scheduleId", rs.getLong("scheduleId"));
+                    row.put("title", rs.getString("title"));
+                    row.put("completedLoad", rs.getBigDecimal("completedLoad"));
+                    row.put("fatigueLevel", rs.getObject("fatigueLevel"));
+                    return row;
+                }, userId, date);
     }
 
     private Map<String, Object> surveyRow(long userId, LocalDate date) {

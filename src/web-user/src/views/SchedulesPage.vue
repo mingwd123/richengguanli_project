@@ -10,7 +10,7 @@ import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
 import RepeatRuleEditor from '../components/RepeatRuleEditor.vue'
 import { AlertTriangle, BatteryMedium, Clock3, Layers3, MoreHorizontal } from 'lucide-vue-next'
-import { formatTime, getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso } from '../utils/helpers'
+import { formatTime, getDisplayTimezone, primaryTime, timeTypeLabel, statusLabel, isOverdue, toDatetimeLocalInTimezone, toSchedulePayload, zonedDateTimeToIso, formatProgressPercent, canTrackDailyProgress } from '../utils/helpers'
 import type { FatiguePreview, Schedule, ScheduleForm, ScheduleViewMode } from '../types'
 
 const router = useRouter()
@@ -22,6 +22,12 @@ const aiParseError = ref('')
 const showDraftConfirm = ref(false)
 const aiDraft = ref<{ title: string; groupId: string; timeType: string; startTime: string; endTime: string; deadlineTime: string; remindAt: string; description: string; urgencyLevel: number; fatigueLevel: number }>({ title: '', groupId: '', timeType: 'point_event', startTime: '', endTime: '', deadlineTime: '', remindAt: '', description: '', urgencyLevel: 3, fatigueLevel: 3 })
 const contextMenu = ref<{ x: number; y: number; type: 'group' | 'schedule'; group?: any; schedule?: Schedule } | null>(null)
+// 每日进度只适用于任务类型且与重复规则互斥；不满足时开关置灰并说明原因。
+const canTrackProgress = computed(() => canTrackDailyProgress(store.scheduleForm))
+
+watch(canTrackProgress, (value) => {
+  if (!value) store.scheduleForm.progressTrackingEnabled = false
+})
 const filterKeyword = ref(store.schedulePage.keyword || '')
 const filterStatus = ref(store.schedulePage.status || 'pending')
 const filterDateFrom = ref(store.schedulePage.dateFrom || '')
@@ -347,6 +353,15 @@ function toggleGroup(name: string) {
 }
 function goDetail(id: number) { router.push(`/schedules/${id}`) }
 function handleAction(item: Schedule, action: string) { store.setScheduleStatus(item, action) }
+/** P04：每日进度任务不能走普通完成接口，统一跳到详情页走进度提交流程。 */
+function handleComplete(item: Schedule) {
+  if (item.progressTrackingEnabled) {
+    store.notify('该任务启用了每日进度，请到详情页提交进度')
+    goDetail(item.id)
+    return
+  }
+  handleAction(item, 'complete')
+}
 function handleDelete(id: number) { store.deleteSchedule(id) }
 function moveGroup(groupId: number, direction: -1 | 1) {
   const ids = store.taskGroups.map(group => group.id)
@@ -419,7 +434,7 @@ function selectContextAction(action: string) {
     if (action === 'toggle') toggleGroup(menu.group.name)
   } else if (menu.schedule) {
     if (action === 'detail') goDetail(menu.schedule.id)
-    if (action === 'complete') handleAction(menu.schedule, 'complete')
+    if (action === 'complete') handleComplete(menu.schedule)
     if (action === 'uncomplete') handleAction(menu.schedule, 'uncomplete')
     if (action === 'cancel') handleAction(menu.schedule, 'cancel')
     if (action === 'restore') handleAction(menu.schedule, 'restore')
@@ -512,7 +527,7 @@ const contextItems = computed(() => {
   const schedule = menu.schedule!
   return [
     { label: '查看详情', action: 'detail' },
-    { label: '完成', action: 'complete', disabled: schedule.status !== 'pending' },
+    { label: schedule.progressTrackingEnabled ? '提交进度' : '完成', action: 'complete', disabled: schedule.status !== 'pending' },
     { label: '恢复', action: 'uncomplete', disabled: schedule.status !== 'completed' },
     { label: '取消', action: 'cancel', disabled: schedule.status !== 'pending' },
     { label: '恢复已取消', action: 'restore', disabled: schedule.status !== 'cancelled' },
@@ -604,6 +619,9 @@ const contextItems = computed(() => {
                 <span class="level-chip fatigue"><BatteryMedium :size="12" />疲劳 {{ s.fatigueLevel }} · {{ levelLabel(s.fatigueLevel, fatigueNames) }} · {{ s.fatigueWeight }} 点</span>
               </div>
               <small v-if="s.status === 'completed' && s.completedFatigueLevel" class="muted">完成快照：疲劳 {{ s.completedFatigueLevel }} · {{ s.completedFatigueWeight }} 点</small>
+              <small v-else-if="s.progressTrackingEnabled" class="muted">
+                每日进度 {{ formatProgressPercent(s.progressPercent) }}<template v-if="s.status === 'completed'"> · 达 100% 完成（负荷按进度日归集）</template>
+              </small>
             </div>
             <span :class="['tag', s.status === 'completed' ? 'blue' : s.status === 'cancelled' ? 'danger' : 'warning']">{{ statusLabel(s.status) }}</span>
             <CountdownPill
@@ -624,7 +642,7 @@ const contextItems = computed(() => {
               </select>
               <button v-if="canReorder && group.id !== 0" :disabled="index === 0" @click="moveScheduleOrder(group.id, group.items, s.id, -1)">上移</button>
               <button v-if="canReorder && group.id !== 0" :disabled="index === group.items.length - 1" @click="moveScheduleOrder(group.id, group.items, s.id, 1)">下移</button>
-              <button v-if="s.status === 'pending'" @click="handleAction(s, 'complete')">完成</button>
+              <button v-if="s.status === 'pending'" @click="handleComplete(s)">{{ s.progressTrackingEnabled ? '提交进度' : '完成' }}</button>
               <button v-if="s.status === 'completed'" @click="handleAction(s, 'uncomplete')">恢复</button>
               <button v-if="s.status === 'pending'" @click="handleAction(s, 'cancel')">取消</button><button v-if="s.status === 'cancelled'" @click="handleAction(s, 'restore')">恢复</button><button @click="handleDelete(s.id)">删除</button>
             </div>
@@ -663,6 +681,15 @@ const contextItems = computed(() => {
           <FatiguePreviewInline v-if="createFatiguePreview" :preview="createFatiguePreview" />
           <ReminderShortcutPicker v-model="store.scheduleForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel()" :presets="reminderPresets" :timezone="userTimezone" :disabled="store.loading" @error="store.notify" />
           <RepeatRuleEditor v-model:rrule="store.scheduleForm.rrule" v-model:excluded-dates="store.scheduleForm.excludedDates" />
+          <fieldset class="progress-block" data-testid="create-daily-progress">
+            <legend>每日进度</legend>
+            <label class="progress-toggle">
+              <input v-model="store.scheduleForm.progressTrackingEnabled" type="checkbox" :disabled="!canTrackProgress" />
+              启用每日进度（长期任务按天提交完成比例与疲劳）
+            </label>
+            <small v-if="!canTrackProgress" class="muted">「安排事项」和重复任务不支持每日进度；类型改为「待办任务」或「时间段任务」后可开启。</small>
+            <small v-else class="muted">开启后每天在任务详情提交累计完成比例，负荷按天计入个人完成负荷。</small>
+          </fieldset>
           <div class="form-actions"><button type="button" @click="store.closeScheduleModal()">取消</button><button class="primary" :disabled="store.loading">保存</button></div>
         </form>
       </section>

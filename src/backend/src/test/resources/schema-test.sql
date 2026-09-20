@@ -22,6 +22,7 @@ DROP TABLE IF EXISTS team_task_reminder_plan;
 DROP TABLE IF EXISTS team_task_event;
 DROP TABLE IF EXISTS team_task_assignee;
 DROP TABLE IF EXISTS team_task;
+DROP TABLE IF EXISTS schedule_progress_daily;
 DROP TABLE IF EXISTS schedule;
 DROP TABLE IF EXISTS schedule_series_exdate;
 DROP TABLE IF EXISTS task_group;
@@ -152,6 +153,9 @@ CREATE TABLE schedule (
   rrule VARCHAR(500),
   series_id VARCHAR(36),
   occurrence_date DATE,
+  progress_tracking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  progress_percent DECIMAL(6,3) NOT NULL DEFAULT 0,
+  progress_completed_date DATE,
   deleted_at DATETIME,
   deleted_by BIGINT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -159,7 +163,8 @@ CREATE TABLE schedule (
   CONSTRAINT chk_schedule_urgency_level CHECK (urgency_level BETWEEN 1 AND 5),
   CONSTRAINT chk_schedule_fatigue_level CHECK (fatigue_level BETWEEN 1 AND 5),
   CONSTRAINT chk_schedule_completed_fatigue_level CHECK (completed_fatigue_level IS NULL OR completed_fatigue_level BETWEEN 1 AND 5),
-  CONSTRAINT chk_schedule_completed_fatigue_weight CHECK (completed_fatigue_weight IS NULL OR completed_fatigue_weight > 0)
+  CONSTRAINT chk_schedule_completed_fatigue_weight CHECK (completed_fatigue_weight IS NULL OR completed_fatigue_weight > 0),
+  CONSTRAINT chk_schedule_progress_percent CHECK (progress_percent >= 0 AND progress_percent <= 100)
 );
 
 CREATE INDEX idx_schedule_series_id ON schedule(series_id, occurrence_date);
@@ -172,6 +177,27 @@ CREATE TABLE schedule_series_exdate (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uk_series_exdate UNIQUE (series_id, excluded_date)
 );
+
+CREATE TABLE schedule_progress_daily (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  schedule_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  progress_date DATE NOT NULL,
+  progress_delta DECIMAL(6,3) NOT NULL DEFAULT 0,
+  cumulative_progress DECIMAL(6,3) NOT NULL DEFAULT 0,
+  fatigue_level TINYINT,
+  fatigue_weight_snapshot DECIMAL(8,3),
+  completed_load DECIMAL(10,3) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uk_schedule_progress_daily UNIQUE (schedule_id, user_id, progress_date),
+  CONSTRAINT chk_schedule_progress_daily_delta CHECK (progress_delta >= 0),
+  CONSTRAINT chk_schedule_progress_daily_cumulative CHECK (cumulative_progress >= 0 AND cumulative_progress <= 100),
+  CONSTRAINT chk_schedule_progress_daily_level CHECK (fatigue_level IS NULL OR fatigue_level BETWEEN 1 AND 5),
+  CONSTRAINT chk_schedule_progress_daily_weight CHECK (fatigue_weight_snapshot IS NULL OR fatigue_weight_snapshot > 0)
+);
+
+CREATE INDEX idx_schedule_progress_daily_user_date ON schedule_progress_daily(user_id, progress_date);
 
 CREATE TABLE reminder (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,

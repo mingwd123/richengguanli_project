@@ -49,8 +49,39 @@ export interface Schedule {
   seriesId?: string | null
   occurrenceDate?: string | null
   excludedDates?: string[]
+  progressTrackingEnabled?: boolean
+  progressPercent?: number
+  progressCompletedDate?: string | null
+  progressCompletedLoad?: number
   createdAt: string
   updatedAt: string
+}
+
+/* ========== 个人长期任务每日进度 ========== */
+export interface ScheduleProgressItem {
+  progressDate: string
+  progressDelta: number
+  cumulativeProgress: number
+  fatigueLevel: number | null
+  fatigueWeightSnapshot: number | null
+  completedLoad: number
+}
+
+export interface ScheduleProgress {
+  scheduleId: number
+  progressTrackingEnabled: boolean
+  progressPercent: number
+  status: ScheduleStatus
+  completedAt: string
+  completedDate?: string | null
+  fatigueTrackingEnabled: boolean
+  canSubmitProgress?: boolean
+  canBackfill?: boolean
+  backfillMinDate?: string
+  backfillMaxDate?: string
+  retentionDays?: number
+  totalCompletedLoad: number
+  items: ScheduleProgressItem[]
 }
 
 /* ========== 任务分组（模块） ========== */
@@ -375,6 +406,7 @@ export interface ScheduleForm {
   fatigueLevel: ScheduleLevel
   rrule?: string
   excludedDates?: string[]
+  progressTrackingEnabled?: boolean
 }
 
 export interface GroupForm {
@@ -555,6 +587,7 @@ export interface FatigueReportTrendItem {
   localDate: string
   plannedLoad: number
   completedLoad: number
+  progressCompletedLoad?: number
   teamCompletedLoad: number
   totalCompletedLoad: number
   predictedScore: number
@@ -568,6 +601,7 @@ export interface FatigueReportSummary {
   peakDayLoad: number
   personalPlannedLoad: number
   personalCompletedLoad: number
+  personalProgressCompletedLoad?: number
   teamCompletedLoad: number
   totalCompletedLoad: number
   personalScheduleCount: number

@@ -6,7 +6,8 @@ import FatiguePreviewInline from '../components/FatiguePreviewInline.vue'
 import ScheduleLevelControl from '../components/ScheduleLevelControl.vue'
 import ReminderShortcutPicker from '../components/ReminderShortcutPicker.vue'
 import RepeatRuleEditor from '../components/RepeatRuleEditor.vue'
-import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, toSchedulePayload, urgency, describeRrule } from '../utils/helpers'
+import ScheduleProgressPanel from '../components/ScheduleProgressPanel.vue'
+import { formatTime, getDisplayTimezone, timeTypeLabel, statusLabel, countdown, toDatetimeLocalInTimezone, toSchedulePayload, urgency, describeRrule, formatProgressPercent } from '../utils/helpers'
 import type { FatiguePreview, Schedule, TimeType } from '../types'
 
 const props = defineProps<{ id: string }>()
@@ -18,7 +19,7 @@ const schedule = ref<Schedule | null>(null)
 const loading = ref(false)
 const editing = ref(false)
 const editScope = ref<'occurrence' | 'series'>('occurrence')
-const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] as string[] })
+const editForm = reactive({ title: '', description: '', groupId: '', groupName: '', timeType: 'point_event' as TimeType, startTime: '', endTime: '', deadlineTime: '', remindAt: '', urgencyLevel: 3, fatigueLevel: 3, rrule: '', excludedDates: [] as string[], progressTrackingEnabled: false })
 const initialRemindAt = ref('')
 const editFatiguePreview = ref<FatiguePreview | null>(null)
 const openedFromHome = computed(() => route.query.from === 'home')
@@ -29,9 +30,27 @@ const reminderPresets = computed(() => store.notificationPreferences.reminderPre
 const reminderBaseTime = computed(() => editForm.timeType === 'deadline_task' ? editForm.deadlineTime : editForm.startTime)
 const reminderBaseLabel = computed(() => editForm.timeType === 'deadline_task' ? '截止时间' : '开始时间')
 const isRecurring = computed(() => Boolean(schedule.value?.seriesId || schedule.value?.rrule))
+// 每日进度与点事件、重复系列互斥；已有进度时必须先清零记录才能关闭（后端同样校验）。
+const editProgressToggleVisible = computed(() => editForm.progressTrackingEnabled
+  || ((editForm.timeType === 'deadline_task' || editForm.timeType === 'duration_task') && !editForm.rrule && !isRecurring.value))
+const editProgressBlockedByType = computed(() => editForm.progressTrackingEnabled && editForm.timeType === 'point_event')
 const repeatLabel = computed(() => describeRrule(schedule.value?.rrule))
 const urgencyNames = ['不紧急', '较低', '普通', '紧急', '非常紧急']
 const fatigueNames = ['几乎不累', '轻微消耗', '一般', '比较劳累', '非常劳累']
+
+/* ---------- 每日进度（阶段 1A）：面板由共用组件负责，这里只读共享状态做头部展示 ---------- */
+const progressPercent = computed(() => Number(store.scheduleProgress?.progressPercent ?? schedule.value?.progressPercent ?? 0))
+const progressPercentText = computed(() => `${formatProgressPercent(progressPercent.value)}`)
+const progressCompletedDate = computed(() => store.scheduleProgress?.completedDate || schedule.value?.progressCompletedDate || '')
+
+function progressLoadTotal() {
+  return store.scheduleProgress?.totalCompletedLoad ?? 0
+}
+
+/** 进度面板在提交/修正后触发，用于刷新日程详情。 */
+async function onProgressUpdated() {
+  await loadDetail()
+}
 
 function toDatetimeLocal(value: string) {
   return toDatetimeLocalInTimezone(value, userTimezone.value)
@@ -51,6 +70,8 @@ function fillEditForm(item: Schedule) {
   editForm.fatigueLevel = item.fatigueLevel || 3
   editForm.rrule = item.rrule || ''
   editForm.excludedDates = [...(item.excludedDates || [])]
+  // 必须回填，否则保存编辑时会把 progressTrackingEnabled 当成 false 发出去。
+  editForm.progressTrackingEnabled = Boolean(item.progressTrackingEnabled)
   initialRemindAt.value = editForm.remindAt
 }
 
@@ -59,6 +80,8 @@ async function loadDetail() {
   try {
     const data = await store.request<Schedule>(`/schedules/${props.id}`)
     schedule.value = data
+    // P11：进度数据由共用进度面板负责加载；非进度任务立即清空，避免残留上一个任务的状态。
+    if (!data.progressTrackingEnabled) store.resetScheduleProgress()
     const arrangeTo = typeof route.query.arrangeTo === 'string' ? route.query.arrangeTo : ''
     if (arrangeTo) {
       applyArrangedDate(arrangeTo)
@@ -239,9 +262,18 @@ onUnmounted(() => clearTimeout(previewTimer))
           <span class="tag blue">{{ repeatLabel || '重复' }}</span>
           <span v-if="schedule.occurrenceDate" class="muted" style="margin-left:8px">本次：{{ schedule.occurrenceDate }}</span>
         </div>
+        <div v-if="schedule.progressTrackingEnabled">
+          <span class="muted">每日进度：</span>
+          <span class="tag blue">{{ progressPercentText }}</span>
+          <span class="muted" style="margin-left:8px">累计完成负荷 {{ progressLoadTotal() }} 点</span>
+        </div>
         <div v-if="schedule.completedAt">
           <span class="muted">完成快照：</span>
-          <span>于 {{ formatTime(schedule.completedAt) }} 完成，实际疲劳 {{ schedule.completedFatigueLevel || '-' }} · {{ schedule.completedFatigueWeight || '-' }} 点</span>
+          <span v-if="schedule.progressTrackingEnabled">
+            于 {{ progressCompletedDate || schedule.completedAt.slice(0, 10) }} 达到 100% 进度完成任务，负荷按每日进度归集
+            <template v-if="schedule.completedAt">（操作时间 {{ formatTime(schedule.completedAt) }}）</template>
+          </span>
+          <span v-else>于 {{ formatTime(schedule.completedAt) }} 完成，实际疲劳 {{ schedule.completedFatigueLevel || '-' }} · {{ schedule.completedFatigueWeight || '-' }} 点</span>
         </div>
         <div>
           <span class="muted">提醒数：</span>
@@ -257,9 +289,18 @@ onUnmounted(() => clearTimeout(previewTimer))
         </div>
       </div>
 
+      <ScheduleProgressPanel
+        v-if="schedule.progressTrackingEnabled"
+        class="detail-progress-panel"
+        :schedule-id="schedule.id"
+        :status="schedule.status"
+        :default-fatigue-level="schedule.fatigueLevel || 3"
+        @updated="onProgressUpdated"
+      />
+
       <div class="form-actions" style="margin-top:24px">
         <button class="primary" @click="openEdit">编辑</button>
-        <button v-if="schedule.status === 'pending'" @click="handleAction('complete')">标记完成</button>
+        <button v-if="!schedule.progressTrackingEnabled && schedule.status === 'pending'" @click="handleAction('complete')">标记完成</button>
         <button v-if="schedule.status === 'completed'" @click="handleAction('uncomplete')">恢复</button>
         <button v-if="schedule.status === 'cancelled'" @click="handleAction('restore')">恢复</button>
         <button v-if="schedule.status === 'pending'" @click="handleAction('cancel')">取消日程</button>
@@ -297,6 +338,14 @@ onUnmounted(() => clearTimeout(previewTimer))
             <label>结束时间<input v-model="editForm.endTime" type="datetime-local" /></label>
           </template>
           <RepeatRuleEditor v-if="editScope === 'series'" v-model:rrule="editForm.rrule" v-model:excluded-dates="editForm.excludedDates" />
+          <template v-if="editProgressToggleVisible">
+            <label class="progress-toggle">
+              <input v-model="editForm.progressTrackingEnabled" type="checkbox" :disabled="editProgressBlockedByType" />
+              每日进度
+            </label>
+            <small v-if="editProgressBlockedByType" class="muted">「安排事项」不支持每日进度；请先取消勾选并保存，再修改类型。</small>
+            <small v-else class="muted">关闭每日进度前需要先把已有进度记录修正为 0。</small>
+          </template>
           <FatiguePreviewInline v-if="editFatiguePreview" :preview="editFatiguePreview" />
           <ReminderShortcutPicker v-model="editForm.remindAt" :base-time="reminderBaseTime" :base-label="reminderBaseLabel" :presets="reminderPresets" :timezone="userTimezone" @error="store.notify" />
           <small class="muted">保持原值不会替换提醒；清空后保存会取消未发送提醒。</small>
@@ -304,5 +353,14 @@ onUnmounted(() => clearTimeout(previewTimer))
         </form>
       </section>
     </div>
+
   </section>
 </template>
+
+<style scoped>
+/* 进度面板本体在 components/ScheduleProgressPanel.vue，这里只控制它在详情页中的位置。
+   子组件是 fragment 根节点，父组件的 scoped 属性不会落到它身上，必须用 :deep() 才能命中。 */
+:deep(.detail-progress-panel) {
+  margin-top: 24px;
+}
+</style>

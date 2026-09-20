@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { formatTime, countdown, timeTypeLabel, primaryTime, currentDateParts, occursOnDate } from '../utils/helpers'
+import { formatTime, countdown, timeTypeLabel, primaryTime, currentDateParts, occursOnDate, formatProgressPercent } from '../utils/helpers'
 
 const router = useRouter()
 const store = useAppStore()
@@ -93,6 +93,7 @@ function goDetail(item: any) {
               <span class="cal-source-name">{{ item.sourceType === 'team_task' ? (item.teamName || '团队任务') : (item.groupName || '个人日程') }}</span>
             </div>
             <strong class="cal-tl-title">{{ item.title }}</strong>
+            <span v-if="item.progressTrackingEnabled" class="cal-progress-chip">每日进度 {{ formatProgressPercent(item.progressPercent) }}</span>
             <span :class="['cal-tl-countdown', { 'cal-overdue': item.countdownText.startsWith('已逾期') }]">{{ item.countdownText }}</span>
           </div>
         </article>

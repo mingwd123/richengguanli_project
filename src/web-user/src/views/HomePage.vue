@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import CountdownPill from '../components/CountdownPill.vue'
-import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone } from '../utils/helpers'
+import { formatTime, countdown, isOverdue, groupByTaskState, getDisplayTimezone, formatProgressPercent } from '../utils/helpers'
 import { aiSuggestionActionState, buildAiReorderDraft, type AiReorderDraft } from '../utils/aiArrangeDraft'
 import type { Schedule, ScheduleViewMode, TimelineItem, AiArrangeResult, AiArrangeSuggestion } from '../types'
 import { buildTodayScheduleSections } from '../utils/scheduleViews'
@@ -242,8 +242,14 @@ function goTimelineItem(item: TimelineEntryView) {
   if (item.sourceType === 'team_task') goTask(item.id)
 }
 
-async function completeSchedule(schedule: Pick<Schedule, 'id'>) {
+async function completeSchedule(schedule: Pick<Schedule, 'id'> & { progressTrackingEnabled?: boolean }) {
   if (completingScheduleId.value !== null) return
+  // 每日进度任务必须按天提交到 100% 才能完成，快速完成改为跳转详情页走进度流程。
+  if (schedule.progressTrackingEnabled) {
+    store.notify('该任务启用了每日进度，请到详情页提交进度')
+    goSchedule(schedule.id)
+    return
+  }
   completingScheduleId.value = schedule.id
   try {
     if (await store.setScheduleStatus(schedule, 'complete')) store.notify('日程已完成')
@@ -617,9 +623,10 @@ function openSchedules() {
               <div>
                 <strong>{{ schedule.title }}</strong>
                 <small>{{ formatTime(schedule.deadlineTime || schedule.endTime || schedule.startTime) }}</small>
+                <small v-if="schedule.progressTrackingEnabled" class="muted">每日进度 {{ formatProgressPercent(schedule.progressPercent) }}</small>
               </div>
               <CountdownPill :time="schedule.deadlineTime || schedule.endTime || schedule.startTime" :time-type="schedule.timeType" :created-at="schedule.createdAt" :start-time="schedule.startTime" :end-time="schedule.endTime" :deadline-time="schedule.deadlineTime" :remind-at="schedule.remindAt" />
-              <button type="button" class="home-schedule-complete" :disabled="completingScheduleId !== null" title="完成日程" aria-label="完成日程" @click.stop="completeSchedule(schedule)">
+              <button type="button" class="home-schedule-complete" :disabled="completingScheduleId !== null" :title="schedule.progressTrackingEnabled ? '每日进度任务：点击进入详情提交进度' : '完成日程'" aria-label="完成日程" @click.stop="completeSchedule(schedule)">
                 <LoaderCircle v-if="completingScheduleId === schedule.id" class="spinning" :size="16" />
                 <Check v-else :size="16" />
               </button>
