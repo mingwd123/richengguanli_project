@@ -25,6 +25,14 @@ DROP TABLE IF EXISTS team_task;
 DROP TABLE IF EXISTS schedule_progress_daily;
 DROP TABLE IF EXISTS schedule;
 DROP TABLE IF EXISTS schedule_series_exdate;
+DROP TABLE IF EXISTS ticket_idempotency;
+DROP TABLE IF EXISTS ticket_event;
+DROP TABLE IF EXISTS ticket_reaction;
+DROP TABLE IF EXISTS ticket_follow;
+DROP TABLE IF EXISTS ticket_attachment;
+DROP TABLE IF EXISTS ticket_message;
+DROP TABLE IF EXISTS ticket;
+DROP TABLE IF EXISTS ticket_setting;
 DROP TABLE IF EXISTS task_group;
 DROP TABLE IF EXISTS team_member;
 DROP TABLE IF EXISTS team;
@@ -503,3 +511,141 @@ CREATE TABLE ai_key_pool_state (
 );
 
 INSERT INTO ai_key_pool_state (id, revision) VALUES (1, 0);
+
+-- ==================== 工单模块（V29） ====================
+
+CREATE TABLE ticket_setting (
+  id TINYINT NOT NULL PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  version BIGINT NOT NULL DEFAULT 0,
+  updated_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_ticket_setting_singleton CHECK (id = 1)
+);
+
+INSERT INTO ticket_setting (id, enabled) VALUES (1, FALSE);
+
+CREATE TABLE ticket (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ticket_no VARCHAR(20) NOT NULL UNIQUE,
+  author_id BIGINT NOT NULL,
+  title VARCHAR(120) NOT NULL,
+  category VARCHAR(30) NOT NULL,
+  module VARCHAR(30) NOT NULL,
+  description TEXT NOT NULL,
+  steps TEXT,
+  expected_result TEXT,
+  environment_json TEXT,
+  page_path VARCHAR(500),
+  status VARCHAR(30) NOT NULL DEFAULT 'open',
+  priority VARCHAR(20) NOT NULL DEFAULT 'normal',
+  assignee_admin_id BIGINT,
+  resolution TEXT,
+  fixed_version VARCHAR(50),
+  close_reason VARCHAR(30),
+  close_note TEXT,
+  duplicate_of_id BIGINT,
+  merged_at DATETIME,
+  pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  hidden_at DATETIME,
+  hidden_by BIGINT,
+  version BIGINT NOT NULL DEFAULT 0,
+  last_activity_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_ticket_status CHECK (status IN ('open','in_progress','waiting_reporter','resolved','closed')),
+  CONSTRAINT chk_ticket_priority CHECK (priority IN ('low','normal','high','urgent')),
+  CONSTRAINT chk_ticket_close_reason CHECK (close_reason IS NULL OR close_reason IN
+    ('resolved','duplicate','user_withdrawn','insufficient_info','not_supported','violation','other'))
+);
+
+CREATE INDEX idx_ticket_status_activity ON ticket(status, last_activity_at DESC, id);
+CREATE INDEX idx_ticket_author ON ticket(author_id, created_at DESC);
+CREATE INDEX idx_ticket_assignee ON ticket(assignee_admin_id);
+CREATE INDEX idx_ticket_duplicate_of ON ticket(duplicate_of_id);
+
+CREATE TABLE ticket_message (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ticket_id BIGINT NOT NULL,
+  actor_type VARCHAR(20) NOT NULL,
+  actor_id BIGINT NOT NULL,
+  visibility VARCHAR(20) NOT NULL DEFAULT 'public',
+  content TEXT NOT NULL,
+  hidden_at DATETIME,
+  hidden_by BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_ticket_message_actor CHECK (actor_type IN ('user','admin')),
+  CONSTRAINT chk_ticket_message_visibility CHECK (visibility IN ('public','internal'))
+);
+
+CREATE INDEX idx_ticket_message_ticket ON ticket_message(ticket_id, created_at, id);
+
+CREATE TABLE ticket_attachment (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  uploader_type VARCHAR(20) NOT NULL,
+  uploader_id BIGINT NOT NULL,
+  ticket_id BIGINT,
+  message_id BIGINT,
+  storage_key VARCHAR(64) NOT NULL UNIQUE,
+  original_name VARCHAR(255),
+  mime_type VARCHAR(100) NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  width INT,
+  height INT,
+  state VARCHAR(20) NOT NULL DEFAULT 'temporary',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  bound_at DATETIME,
+  CONSTRAINT chk_ticket_attachment_state CHECK (state IN ('temporary','bound')),
+  CONSTRAINT chk_ticket_attachment_uploader CHECK (uploader_type IN ('user','admin'))
+);
+
+CREATE INDEX idx_ticket_attachment_cleanup ON ticket_attachment(state, created_at);
+CREATE INDEX idx_ticket_attachment_ticket ON ticket_attachment(ticket_id);
+CREATE INDEX idx_ticket_attachment_message ON ticket_attachment(message_id);
+
+CREATE TABLE ticket_follow (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ticket_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uk_ticket_follow UNIQUE (ticket_id, user_id)
+);
+
+CREATE TABLE ticket_reaction (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ticket_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  reaction_type VARCHAR(20) NOT NULL DEFAULT 'same_issue',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uk_ticket_reaction UNIQUE (ticket_id, user_id, reaction_type)
+);
+
+CREATE TABLE ticket_event (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ticket_id BIGINT NOT NULL,
+  actor_type VARCHAR(20) NOT NULL,
+  actor_id BIGINT,
+  action VARCHAR(40) NOT NULL,
+  from_status VARCHAR(30),
+  to_status VARCHAR(30),
+  note TEXT,
+  visibility VARCHAR(20) NOT NULL DEFAULT 'public',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_ticket_event_visibility CHECK (visibility IN ('public','internal'))
+);
+
+CREATE INDEX idx_ticket_event_ticket ON ticket_event(ticket_id, created_at, id);
+
+CREATE TABLE ticket_idempotency (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  action VARCHAR(40) NOT NULL,
+  idempotency_key VARCHAR(80) NOT NULL,
+  request_hash VARCHAR(64) NOT NULL,
+  result_json TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uk_ticket_idempotency UNIQUE (user_id, action, idempotency_key)
+);
+
+CREATE INDEX idx_ticket_idempotency_created ON ticket_idempotency(created_at);

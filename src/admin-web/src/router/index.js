@@ -18,6 +18,7 @@ const routes = [
       { path: 'schedules', name: 'Schedules', component: () => import('../views/SchedulesPage.vue') },
       { path: 'team-tasks', name: 'TeamTasks', component: () => import('../views/TeamTasksPage.vue') },
       { path: 'notifications', name: 'Notifications', component: () => import('../views/NotificationsPage.vue') },
+      { path: 'tickets', name: 'Tickets', component: () => import('../views/TicketsPage.vue') },
       { path: 'reminders', name: 'Reminders', component: () => import('../views/RemindersPage.vue') },
       { path: 'admin-users', name: 'AdminUsers', component: () => import('../views/AdminUsersPage.vue'), meta: { superAdmin: true } },
       { path: 'operation-logs', name: 'OperationLogs', component: () => import('../views/OperationLogsPage.vue') },

@@ -1489,6 +1489,12 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .optional-label { margin-left: 4px; color: var(--muted); font-size: 10px; font-weight: 500; }
 .auth-form-meta { min-height: 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .auth-form-meta a { color: #08766f; font-size: 11px; font-weight: 700; }
+/* 工单状态标签（网页端与桌面端共用）。 */
+.ticket-status-open { background: rgba(47, 128, 237, .12); color: #2f80ed; }
+.ticket-status-in_progress { background: rgba(246, 173, 85, .16); color: #b26a00; }
+.ticket-status-waiting_reporter { background: rgba(155, 89, 182, .14); color: #8e44ad; }
+.ticket-status-resolved { background: rgba(46, 161, 116, .14); color: #1e8e5a; }
+.ticket-status-closed { background: rgba(100, 116, 139, .14); color: #64748b; }
 /* 记住密码：登录表单里的 label 默认是 grid，这里必须显式改回 flex 才不会上下堆叠。 */
 .login-form label.remember-toggle {
   display: flex;
@@ -1606,7 +1612,14 @@ input[aria-invalid="true"] { border-color: var(--danger); }
   margin-top: 0;
 }
 .main-area > .compliance-footer {
-  margin-top: 30px;
+  /* 备案号固定沉底：主区纵向 flex 且至少撑满视口，内容不足时 footer 贴住底部，不再随内容高度上下跳。 */
+  margin-top: auto;
+  padding-top: 30px;
+}
+.main-area {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
 [data-theme="dark"] .login-atmosphere { filter: brightness(.56) saturate(.8); }
 [data-theme="dark"] .login-canvas::before { background: rgba(8, 17, 16, .45); }
@@ -1661,7 +1674,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
   .nav-icon { height: 20px; }
   .nav-label { flex: none; width: 100%; text-align: center; font-size: 9px; }
   .nav-badge { position: absolute; top: 2px; left: calc(50% + 7px); }
-  .main-area { padding: 0 16px 24px; }
+  .main-area { padding: 0 16px 24px; min-height: calc(100vh - 66px); }
   .page-topbar { height: 72px; margin: 0 -16px; padding: 0 16px; }
   .title-line h1 { font-size: 20px; }
   .topbar-date { display: none; }

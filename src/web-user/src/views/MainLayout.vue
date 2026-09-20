@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import { useTicketsStore } from '../stores/tickets'
 import SideNav from '../components/SideNav.vue'
 import ComplianceFooter from '../components/ComplianceFooter.vue'
 import { Bell, Moon, Plus, RefreshCw, Sun, UserRound } from 'lucide-vue-next'
@@ -10,6 +11,7 @@ import { getDisplayTimezone } from '../utils/helpers'
 const route = useRoute()
 const router = useRouter()
 const store = useAppStore()
+const ticketsStore = useTicketsStore()
 let notificationTimer: ReturnType<typeof setInterval> | undefined
 
 function stopNotificationPolling() {
@@ -26,11 +28,19 @@ function startNotificationPolling() {
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') {
     store.pollNotifications()
+    // 窗口重新聚焦时刷新工单开关（§7.3），关闭模块时及时退出工单页面。
+    void ticketsStore.loadSettings().then(settings => {
+      if (!settings.enabled && route.path.startsWith('/tickets')) {
+        store.notify('问题反馈模块当前已关闭')
+        router.push('/')
+      }
+    })
   }
 }
 
 onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  void ticketsStore.loadSettings()
   startNotificationPolling()
 })
 
@@ -47,6 +57,7 @@ const routeMeta = computed(() => {
     '/teams': { title: '团队', description: '查看成员、权限和协作空间' },
     '/tasks': { title: '团队任务', description: '跟进指派、截止时间与执行状态' },
     '/notifications': { title: '通知', description: '集中处理提醒和团队动态' },
+    '/tickets': { title: '问题反馈', description: '公开的问题大厅与处理进展' },
     '/fatigue/survey': { title: '疲劳调查', description: '记录今天的实际疲劳感受' },
     '/fatigue/report': { title: '疲劳回顾', description: '周 / 月疲劳与负荷回顾报告' },
     '/reminders': { title: '提醒记录', description: '查看待发送与历史提醒' },
@@ -58,6 +69,7 @@ const routeMeta = computed(() => {
   if (route.path.startsWith('/schedules/')) return { title: '日程详情', description: '查看和调整日程信息' }
   if (route.path.startsWith('/teams/')) return { title: '团队详情', description: '管理成员和团队任务' }
   if (route.path.startsWith('/tasks/')) return { title: '任务详情', description: '跟进任务进展与执行记录' }
+  if (route.path.startsWith('/tickets/')) return { title: '工单详情', description: '查看问题与处理进展' }
   return map['/']
 })
 

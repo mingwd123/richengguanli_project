@@ -3,6 +3,10 @@ spring:
     name: dayliane-backend
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:dev}
+  servlet:
+    multipart:
+      max-file-size: ${DAYLIANE_TICKET_MAX_FILE_SIZE:11MB}
+      max-request-size: ${DAYLIANE_TICKET_MAX_REQUEST_SIZE:13MB}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -14,6 +18,18 @@ management:
         include: health,info
 
 dayliane:
+  ticket:
+    storage-dir: ${DAYLIANE_TICKET_STORAGE_DIR:./data/tickets}
+    max-image-bytes: 10485760
+    max-image-pixels: 40000000
+    temp-attachment-retention-hours: 24
+    rate-limit:
+      create-per-minute: 2
+      create-per-day: 20
+      reply-per-minute: 10
+      reply-per-day: 100
+      upload-per-day-mb: 200
+      read-per-minute: 120
   features:
     fatigue:
       enabled: ${DAYLIANE_FATIGUE_ENABLED:true}

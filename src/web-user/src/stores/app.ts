@@ -353,7 +353,7 @@ export const useAppStore = defineStore('app', () => {
     loading.value = true
     try {
       const phone = registerForm.phone.trim()
-      const data = await registerAccount({
+      await registerAccount({
         email: normalizeEmail(registerForm.email),
         code: registerForm.code,
         password: registerForm.password,
@@ -361,9 +361,8 @@ export const useAppStore = defineStore('app', () => {
         nickname: registerForm.nickname.trim() || undefined,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
       })
-      establishSession(data.accessToken, data.refreshToken)
-      await loadAll()
-      notify('注册成功')
+      // 注册成功不自动建立会话：跳回登录页并预填账号密码，让用户显式登录一次（避免误以为注册失败）。
+      notify('注册成功，已为你填好登录信息')
       return true
     } catch (e: any) {
       if (isRegistrationUnavailable(e)) {

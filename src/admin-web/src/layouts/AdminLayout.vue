@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Bell, Calendar, CircleCheck, Connection, DataAnalysis, Document, Expand,
-  Fold, House, List, Management, Moon, Sunny, Timer, User, UserFilled,
+  Fold, House, List, Management, Moon, Sunny, Tickets, Timer, User, UserFilled,
 } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/admin'
 
@@ -19,6 +19,7 @@ const allMenuItems = [
   { path: '/schedules', label: '日程管理', icon: Calendar },
   { path: '/team-tasks', label: '团队任务', icon: List },
   { path: '/notifications', label: '通知记录', icon: Bell },
+  { path: '/tickets', label: '工单管理', icon: Tickets },
   { path: '/reminders', label: '提醒记录', icon: Timer },
   { path: '/admin-users', label: '管理员', icon: Management },
   { path: '/operation-logs', label: '操作日志', icon: Document },
@@ -36,6 +37,7 @@ const routeMeta = computed(() => {
     '/team-tasks': '跟踪团队任务和执行状态',
     '/notifications': '查看站内通知发送记录',
     '/reminders': '检查提醒任务与投递状态',
+    '/tickets': '处理公开问题反馈与模块开关',
     '/admin-users': '维护后台管理员账号',
     '/operation-logs': '追踪后台敏感操作记录',
     '/ai-config': '管理 AI 服务提供商配置',

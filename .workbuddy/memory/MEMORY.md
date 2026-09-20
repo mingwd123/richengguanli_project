@@ -10,6 +10,14 @@
   `cd src/backend && ./mvnw.cmd spring-boot:run -Dspring-boot.run.arguments=--server.port=8080`
 - 端口：后端 8080、用户端 5173、管理后台 5174、桌面端 1420。三者都在跑时前端直连 8080，后端不在 8080 页面就会加载失败。
 
+## 工单模块约定（2026-09-20 起生效）
+
+- 迁移最高 **V29**（工单模块，8 张表）。模块开关在 `ticket_setting`（默认 FALSE），超管在管理端「工单管理」切换；关闭时后端所有用户工单接口返回 503 + `TICKET_FEATURE_DISABLED`。
+- 工单通知 type='ticket'；用户通知列表/未读数已内置过滤（模块关闭或工单隐藏时不可见），改通知 SQL 时别丢掉 `USER_NOTIFICATION_VISIBILITY`。
+- 附件存 `dayliane.ticket.storage-dir`（默认 `./data/tickets`），**生产部署必须挂宿主机卷**；multipart 上限 11MB/13MB 已在 application.yml 配置。
+- 限流是进程内滑动窗口（`TicketRateLimiter`），单实例前提；多实例部署时需换集中存储。
+- 浏览器验收注意：`onBeforeRouteLeave` 从 vue-router 导入；页面里 `window.confirm` 会卡死 CDP，自动化前先补丁 `window.confirm=()=>true`；el-select 要用真实鼠标事件。
+
 ## 前端结构约定
 
 - `src/desktop` 通过 vite 别名 `@web` 复用 `src/web-user/src` 的组件与 store，改 web-user 后桌面端自动继承；桌面端自己的组件在 `src/desktop/src/components`。

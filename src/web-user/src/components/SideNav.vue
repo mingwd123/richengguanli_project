@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import { useTicketsStore } from '../stores/tickets'
 import {
   CalendarDays,
+  LifeBuoy,
   CalendarRange,
   AlarmClock,
   CheckSquare2,
@@ -19,6 +21,7 @@ import {
 const router = useRouter()
 const route = useRoute()
 const store = useAppStore()
+const ticketsStore = useTicketsStore()
 const mobileMoreOpen = ref(false)
 
 const nav = [
@@ -28,6 +31,7 @@ const nav = [
   { id: 'teams', label: '团队', icon: UsersRound, route: '/teams', mobilePrimary: false },
   { id: 'tasks', label: '团队任务', icon: CheckSquare2, route: '/tasks', mobilePrimary: true },
   { id: 'notifications', label: '通知', icon: PanelsTopLeft, route: '/notifications', mobilePrimary: false },
+  { id: 'tickets', label: '工单', icon: LifeBuoy, route: '/tickets', mobilePrimary: false },
   { id: 'report', label: '回顾', icon: TrendingUp, route: '/fatigue/report', mobilePrimary: false },
   { id: 'reminders', label: '提醒记录', icon: AlarmClock, route: '/reminders', mobilePrimary: false },
   { id: 'profile', label: '我的', icon: Settings2, route: '/profile', mobilePrimary: false },
@@ -37,6 +41,9 @@ const labels = {
   user: '用户',
   logout: '退出登录',
 }
+
+// 功能关闭时隐藏入口；配置加载失败同样隐藏（§7.2/§7.3）。
+const visibleNav = computed(() => nav.filter(item => item.id !== 'tickets' || ticketsStore.enabled))
 
 function isActive(item: typeof nav[number]) {
   if (item.route === '/') return route.path === '/'
@@ -66,7 +73,7 @@ function handleLogout() {
     <p class="nav-caption">工作台</p>
     <nav class="nav-items">
       <button
-        v-for="item in nav"
+        v-for="item in visibleNav"
         :key="item.id"
         :class="['nav-entry', { active: isActive(item), 'mobile-primary': item.mobilePrimary }]"
         :title="item.label"

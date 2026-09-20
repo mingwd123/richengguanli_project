@@ -36,7 +36,7 @@ public class NotificationService {
     }
 
     public Map<String, Object> listNotifications(long userId, int page, int size, Boolean isRead, String sort) {
-        String where = " from notification where user_id=:userId and deleted_at is null";
+        String where = " from notification where user_id=:userId and deleted_at is null" + USER_NOTIFICATION_VISIBILITY;
         MapSqlParameterSource p = new MapSqlParameterSource("userId", userId);
         if (isRead != null) {
             where += " and is_read=:isRead";
@@ -63,9 +63,16 @@ public class NotificationService {
     }
 
     public long unreadCount(long userId) {
-        Integer n = jdbc.queryForObject("select count(*) from notification where user_id=? and is_read=false and deleted_at is null", Integer.class, userId);
+        Integer n = jdbc.queryForObject(
+                "select count(*) from notification where user_id=? and is_read=false and deleted_at is null" + USER_NOTIFICATION_VISIBILITY,
+                Integer.class, userId);
         return n == null ? 0 : n;
     }
+
+    /** 工单通知对用户可见的条件：模块开启，且关联工单未被隐藏（计划 §八）。 */
+    private static final String USER_NOTIFICATION_VISIBILITY =
+            " and not (type='ticket' and (not exists (select 1 from ticket_setting ts where ts.id=1 and ts.enabled = true)"
+            + " or exists (select 1 from ticket tk where tk.id = notification.related_id and tk.hidden_at is not null)))";
 
     public Map<String, Object> preferences(long userId) {
         List<Map<String, Object>> rows = jdbc.query("select browser_enabled browserEnabled,task_assigned_enabled taskAssignedEnabled,task_status_enabled taskStatusEnabled,reminder_enabled reminderEnabled,fatigue_alert_enabled fatigueAlertEnabled,fatigue_survey_enabled fatigueSurveyEnabled,quiet_start_time quietStartTime,quiet_end_time quietEndTime from notification_preference where user_id=?", (rs, i) -> {

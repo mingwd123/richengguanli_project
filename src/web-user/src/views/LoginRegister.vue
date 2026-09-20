@@ -50,8 +50,14 @@ async function handleRegister() {
   registerErrors.confirmPassword = store.registerForm.password === store.registerForm.confirmPassword ? '' : '两次密码不一致'
   if (!verificationValid || !isValidEmailCode(store.registerForm.code) || Object.values(registerErrors).some(Boolean)) return
 
+  // store 在 finally 里会清空密码字段，提交前先留一份用于回填登录表单。
+  const submittedEmail = store.registerForm.email.trim()
+  const submittedPassword = store.registerForm.password
   const success = await store.register()
-  if (success) router.push('/')
+  if (!success) return
+  switchTab('login')
+  store.loginForm.account = submittedEmail
+  store.loginForm.password = submittedPassword
 }
 
 function sendRegisterCode(email: string) {

@@ -33,8 +33,8 @@ class MySqlFlywayMigrationPathTests {
             assertThat(throughVersion22.info().current().getVersion().getVersion()).isEqualTo("22");
 
             Flyway throughLatest = flyway(databaseUrl, username, password, null);
-            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(6);
-            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("28");
+            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(7);
+            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("29");
 
             JdbcTemplate jdbc = new JdbcTemplate(new DriverManagerDataSource(databaseUrl, username, password));
             assertThat(columnCount(jdbc, database, "team_task_assignee", "completed_fatigue_weight")).isEqualTo(1);
@@ -45,6 +45,13 @@ class MySqlFlywayMigrationPathTests {
             assertThat(columnCount(jdbc, database, "schedule", "progress_percent")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "schedule", "progress_completed_date")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "schedule_progress_daily", "completed_load")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket", "ticket_no")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket", "duplicate_of_id")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket_setting", "enabled")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket_message", "visibility")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket_attachment", "storage_key")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ticket_idempotency", "idempotency_key")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("select enabled from ticket_setting where id=1", Boolean.class)).isFalse();
         } finally {
             executeAdmin(adminUrl, username, password, "drop database if exists `" + database + "`");
         }
