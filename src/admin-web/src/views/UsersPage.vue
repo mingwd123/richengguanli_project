@@ -1,9 +1,12 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Edit, Lock, Plus } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import { useAdminStore } from '../stores/admin'
 import DataTable from '../components/DataTable.vue'
+import UserWorkspace from '../components/UserWorkspace.vue'
+import { useResourceList } from '../composables/useResourceList'
 import {
   focusFirstModalElement,
   modalEscapeRequestsClose,
@@ -11,9 +14,16 @@ import {
   trapModalTab,
 } from '../utils/modalFocus'
 import { registrationSourceLabel } from '../utils/registrationSettings'
+import { presetRange } from '../utils/analytics'
 
 const store = useAdminStore()
+const route = useRoute()
+const router = useRouter()
+const { onSearch, onReset, onPageChange, onSizeChange, onSortChange, refresh } = useResourceList('users')
+const changingStatus = ref(null)
 const showDetail = ref(false)
+const showCreate = ref(false)
+const selectedUserId = ref(null)
 const showEdit = ref(false)
 const userEditModal = ref(null)
 const editEmailInput = ref(null)
@@ -49,52 +59,65 @@ const columns = [
   { key: 'nickname', label: '昵称' },
   { key: 'timezone', label: '时区' },
   { key: 'status', label: '状态' },
+  { key: 'riskLevel', label: '近 7 天登录风险' },
   { key: 'createdAt', label: '创建时间' },
 ]
 
 onMounted(async () => {
-  store.activeResource = 'users'
-  store.resetFilters()
-  await Promise.all([store.fetchList(), store.fetchRegistrationSettings()])
+  await store.fetchRegistrationSettings()
+  const userId = Number(route.query.userId)
+  if (Number.isInteger(userId) && userId > 0) {
+    selectedUserId.value = userId
+    showDetail.value = true
+  }
 })
 
 function refreshPage() {
-  return Promise.all([store.fetchList(), store.fetchRegistrationSettings()])
+  return Promise.all([refresh(), store.fetchRegistrationSettings()])
 }
 
 function updateRegistrationEnabled(enabled) {
   store.updateRegistrationEnabled(enabled)
 }
 
-function onSearch(params) {
-  store.searchKeyword = params.keyword
-  store.filterStatus = params.status
-  store.filterDateFrom = params.dateFrom
-  store.filterDateTo = params.dateTo
-  store.fetchList({ page: 1 })
+function viewRisk(row) {
+  const [dateFrom, dateTo] = presetRange(7)
+  router.push({ path: '/views/security', query: { userId: row.id, dateFrom, dateTo } })
 }
 
-function onReset() {
-  store.resetFilters()
-  store.fetchList({ page: 1 })
-}
-
-function onPageChange(page) {
-  store.fetchList({ page })
-}
-
-function onSizeChange(size) {
-  store.fetchList({ page: 1, size })
+async function changeStatus(row) {
+  const status = row.status === 'active' ? 'disabled' : 'active'
+  let reason
+  try {
+    reason = (await ElMessageBox.prompt(status === 'disabled' ? '封禁后将立即撤销用户会话，请填写原因。' : '请填写解封原因。',
+      status === 'disabled' ? '封禁账号' : '解封账号',
+      { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消',
+        inputValidator: value => Boolean(value?.trim()) && value.trim().length <= 1000 || '请填写 1 至 1000 字的原因' })).value
+  } catch { return }
+  changingStatus.value = row.id
+  try { await store.setUserStatus(row, status, reason) }
+  finally { changingStatus.value = null }
 }
 
 async function viewDetail(row) {
-  await store.fetchUserDetail(row.id)
+  selectedUserId.value = row.id
   showDetail.value = true
+  router.push({ query: { ...route.query, userId: row.id } })
 }
 
 function closeDetail() {
   showDetail.value = false
-  store.currentDetail = null
+  const query = { ...route.query }
+  delete query.userId
+  router.replace({ query })
+}
+watch(() => route.query.userId, value => {
+  const id = Number(value)
+  selectedUserId.value = Number.isInteger(id) && id > 0 ? id : null
+  showDetail.value = Boolean(selectedUserId.value)
+})
+async function createUser() {
+  if (await store.createUser()) showCreate.value = false
 }
 
 async function focusEditForm() {
@@ -172,13 +195,13 @@ async function saveUserEdit() {
         <h1>用户管理</h1>
         <p>查看和管理所有用户。</p>
       </div>
-      <button class="primary" :disabled="store.loading || store.registrationSettingsLoading" @click="refreshPage">刷新</button>
+      <div class="toolbar-actions"><el-button :icon="Plus" type="primary" @click="showCreate = true">创建用户</el-button><button :disabled="store.loading || store.registrationSettingsLoading" @click="refreshPage">刷新</button></div>
     </header>
 
     <section class="stats">
       <article><span>总数</span><strong>{{ store.stats.total }}</strong></article>
       <article><span>启用</span><strong>{{ store.stats.active }}</strong></article>
-      <article><span>待处理</span><strong>{{ store.stats.pending }}</strong></article>
+      <article><span>禁用</span><strong>{{ store.page.summary?.disabled || 0 }}</strong></article>
     </section>
 
     <section class="registration-settings-panel" aria-labelledby="registration-settings-title">
@@ -219,14 +242,8 @@ async function saveUserEdit() {
       </div>
     </section>
 
-    <section class="create-panel account-create-panel">
-      <div class="account-create-heading">
-        <div>
-          <h2>创建用户</h2>
-          <p>管理员创建的邮箱账号无需验证码，可直接登录。</p>
-        </div>
-      </div>
-      <form class="account-create-form user-account-create-form" novalidate @submit.prevent="store.createUser">
+    <el-dialog v-model="showCreate" title="创建用户" width="min(680px, 94vw)" :close-on-click-modal="!store.createLoading" :show-close="!store.createLoading">
+      <form class="account-create-form user-account-create-form" novalidate @submit.prevent="createUser">
         <label>
           <span>邮箱</span>
           <input v-model="store.userCreateForm.email" type="email" maxlength="254" inputmode="email" autocomplete="off" placeholder="name@example.com" :disabled="store.createLoading" required />
@@ -252,7 +269,7 @@ async function saveUserEdit() {
           <el-icon><Plus /></el-icon><span>{{ store.createLoading ? '创建中...' : '创建用户' }}</span>
         </button>
       </form>
-    </section>
+    </el-dialog>
 
     <DataTable
       :columns="columns"
@@ -262,18 +279,29 @@ async function saveUserEdit() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :keyword="store.searchKeyword"
+      :status="store.filterStatus"
+      :status-options="[{ value: 'active', label: '启用' }, { value: 'disabled', label: '禁用' }]"
+      :date-from="store.filterDateFrom"
+      :date-to="store.filterDateTo"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"
       @size-change="onSizeChange"
+      @sort-change="onSortChange"
     >
       <template #cell-status="{ row }">
         <span :class="'status-badge status-' + row.status">{{ store.formatValue(row.status) }}</span>
       </template>
+      <template #cell-riskLevel="{ row }">
+        <el-button v-if="row.riskCount" link :type="row.riskLevel === 'high' ? 'danger' : 'warning'" @click="viewRisk(row)">
+          {{ row.riskLevel === 'high' ? '高风险' : '需关注' }} · {{ row.riskCount }}
+        </el-button>
+        <span v-else>无异常记录</span>
+      </template>
       <template #actions="{ row }">
         <button :data-user-edit-id="row.id" @click="editUser(row, $event)">编辑</button>
-        <button v-if="row.status !== 'active'" @click="store.setUserStatus(row, 'active')">启用</button>
-        <button v-else @click="store.setUserStatus(row, 'disabled')">禁用</button>
+        <button :disabled="changingStatus !== null" @click="changeStatus(row)">{{ row.status === 'active' ? '封禁' : '解封' }}</button>
         <button @click="viewDetail(row)">详情</button>
       </template>
     </DataTable>
@@ -320,24 +348,7 @@ async function saveUserEdit() {
       </div>
     </div>
 
-    <!-- Detail Modal -->
-    <div v-if="showDetail && store.currentDetail" class="modal-overlay" @click.self="closeDetail">
-      <div class="detail-modal">
-        <div class="modal-header">
-          <h2>用户详情</h2>
-          <button @click="closeDetail">&times;</button>
-        </div>
-        <div class="modal-body">
-          <div v-if="store.detailLoading" class="loading">加载中...</div>
-          <div v-else class="detail-grid">
-            <div class="detail-item" v-for="(value, key) in store.currentDetail" :key="key">
-              <span class="detail-label">{{ key }}</span>
-              <span class="detail-value">{{ store.formatValue(value) }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <UserWorkspace :model-value="showDetail" :user-id="selectedUserId" @update:model-value="closeDetail" />
   </div>
 </template>
 

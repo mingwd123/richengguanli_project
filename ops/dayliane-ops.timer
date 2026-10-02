@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Dayliane operational status every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=dayliane-ops.service
+
+[Install]
+WantedBy=timers.target

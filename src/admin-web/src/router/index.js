@@ -24,6 +24,13 @@ const routes = [
       { path: 'operation-logs', name: 'OperationLogs', component: () => import('../views/OperationLogsPage.vue') },
       { path: 'ai-config', name: 'AiConfig', component: () => import('../views/AiConfigPage.vue'), meta: { superAdmin: true } },
       { path: 'ai-logs', name: 'AiLogs', component: () => import('../views/AiLogsPage.vue') },
+      { path: 'views/fatigue', name: 'FatigueView', component: () => import('../views/DataViewsPage.vue'), props: { kind: 'fatigue' } },
+      { path: 'views/ops', name: 'OpsView', component: () => import('../views/DataViewsPage.vue'), props: { kind: 'ops' } },
+      { path: 'views/collab', name: 'CollabView', component: () => import('../views/DataViewsPage.vue'), props: { kind: 'collab' } },
+      { path: 'views/ai', name: 'AiView', component: () => import('../views/DataViewsPage.vue'), props: { kind: 'ai' } },
+      { path: 'views/system', name: 'SystemStatus', component: () => import('../views/SystemStatusPage.vue') },
+      { path: 'views/security', name: 'SecurityView', component: () => import('../views/DataViewsPage.vue'), props: { kind: 'security' } },
+      { path: 'ai-quota', name: 'AiQuota', component: () => import('../views/AiQuotaPage.vue'), meta: { superAdmin: true } },
     ],
   },
 ]

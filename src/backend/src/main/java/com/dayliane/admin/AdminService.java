@@ -119,6 +119,7 @@ public class AdminService {
             }
             case "reminders" -> {
                 sql.append("select id,user_id userId,target_type targetType,target_id targetId,remind_at remindAt,status,created_at createdAt from reminder where 1=1");
+                if (!blank(keyword)) { sql.append(" and (target_type like ? or cast(user_id as char) like ?)"); params.add("%" + keyword + "%"); params.add("%" + keyword + "%"); }
                 if (!blank(status)) { sql.append(" and status=?"); params.add(status); }
             }
             case "adminUsers" -> {
@@ -130,9 +131,19 @@ public class AdminService {
         }
 
         if (!blank(dateFrom)) { sql.append(" and created_at >= ?"); params.add(dateFrom + " 00:00:00"); }
-        if (!blank(dateTo)) { sql.append(" and created_at <= ?"); params.add(dateTo + " 23:59:59"); }
+        if (!blank(dateTo)) { sql.append(" and created_at < ?"); params.add(LocalDate.parse(dateTo).plusDays(1).atStartOfDay()); }
         Integer totalValue = jdbc.queryForObject("select count(*) from (" + sql + ") filtered", Integer.class, params.toArray());
         int total = totalValue == null ? 0 : totalValue;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        if (!"notifications".equals(table)) {
+            jdbc.query("select status,count(*) total from (" + sql + ") filtered group by status",
+                    (org.springframework.jdbc.core.RowCallbackHandler) rs -> summary.put(rs.getString("status"), rs.getLong("total")),
+                    params.toArray());
+        } else {
+            jdbc.query("select isRead,count(*) total from (" + sql + ") filtered group by isRead",
+                    (org.springframework.jdbc.core.RowCallbackHandler) rs -> summary.put(rs.getBoolean("isRead") ? "read" : "unread", rs.getLong("total")),
+                    params.toArray());
+        }
         int safePage = Math.max(1, page);
         int safeSize = Math.min(100, Math.max(1, size));
         sql.append(" order by ").append(adminSort(table, sort));
@@ -148,19 +159,45 @@ public class AdminService {
             }
             return m;
         }, params.toArray()).stream().map(this::normalizeAdminRow).toList();
-        return pagedResult(rows, total, safePage, safeSize);
+        if ("users".equals(table)) addUserRisk(rows);
+        Map<String, Object> result = new LinkedHashMap<>(pagedResult(rows, total, safePage, safeSize));
+        result.put("summary", summary);
+        return result;
+    }
+
+    private void addUserRisk(List<Map<String, Object>> users) {
+        if (users.isEmpty()) return;
+        Map<Long, Map<String, Object>> byId = new HashMap<>();
+        for (Map<String, Object> user : users) {
+            user.put("riskLevel", "low");
+            user.put("riskCount", 0);
+            byId.put(longValue(user.get("id")), user);
+        }
+        List<Object> args = new ArrayList<>(byId.keySet());
+        args.add(Timestamp.valueOf(LocalDate.now(ZoneOffset.UTC).minusDays(6).atStartOfDay()));
+        jdbc.query("select user_id,count(*) total,max(case when risk_level='high' then 2 else 1 end) severity "
+                        + "from security_event where user_id in (" + String.join(",", Collections.nCopies(users.size(), "?"))
+                        + ") and created_at>=? and event_type in ('login_failure','login_success') "
+                        + "and risk_level<>'low' and review_status in ('pending','confirmed') group by user_id", (org.springframework.jdbc.core.RowCallbackHandler) rs -> {
+                    Map<String, Object> user = byId.get(rs.getLong("user_id"));
+                    user.put("riskLevel", rs.getInt("severity") == 2 ? "high" : "medium");
+                    user.put("riskCount", rs.getLong("total"));
+                }, args.toArray());
     }
 
     public Map<String, Object> dashboardStats() {
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("users", count("select count(*) from `user` where deleted_at is null"));
         stats.put("activeUsers", count("select count(*) from `user` where status='active' and deleted_at is null"));
+        stats.put("enabledUsers", stats.get("activeUsers"));
+        stats.put("dailyActiveUsers", count("select count(*) from user_activity_daily where activity_date=?", LocalDate.now(ZoneOffset.UTC)));
         stats.put("teams", count("select count(*) from team where deleted_at is null"));
         stats.put("pendingSchedules", count("select count(*) from schedule where status='pending' and deleted_at is null"));
         stats.put("activeTeamTasks", count("select count(*) from team_task where status in ('active','unassigned') and deleted_at is null"));
         stats.put("pendingReminders", count("select count(*) from reminder where status='pending'"));
         stats.put("unreadNotifications", count("select count(*) from notification where is_read=false and deleted_at is null"));
-        stats.put("aiCallsToday", count("select count(*) from ai_usage_log where created_at >= current_date"));
+        stats.put("aiCallsToday", count("select count(*) from ai_usage_log where created_at >= ?", LocalDate.now(ZoneOffset.UTC).atStartOfDay()));
+        stats.put("pendingRisks", count("select count(*) from security_event where risk_level<>'low' and review_status='pending'"));
         return stats;
     }
 
@@ -461,7 +498,13 @@ public class AdminService {
 
     @Transactional
     public Map<String, Object> adminSetUserStatus(long adminId, long userId, String status, String ipAddress, String userAgent) {
+        return adminSetUserStatus(adminId, userId, status, ipAddress, userAgent, "");
+    }
+
+    @Transactional
+    public Map<String, Object> adminSetUserStatus(long adminId, long userId, String status, String ipAddress, String userAgent, String reason) {
         requireActiveAdmin(adminId);
+        if (reason == null || reason.length() > 1000) throw new BusinessException(400, "reason is invalid");
         if (!List.of("active", "disabled").contains(status)) throw new BusinessException(400, "status is invalid");
         Map<String, Object> before = userViewForUpdate(userId);
         int updated = "disabled".equals(status)
@@ -471,6 +514,7 @@ public class AdminService {
         if (updated == 0) throw new BusinessException(404, "user not found");
         if ("disabled".equals(status)) refreshTokenStore.invalidateAllForUser(userId);
         Map<String, Object> after = userView(userId);
+        after.put("reason", reason.trim());
         writeAdminOperationLog(adminId, "set_user_status", "user", userId, before, after, ipAddress, userAgent);
         return after;
     }

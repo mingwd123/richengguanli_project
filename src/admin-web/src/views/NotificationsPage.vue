@@ -1,9 +1,11 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { useAdminStore } from '../stores/admin'
 import DataTable from '../components/DataTable.vue'
+import { useResourceList } from '../composables/useResourceList'
 
 const store = useAdminStore()
+const { onSearch, onReset, onPageChange, onSizeChange, onSortChange, refresh } = useResourceList('notifications')
 const showDetail = ref(false)
 const statusOptions = [
   { value: 'unread', label: '未读' },
@@ -20,33 +22,6 @@ const columns = [
   { key: 'isRead', label: '已读' },
   { key: 'createdAt', label: '创建时间' },
 ]
-
-onMounted(async () => {
-  store.activeResource = 'notifications'
-  store.resetFilters()
-  await store.fetchList()
-})
-
-function onSearch(params) {
-  store.searchKeyword = params.keyword
-  store.filterStatus = params.status
-  store.filterDateFrom = params.dateFrom
-  store.filterDateTo = params.dateTo
-  store.fetchList({ page: 1 })
-}
-
-function onReset() {
-  store.resetFilters()
-  store.fetchList({ page: 1 })
-}
-
-function onPageChange(page) {
-  store.fetchList({ page })
-}
-
-function onSizeChange(size) {
-  store.fetchList({ page: 1, size })
-}
 
 async function viewDetail(row) {
   await store.fetchNotificationDetail(row.id)
@@ -66,13 +41,13 @@ function closeDetail() {
         <h1>通知记录</h1>
         <p>查看所有通知记录。</p>
       </div>
-      <button class="primary" @click="store.fetchList()">刷新</button>
+      <button class="primary" @click="refresh">刷新</button>
     </header>
 
     <section class="stats">
       <article><span>总数</span><strong>{{ store.stats.total }}</strong></article>
-      <article><span>启用</span><strong>{{ store.stats.active }}</strong></article>
-      <article><span>待处理</span><strong>{{ store.stats.pending }}</strong></article>
+      <article><span>已读</span><strong>{{ store.page.summary?.read || 0 }}</strong></article>
+      <article><span>未读</span><strong>{{ store.page.summary?.unread || 0 }}</strong></article>
     </section>
 
     <DataTable
@@ -83,11 +58,16 @@ function closeDetail() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :keyword="store.searchKeyword"
+      :status="store.filterStatus"
+      :date-from="store.filterDateFrom"
+      :date-to="store.filterDateTo"
       :status-options="statusOptions"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"
       @size-change="onSizeChange"
+      @sort-change="onSortChange"
     >
       <template #cell-isRead="{ row }">
         {{ row.isRead ? '是' : '否' }}

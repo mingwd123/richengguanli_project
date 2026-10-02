@@ -72,7 +72,7 @@ async function aiOptimizeDesc() {
   if (!task.value?.description) return
   aiOptimizing.value = true; optimizedDesc.value = ''
   try {
-    const result = await store.aiRequest('/text/optimize-task-description', { text: task.value.description })
+    const result = await store.aiRequest('/text/optimize-task-description', { text: task.value.description, teamId: task.value.teamId })
     optimizedDesc.value = result.description || ''
     if (!optimizedDesc.value) optimizedDesc.value = 'AI 未能生成优化建议'
   } catch (e: any) {

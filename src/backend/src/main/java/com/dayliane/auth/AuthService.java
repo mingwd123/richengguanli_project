@@ -1,6 +1,7 @@
 package com.dayliane.auth;
 
 import com.dayliane.auth.email.EmailAddress;
+import com.dayliane.admin.SecurityTelemetryService;
 import com.dayliane.auth.email.EmailCodePurpose;
 import com.dayliane.auth.email.EmailOtpService;
 import com.dayliane.auth.email.EmailOtpVerificationException;
@@ -20,6 +21,8 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
@@ -46,6 +49,7 @@ public class AuthService {
     private final PermissionService permissionService;
     private final RegistrationSettingsService registrationSettingsService;
     private final EmailOtpService emailOtpService;
+    private final SecurityTelemetryService securityTelemetry;
     private final Object[] emailSendLocks = createEmailSendLocks();
 
     public AuthService(JdbcTemplate jdbc, NamedParameterJdbcTemplate named,
@@ -53,7 +57,7 @@ public class AuthService {
                        UserLoginRateLimiter userLoginRateLimiter,
                        RefreshTokenStore refreshTokenStore, PermissionService permissionService,
                        RegistrationSettingsService registrationSettingsService,
-                       EmailOtpService emailOtpService) {
+                       EmailOtpService emailOtpService, SecurityTelemetryService securityTelemetry) {
         this.jdbc = jdbc;
         this.named = named;
         this.jwtService = jwtService;
@@ -63,6 +67,7 @@ public class AuthService {
         this.permissionService = permissionService;
         this.registrationSettingsService = registrationSettingsService;
         this.emailOtpService = emailOtpService;
+        this.securityTelemetry = securityTelemetry;
     }
 
     @Transactional
@@ -151,20 +156,34 @@ public class AuthService {
             normalizedEmail = EmailAddress.tryNormalize(normalizedAccount);
             normalizedAccount = normalizedEmail == null ? normalizedAccount.toLowerCase() : normalizedEmail;
         }
-        userLoginRateLimiter.acquireAttempt(ip, normalizedAccount);
+        try {
+            userLoginRateLimiter.acquireAttempt(ip, normalizedAccount);
+        } catch (BusinessException ex) {
+            String failedAccount = normalizedAccount;
+            afterLoginRollback(() -> securityTelemetry.loginFailure(null, failedAccount, ip));
+            throw ex;
+        }
         Map<String, Object> user = normalizedEmail != null
                 ? findUserByEmailForUpdate(normalizedEmail)
                 : normalizedAccount.contains("@") ? null : findUserByPhoneForUpdate(normalizedAccount);
         if (user == null || !"active".equals(user.get("status"))) {
+            Long failedUserId = user == null ? null : longValue(user.get("id"));
+            String failedAccount = normalizedAccount;
+            afterLoginRollback(() -> securityTelemetry.loginFailure(failedUserId, failedAccount, ip));
             throw new BusinessException(401, "account or password is incorrect");
         }
         String hash = String.valueOf(user.get("passwordHash"));
         if (!passwordMatches(password, hash)) {
+            long failedUserId = longValue(user.get("id"));
+            String failedAccount = normalizedAccount;
+            afterLoginRollback(() -> securityTelemetry.loginFailure(failedUserId, failedAccount, ip));
             throw new BusinessException(401, "account or password is incorrect");
         }
         userLoginRateLimiter.clearSuccess(ip, normalizedAccount);
         long userId = longValue(user.get("id"));
         int version = ((Number) user.get("tokenVersion")).intValue();
+        String successfulAccount = normalizedAccount;
+        afterLoginCommit(() -> securityTelemetry.loginSuccess(userId, successfulAccount, ip));
         return tokensMap(userId, version);
     }
 
@@ -278,7 +297,36 @@ public class AuthService {
         if (jwtService.getTokenVersion(token) != tokenVersion(userId)) {
             throw new BusinessException(401, "unauthorized");
         }
+        try {
+            securityTelemetry.activity(userId);
+        } catch (RuntimeException ignored) {
+            // Observability must never turn an otherwise valid authenticated request into a 5xx.
+        }
         return userId;
+    }
+
+    private void afterLoginCommit(Runnable action) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            try { action.run(); } catch (RuntimeException ignored) { }
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() {
+                try { action.run(); } catch (RuntimeException ignored) { }
+            }
+        });
+    }
+
+    private void afterLoginRollback(Runnable action) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            try { action.run(); } catch (RuntimeException ignored) { }
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCompletion(int status) {
+                try { action.run(); } catch (RuntimeException ignored) { }
+            }
+        });
     }
 
     public long requireAdmin(String authorization) {

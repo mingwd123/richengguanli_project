@@ -1,0 +1,14 @@
+[Unit]
+Description=Dayliane read-only operational status collector
+
+[Service]
+Type=oneshot
+User=dayliane-ops
+WorkingDirectory=/opt/dayliane
+ExecStart=/usr/bin/python3 /opt/dayliane/ops/collect_status.py --output /opt/dayliane/ops-status/ops-status.json --backup-receipt /var/backups/dayliane/success.json --container dayliane-backend-1 --container dayliane-mysql-1
+TimeoutStartSec=240
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dayliane/ops-status
+

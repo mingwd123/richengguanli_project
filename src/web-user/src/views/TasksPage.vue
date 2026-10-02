@@ -140,7 +140,7 @@ async function aiOptimizeCreateDescription() {
   if (!text) { store.notify('请先填写任务标题或说明'); return }
   aiOptimizingDescription.value = true
   try {
-    const result = await store.aiRequest('/text/optimize-task-description', { text })
+    const result = await store.aiRequest('/text/optimize-task-description', { text, teamId: store.taskForm.teamId || null })
     if (!result.description) { store.notify('AI 未生成优化建议'); return }
     store.taskForm.description = result.description
     store.notify('优化结果已填入任务说明')
@@ -151,7 +151,7 @@ async function aiBreakdownTask() {
   if (!text) { store.notify('请先输入任务目标再使用 AI 拆解'); return }
   aiBreaking.value = true; aiBreakdownResult.value = ''
   try {
-    const result = await store.aiRequest('/team-tasks/breakdown', { text })
+    const result = await store.aiRequest('/team-tasks/breakdown', { text, teamId: store.taskForm.teamId || null })
     const tasks = result.tasks || []
     if (tasks.length > 0) {
       aiBreakdownTasks.value = tasks.map((t: any) => ({ title: t.title || '', selected: true, description: t.description || '', deadlineTime: t.deadlineTime ? toDatetimeLocal(t.deadlineTime) : '', assigneeUserIds: [...store.taskForm.assigneeUserIds] }))

@@ -1,6 +1,7 @@
 package com.dayliane.auth;
 
 import com.dayliane.common.ApiResponse;
+import com.dayliane.admin.SecurityTelemetryService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
@@ -15,11 +16,13 @@ public class AuthController {
     private final AuthService authService;
     private final RegistrationSettingsService registrationSettingsService;
     private final boolean trustForwardedHeaders;
+    private final SecurityTelemetryService securityTelemetry;
 
-    public AuthController(AuthService authService, RegistrationSettingsService registrationSettingsService,
+    public AuthController(AuthService authService, RegistrationSettingsService registrationSettingsService, SecurityTelemetryService securityTelemetry,
                           @Value("${app.http.trust-forwarded-headers:false}") boolean trustForwardedHeaders) {
         this.authService = authService;
         this.registrationSettingsService = registrationSettingsService;
+        this.securityTelemetry = securityTelemetry;
         this.trustForwardedHeaders = trustForwardedHeaders;
     }
 
@@ -32,14 +35,16 @@ public class AuthController {
     }
 
     @PostMapping("/register")
-    public ApiResponse<Map<String, Object>> register(@RequestBody Map<String, Object> req) {
-        return ApiResponse.success(authService.registerWithTokens(
+    public ApiResponse<Map<String, Object>> register(HttpServletRequest request, @RequestBody Map<String, Object> req) {
+        Map<String, Object> session = authService.registerWithTokens(
                 text(req, "email"),
                 text(req, "code"),
                 text(req, "password"),
                 nullableText(req, "phone"),
                 textOr(req, "nickname", "User"),
-                textOr(req, "timezone", "Asia/Shanghai")));
+                textOr(req, "timezone", "Asia/Shanghai"));
+        securityTelemetry.registration(((Number) session.get("userId")).longValue(), clientIp(request));
+        return ApiResponse.success(session);
     }
 
     @PostMapping("/login")

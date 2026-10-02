@@ -17,6 +17,12 @@ management:
       exposure:
         include: health,info
 
+app:
+  ops:
+    environment: ${APP_OPS_ENVIRONMENT:}
+    status-file: ${APP_OPS_STATUS_FILE:}
+    backup-max-age-hours: ${APP_OPS_BACKUP_MAX_AGE_HOURS:26}
+
 dayliane:
   ticket:
     storage-dir: ${DAYLIANE_TICKET_STORAGE_DIR:./data/tickets}

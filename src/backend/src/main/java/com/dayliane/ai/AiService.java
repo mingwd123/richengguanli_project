@@ -70,6 +70,7 @@ public class AiService {
     private final FatigueService fatigueService;
     private final ObjectMapper objectMapper;
     private final AiHttpTransport aiHttpTransport;
+    private final AiQuotaService quotaService;
     private final boolean defaultEnabled;
     private final String defaultProvider;
     private final String defaultModel;
@@ -82,7 +83,7 @@ public class AiService {
     private final SecureRandom secureRandom = new SecureRandom();
 
     public AiService(JdbcTemplate jdbc, AdminService adminService, UserService userService, FatigueService fatigueService,
-                     ObjectMapper objectMapper, AiHttpTransport aiHttpTransport,
+                     ObjectMapper objectMapper, AiHttpTransport aiHttpTransport, AiQuotaService quotaService,
                      @Value("${app.ai.enabled:false}") boolean defaultEnabled,
                      @Value("${app.ai.provider:}") String defaultProvider,
                       @Value("${app.ai.model:}") String defaultModel,
@@ -99,6 +100,7 @@ public class AiService {
         this.fatigueService = fatigueService;
         this.objectMapper = objectMapper;
         this.aiHttpTransport = aiHttpTransport;
+        this.quotaService = quotaService;
         this.defaultEnabled = defaultEnabled;
         this.defaultProvider = defaultProvider;
         this.defaultModel = defaultModel;
@@ -119,8 +121,12 @@ public class AiService {
     }
 
     public Map<String, Object> breakdownTeamTask(long userId, String text, boolean recordUsage) {
+        return breakdownTeamTask(userId, text, recordUsage, null);
+    }
+
+    public Map<String, Object> breakdownTeamTask(long userId, String text, boolean recordUsage, Long teamId) {
         requireText(text);
-        return suggest(userId, "team_task_breakdown", text, "Return JSON only: {\"tasks\":[{\"title\":\"\",\"description\":\"\",\"deadlineTime\":\"\"}]}. Break this team task into actionable tasks. deadlineTime may be empty or an ISO local date-time:", recordUsage);
+        return suggest(userId, "team_task_breakdown", text, "Return JSON only: {\"tasks\":[{\"title\":\"\",\"description\":\"\",\"deadlineTime\":\"\"}]}. Break this team task into actionable tasks. deadlineTime may be empty or an ISO local date-time:", recordUsage, teamId);
     }
 
     public Map<String, Object> dailyPlan(long userId, boolean recordUsage) {
@@ -129,8 +135,12 @@ public class AiService {
     }
 
     public Map<String, Object> optimizeTaskDescription(long userId, String text, boolean recordUsage) {
+        return optimizeTaskDescription(userId, text, recordUsage, null);
+    }
+
+    public Map<String, Object> optimizeTaskDescription(long userId, String text, boolean recordUsage, Long teamId) {
         requireText(text);
-        return suggest(userId, "task_description_optimize", text, "Return JSON only: {\"description\":\"\"}. Improve this task description while preserving its intent:", recordUsage);
+        return suggest(userId, "task_description_optimize", text, "Return JSON only: {\"description\":\"\"}. Improve this task description while preserving its intent:", recordUsage, teamId);
     }
 
     public Map<String, Object> arrangeSchedules(long userId, boolean recordUsage) {
@@ -554,9 +564,13 @@ public class AiService {
         addDateFilters(where, params, dateFrom, dateTo);
         Integer totalValue = jdbc.queryForObject("select count(*)" + where, Integer.class, params.toArray());
         int total = totalValue == null ? 0 : totalValue;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        jdbc.query("select status,count(*) total" + where + " group by status",
+                (org.springframework.jdbc.core.RowCallbackHandler) rs -> summary.put(rs.getString(1), rs.getLong(2)), params.toArray());
         int safePage = Math.max(1, page);
         int safeSize = Math.min(100, Math.max(1, size));
-        String sql = "select id,user_id userId,feature_type featureType,input_text inputText,output_text outputText,status,error_message errorMessage,created_at createdAt" +
+        String sql = "select id,user_id userId,feature_type featureType,input_text inputText,output_text outputText,status,error_message errorMessage,created_at createdAt,"
+                + "model_name,input_tokens,output_tokens,estimated_cost,key_id,switch_count,team_id,failure_kind,latency_ms" +
                 where + " order by created_at desc,id desc limit ? offset ?";
         params.add(safeSize);
         params.add((safePage - 1) * safeSize);
@@ -564,9 +578,12 @@ public class AiService {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", rs.getLong("id")); row.put("userId", rs.getObject("userId")); row.put("featureType", rs.getString("featureType"));
             row.put("inputText", rs.getString("inputText")); row.put("outputText", rs.getString("outputText")); row.put("status", rs.getString("status"));
-            row.put("errorMessage", rs.getString("errorMessage")); row.put("createdAt", iso(rs.getTimestamp("createdAt"))); return row;
+            row.put("errorMessage", rs.getString("errorMessage")); row.put("createdAt", iso(rs.getTimestamp("createdAt")));
+            for (String field : List.of("model_name", "input_tokens", "output_tokens", "estimated_cost", "key_id", "switch_count", "team_id", "failure_kind", "latency_ms"))
+                row.put(org.springframework.jdbc.support.JdbcUtils.convertUnderscoreNameToPropertyName(field), rs.getObject(field));
+            return row;
         }, params.toArray());
-        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize);
+        return Map.of("list", rows, "total", total, "page", safePage, "size", safeSize, "summary", summary);
     }
 
     public Map<String, Object> usageStats(String dateFrom, String dateTo) {
@@ -606,20 +623,37 @@ public class AiService {
     }
 
     private Map<String, Object> suggest(long userId, String featureType, String input, String instruction, boolean recordUsage) {
-        String safeInput = limit(input, MAX_INPUT_LENGTH);
-        try {
-            String raw = call(instruction + "\n" + safeInput);
-            Map<String, Object> result = formatResult(featureType, safeInput, raw);
-            log(userId, featureType, safeInput, raw, "success", null, recordUsage);
-            return result;
-        } catch (BusinessException ex) {
-            log(userId, featureType, safeInput, null, "failed", ex.getMessage(), recordUsage);
-            throw ex;
-        }
+        return suggest(userId, featureType, input, instruction, recordUsage, null);
     }
 
-    private String call(String prompt) {
-        return callWithCandidates(prompt, activeApiKeyCandidates(), true, false).content();
+    private Map<String, Object> suggest(long userId, String featureType, String input, String instruction, boolean recordUsage, Long teamId) {
+        String safeInput = limit(input, MAX_INPUT_LENGTH);
+        long started = System.nanoTime();
+        boolean admitted = false;
+        try {
+            Map<String, Object> config = effectiveConfig();
+            if (!Boolean.TRUE.equals(config.get("enabled"))) throw new BusinessException(400, "AI service is disabled");
+            quotaService.reserve(userId, teamId);
+            admitted = true;
+            CallResult callResult = callWithCandidates(instruction + "\n" + safeInput, activeApiKeyCandidates(), true, false);
+            String raw = callResult.content();
+            Map<String, Object> result = formatResult(featureType, safeInput, raw);
+            jdbc.update("insert into ai_usage_log (user_id,feature_type,input_text,output_text,status,model_name,"
+                            + "input_tokens,output_tokens,estimated_cost,key_id,switch_count,team_id,latency_ms) values (?,?,?,?,'success',?,?,?,?,?,?,?,?)",
+                    userId, featureType, recordUsage ? limit(maskSensitive(safeInput), MAX_LOG_LENGTH) : null,
+                    recordUsage ? limit(maskSensitive(raw), MAX_LOG_LENGTH) : null, callResult.model(),
+                    callResult.inputTokens(), callResult.outputTokens(),
+                    quotaService.estimate(callResult.model(), callResult.inputTokens(), callResult.outputTokens()),
+                    callResult.candidate().id(), Math.max(0, callResult.attempts() - 1), teamId, (System.nanoTime() - started) / 1000000);
+            return result;
+        } catch (BusinessException ex) {
+            String kind = ex.getMessage().startsWith("AI_QUOTA_EXCEEDED") ? "quota" : admitted ? "provider" : "configuration";
+            jdbc.update("insert into ai_usage_log (user_id,feature_type,input_text,status,error_message,team_id,failure_kind,latency_ms) values (?,?,?,?,?,?,?,?)",
+                    userId, featureType, recordUsage ? limit(maskSensitive(safeInput), MAX_LOG_LENGTH) : null,
+                    "quota".equals(kind) ? "rejected" : "failed", limit(maskSensitive(ex.getMessage()), MAX_LOG_LENGTH),
+                    teamId, kind, (System.nanoTime() - started) / 1000000);
+            throw ex;
+        }
     }
 
     private CallResult callWithCandidates(String prompt, List<KeyCandidate> candidates, boolean requireEnabled, boolean recordTestStatus) {
@@ -653,41 +687,53 @@ public class AiService {
                 try {
                     response = aiHttpTransport.send(endpoint, body, candidate.apiKey(), attemptTimeout);
                 } catch (java.net.http.HttpTimeoutException ex) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "Request timed out", recordTestStatus);
                     continue;
                 } catch (java.io.IOException ex) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "Network error", recordTestStatus);
                     continue;
                 } catch (InterruptedException ex) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     Thread.currentThread().interrupt();
                     recordKeyTest(candidate, false, "Request interrupted", recordTestStatus);
                     throw new BusinessException(503, "AI service is unavailable");
                 }
                 int status = response.statusCode();
                 if (isRetryableStatus(status)) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "HTTP " + status, recordTestStatus);
                     continue;
                 }
                 if (status < 200 || status >= 300) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "HTTP " + status, recordTestStatus);
                     if (!blank(candidate.apiBaseUrl())) continue;
                     throw new BusinessException(503, "AI service is unavailable");
                 }
                 JsonNode content;
+                JsonNode responseBody;
                 try {
-                    content = objectMapper.readTree(response.body()).path("choices").path(0).path("message").path("content");
+                    responseBody = objectMapper.readTree(response.body());
+                    content = responseBody.path("choices").path(0).path("message").path("content");
                 } catch (Exception ex) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "Invalid response", recordTestStatus);
                     if (!blank(candidate.apiBaseUrl())) continue;
                     throw new BusinessException(503, "AI service returned an invalid response");
                 }
                 if (!content.isTextual() || content.asText().isBlank()) {
+                    recordKeyCall(candidate, false, attempts > 1, requireEnabled);
                     recordKeyTest(candidate, false, "Invalid response", recordTestStatus);
                     if (!blank(candidate.apiBaseUrl())) continue;
                     throw new BusinessException(503, "AI service returned an invalid response");
                 }
                 recordKeyTest(candidate, true, null, recordTestStatus);
-                return new CallResult(content.asText(), candidate, attempts, candidateBaseUrl);
+                recordKeyCall(candidate, true, attempts > 1, requireEnabled);
+                return new CallResult(content.asText(), candidate, attempts, candidateBaseUrl, model,
+                        tokenCount(responseBody.path("usage").path("prompt_tokens")),
+                        tokenCount(responseBody.path("usage").path("completion_tokens")));
             }
             throw new BusinessException(503, "AI service is unavailable");
         } catch (BusinessException ex) {
@@ -1269,5 +1315,15 @@ public class AiService {
 
     private record KeyCandidate(Long id, String name, String apiKey, String apiBaseUrl, String source,
                                 String ciphertext, long configVersion, long poolRevision) {}
-    private record CallResult(String content, KeyCandidate candidate, int attempts, String apiBaseUrl) {}
+    private void recordKeyCall(KeyCandidate candidate, boolean success, boolean switched, boolean record) {
+        if (record) jdbc.update("insert into ai_key_call_log (key_id,success,switched) values (?,?,?)",
+                candidate.id(), success, switched);
+    }
+
+    private static Long tokenCount(JsonNode node) {
+        return node.isIntegralNumber() && node.canConvertToLong() && node.longValue() >= 0 ? node.longValue() : null;
+    }
+
+    private record CallResult(String content, KeyCandidate candidate, int attempts, String apiBaseUrl,
+                              String model, Long inputTokens, Long outputTokens) {}
 }

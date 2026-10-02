@@ -1,9 +1,14 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAdminStore } from '../stores/admin'
 import DataTable from '../components/DataTable.vue'
+import { useResourceList } from '../composables/useResourceList'
 
 const store = useAdminStore()
+const route = useRoute()
+const router = useRouter()
+const { onSearch, onReset, onPageChange, onSizeChange, onSortChange, refresh } = useResourceList('teams')
 const showDetail = ref(false)
 const detailFields = computed(() => Object.entries(store.currentDetail || {}).filter(([key]) => !['members', 'recentTasks'].includes(key)))
 const fieldLabels = {
@@ -20,41 +25,19 @@ const columns = [
   { key: 'createdAt', label: '创建时间' },
 ]
 
-onMounted(async () => {
-  store.activeResource = 'teams'
-  store.resetFilters()
-  await store.fetchList()
-})
-
-function onSearch(params) {
-  store.searchKeyword = params.keyword
-  store.filterStatus = params.status
-  store.filterDateFrom = params.dateFrom
-  store.filterDateTo = params.dateTo
-  store.fetchList({ page: 1 })
-}
-
-function onReset() {
-  store.resetFilters()
-  store.fetchList({ page: 1 })
-}
-
-function onPageChange(page) {
-  store.fetchList({ page })
-}
-
-function onSizeChange(size) {
-  store.fetchList({ page: 1, size })
-}
-
 async function viewDetail(row) {
-  await store.fetchTeamDetail(row.id)
-  showDetail.value = true
+  router.push({ query: { ...route.query, teamId: row.id } })
 }
+watch(() => route.query.teamId, async id => {
+  showDetail.value = /^\d+$/.test(String(id || ''))
+  if (showDetail.value) await store.fetchTeamDetail(id)
+}, { immediate: true })
 
 function closeDetail() {
   showDetail.value = false
   store.currentDetail = null
+  const query = { ...route.query }; delete query.teamId
+  router.replace({ query })
 }
 </script>
 
@@ -65,7 +48,7 @@ function closeDetail() {
         <h1>团队管理</h1>
         <p>查看和管理所有团队。</p>
       </div>
-      <button class="primary" @click="store.fetchList()">刷新</button>
+      <button class="primary" @click="refresh">刷新</button>
     </header>
 
     <section class="stats">
@@ -82,10 +65,16 @@ function closeDetail() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :keyword="store.searchKeyword"
+      :status="store.filterStatus"
+      :status-options="[{ value: 'active', label: '启用' }, { value: 'disabled', label: '禁用' }]"
+      :date-from="store.filterDateFrom"
+      :date-to="store.filterDateTo"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"
       @size-change="onSizeChange"
+      @sort-change="onSortChange"
     >
       <template #cell-status="{ row }">
         <span :class="'status-badge status-' + row.status">{{ store.formatValue(row.status) }}</span>

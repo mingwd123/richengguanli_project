@@ -48,6 +48,11 @@ services:
       AI_API_KEY: ${AI_API_KEY:-}
       AI_API_KEY_ENCRYPTION_SECRET: ${AI_API_KEY_ENCRYPTION_SECRET:-}
       AI_ALLOWED_HOSTS: ${AI_ALLOWED_HOSTS:-api.deepseek.com}
+      APP_OPS_ENVIRONMENT: ${APP_OPS_ENVIRONMENT:-production}
+      APP_OPS_STATUS_FILE: ${APP_OPS_STATUS_FILE:-/var/run/dayliane/ops-status.json}
+      APP_OPS_BACKUP_MAX_AGE_HOURS: ${APP_OPS_BACKUP_MAX_AGE_HOURS:-26}
+    volumes:
+      - ./ops-status:/var/run/dayliane:ro
     depends_on:
       mysql:
         condition: service_healthy

@@ -33,8 +33,8 @@ class MySqlFlywayMigrationPathTests {
             assertThat(throughVersion22.info().current().getVersion().getVersion()).isEqualTo("22");
 
             Flyway throughLatest = flyway(databaseUrl, username, password, null);
-            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(7);
-            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("29");
+            assertThat(throughLatest.migrate().migrationsExecuted).isEqualTo(8);
+            assertThat(throughLatest.info().current().getVersion().getVersion()).isEqualTo("31");
 
             JdbcTemplate jdbc = new JdbcTemplate(new DriverManagerDataSource(databaseUrl, username, password));
             assertThat(columnCount(jdbc, database, "team_task_assignee", "completed_fatigue_weight")).isEqualTo(1);
@@ -52,6 +52,11 @@ class MySqlFlywayMigrationPathTests {
             assertThat(columnCount(jdbc, database, "ticket_attachment", "storage_key")).isEqualTo(1);
             assertThat(columnCount(jdbc, database, "ticket_idempotency", "idempotency_key")).isEqualTo(1);
             assertThat(jdbc.queryForObject("select enabled from ticket_setting where id=1", Boolean.class)).isFalse();
+            assertThat(columnCount(jdbc, database, "ai_usage_log", "estimated_cost")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "ai_usage_log", "input_tokens")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "security_event", "risk_level")).isEqualTo(1);
+            assertThat(columnCount(jdbc, database, "user_activity_daily", "activity_date")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("select enabled from ai_quota_setting where id=1", Boolean.class)).isFalse();
         } finally {
             executeAdmin(adminUrl, username, password, "drop database if exists `" + database + "`");
         }

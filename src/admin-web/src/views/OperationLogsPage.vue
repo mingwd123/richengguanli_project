@@ -1,8 +1,12 @@
 <script setup>
-import { onMounted, ref, computed } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { queryPage } from '../utils/analytics'
 import { useAdminStore } from '../stores/admin'
 
 const store = useAdminStore()
+const route = useRoute()
+const router = useRouter()
 
 const adminIdFilter = ref('')
 const actionFilter = ref('')
@@ -25,14 +29,16 @@ const columns = [
   { key: 'createdAt', label: '时间' },
 ]
 
-onMounted(async () => {
-  await fetchLogs()
-})
+const filters = { adminId: adminIdFilter, action: actionFilter, targetType: targetTypeFilter, keyword: keywordFilter, dateFrom: dateFromFilter, dateTo: dateToFilter }
+watch(() => route.query, () => {
+  for (const [key, value] of Object.entries(filters)) value.value = String(route.query[key] || '')
+  load()
+}, { immediate: true })
 
-async function fetchLogs(pageNum = 1) {
-  await store.fetchOperationLogs(
-    pageNum,
-    store.page.size,
+function load() {
+  return store.fetchOperationLogs(
+    queryPage(route.query.page),
+    [10, 20, 50].includes(Number(route.query.size)) ? Number(route.query.size) : 20,
     adminIdFilter.value,
     actionFilter.value,
     targetTypeFilter.value,
@@ -42,6 +48,12 @@ async function fetchLogs(pageNum = 1) {
   )
 }
 
+function fetchLogs(pageNum = queryPage(route.query.page), size = store.page.size) {
+  const query = { page: String(pageNum), size: String(size) }
+  for (const [key, value] of Object.entries(filters)) if (value.value) query[key] = value.value
+  if (JSON.stringify(query) === JSON.stringify(route.query)) return load()
+  return router.push({ query })
+}
 function onSearch() {
   fetchLogs(1)
 }
@@ -61,8 +73,7 @@ function onPageChange(page) {
 }
 
 function onSizeChange(size) {
-  store.page.size = size
-  fetchLogs(1)
+  fetchLogs(1, size)
 }
 
 function viewDetail(row) {

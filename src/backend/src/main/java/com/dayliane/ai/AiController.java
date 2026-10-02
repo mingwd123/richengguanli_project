@@ -36,7 +36,7 @@ public class AiController {
     @PostMapping("/team-tasks/breakdown")
     public ApiResponse<Map<String, Object>> breakdownTeamTask(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.breakdownTeamTask(userId, text(req), aiService.aiRecordEnabled(userId)));
+        return ApiResponse.success(aiService.breakdownTeamTask(userId, text(req), aiService.aiRecordEnabled(userId), teamId(req)));
     }
 
     @PostMapping("/home/daily-plan")
@@ -48,7 +48,17 @@ public class AiController {
     @PostMapping("/text/optimize-task-description")
     public ApiResponse<Map<String, Object>> optimizeTaskDescription(HttpServletRequest request, @RequestBody Map<String, Object> req) {
         long userId = authService.requireUser(request.getHeader("Authorization"));
-        return ApiResponse.success(aiService.optimizeTaskDescription(userId, text(req), aiService.aiRecordEnabled(userId)));
+        return ApiResponse.success(aiService.optimizeTaskDescription(userId, text(req), aiService.aiRecordEnabled(userId), teamId(req)));
+    }
+
+    private static Long teamId(Map<String, Object> req) {
+        Object value = req.get("teamId");
+        if (value == null || "".equals(value)) return null;
+        try {
+            long id = new java.math.BigDecimal(value.toString()).longValueExact();
+            if (id <= 0) throw new IllegalArgumentException();
+            return id;
+        } catch (RuntimeException ex) { throw new com.dayliane.common.BusinessException(400, "teamId is invalid"); }
     }
 
     private static String text(Map<String, Object> req) {

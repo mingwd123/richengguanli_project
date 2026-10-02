@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { apiRequest } from '../api/http'
 import {
   accountCreationErrorMessage,
@@ -80,9 +80,53 @@ export const useAdminStore = defineStore('admin', () => {
   const currentResource = computed(() => resources.find(item => item.id === activeResource.value) || resources[0])
   const stats = computed(() => ({
     total: page.value.total,
-    active: page.value.list.filter(item => item.status === 'active').length,
-    pending: page.value.list.filter(item => ['pending', 'pending_approval', 'unassigned', 'all_rejected'].includes(item.status)).length,
+    active: Number(page.value.summary?.active || 0),
+    pending: ['pending', 'pending_approval', 'unassigned', 'all_rejected']
+      .reduce((total, status) => total + Number(page.value.summary?.[status] || 0), 0),
   }))
+
+  let listSequence = 0
+  let listController
+  let detailSequence = 0
+  function invalidateRequests() {
+    listSequence++
+    detailSequence++
+    listController?.abort()
+    loading.value = false
+    detailLoading.value = false
+    page.value = { list: [], total: 0, page: 1, size: 20 }
+    currentDetail.value = null
+  }
+  watch(activeResource, invalidateRequests, { flush: 'sync' })
+
+  async function loadPage(path) {
+    const sequence = ++listSequence
+    listController?.abort()
+    listController = new AbortController()
+    loading.value = true
+    try {
+      const result = await request(path, { signal: listController.signal })
+      if (sequence === listSequence) page.value = result
+    } catch (error) {
+      if (sequence === listSequence && error.name !== 'AbortError') notify(error.message, 'error')
+    } finally {
+      if (sequence === listSequence) loading.value = false
+    }
+  }
+
+  async function loadDetail(path) {
+    const sequence = ++detailSequence
+    detailLoading.value = true
+    currentDetail.value = null
+    try {
+      const result = await request(path)
+      if (sequence === detailSequence) currentDetail.value = result
+    } catch (error) {
+      if (sequence === detailSequence) notify(error.message, 'error')
+    } finally {
+      if (sequence === detailSequence) detailLoading.value = false
+    }
+  }
 
   async function request(path, options = {}) {
     try {
@@ -188,112 +232,46 @@ export const useAdminStore = defineStore('admin', () => {
   async function fetchList(params = {}) {
     if (!token.value) return
     const resource = currentResource.value
-    loading.value = true
-    try {
       const queryParams = new URLSearchParams()
-      queryParams.set('page', String(params.page || page.value.page))
-      queryParams.set('size', String(params.size || page.value.size))
-      if (params.keyword || searchKeyword.value) queryParams.set('keyword', params.keyword || searchKeyword.value)
-      if (params.status || filterStatus.value) queryParams.set('status', params.status || filterStatus.value)
-      if (params.dateFrom || filterDateFrom.value) queryParams.set('dateFrom', params.dateFrom || filterDateFrom.value)
-      if (params.dateTo || filterDateTo.value) queryParams.set('dateTo', params.dateTo || filterDateTo.value)
+      queryParams.set('page', String(params.page ?? page.value.page))
+      queryParams.set('size', String(params.size ?? page.value.size))
+      for (const [key, fallback] of Object.entries({ keyword: searchKeyword.value, status: filterStatus.value, dateFrom: filterDateFrom.value, dateTo: filterDateTo.value })) {
+        const value = params[key] ?? fallback
+        if (value) queryParams.set(key, value)
+      }
       queryParams.set('sort', `${params.sortKey || sortKey.value},${params.sortOrder || sortOrder.value}`)
-      page.value = await request(`${resource.endpoint}?${queryParams.toString()}`)
-    } catch (error) {
-      notify(error.message)
-    } finally {
-      loading.value = false
-    }
+      return loadPage(`${resource.endpoint}?${queryParams.toString()}`)
   }
 
   async function fetchDetail(id) {
-    const resource = currentResource.value
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`${resource.endpoint}/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`${currentResource.value.endpoint}/${id}`)
   }
 
   async function fetchUserDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/users/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/users/${id}`)
   }
 
   async function fetchTeamDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/teams/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/teams/${id}`)
   }
 
   async function fetchScheduleDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/schedules/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/schedules/${id}`)
   }
 
   async function fetchTeamTaskDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/team-tasks/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/team-tasks/${id}`)
   }
 
   async function fetchNotificationDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/notifications/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/notifications/${id}`)
   }
 
   async function fetchReminderDetail(id) {
-    detailLoading.value = true
-    try {
-      currentDetail.value = await request(`/admin/reminders/${id}`)
-    } catch (error) {
-      notify(error.message)
-      currentDetail.value = null
-    } finally {
-      detailLoading.value = false
-    }
+    return loadDetail(`/admin/reminders/${id}`)
   }
 
   async function fetchOperationLogs(pageNum = 1, pageSize = 20, adminId = '', action = '', targetType = '', dateFrom = '', dateTo = '', keyword = '') {
-    loading.value = true
-    try {
       const params = new URLSearchParams()
       params.set('page', String(pageNum))
       params.set('size', String(pageSize))
@@ -303,12 +281,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (keyword) params.set('keyword', keyword)
       if (dateFrom) params.set('dateFrom', dateFrom)
       if (dateTo) params.set('dateTo', dateTo)
-      page.value = await request(`/admin/operation-logs?${params.toString()}`)
-    } catch (error) {
-      notify(error.message)
-    } finally {
-      loading.value = false
-    }
+      return loadPage(`/admin/operation-logs?${params.toString()}`)
   }
 
   async function fetchDashboardStats() {
@@ -316,11 +289,11 @@ export const useAdminStore = defineStore('admin', () => {
     catch (error) { notify(error.message) }
   }
 
-  async function setUserStatus(user, status) {
+  async function setUserStatus(user, status, reason = '') {
     try {
-      await request(`/admin/users/${user.id}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
+      await request(`/admin/users/${user.id}/${status === 'disabled' ? 'ban' : 'unban'}`, { method: 'PUT', body: JSON.stringify({ reason }) })
       await fetchList()
-      notify(status === 'active' ? '用户已启用' : '用户已禁用')
+      notify(status === 'active' ? '用户已解封' : '用户已封禁')
     } catch (error) {
       notify(error.message)
     }
@@ -659,8 +632,6 @@ export const useAdminStore = defineStore('admin', () => {
   }
 
   async function fetchAiUsageLogs(params = {}) {
-    loading.value = true
-    try {
       const queryParams = new URLSearchParams()
       queryParams.set('page', String(params.page || 1))
       queryParams.set('size', String(params.size || 20))
@@ -669,12 +640,7 @@ export const useAdminStore = defineStore('admin', () => {
       if (params.status) queryParams.set('status', params.status)
       if (params.dateFrom) queryParams.set('dateFrom', params.dateFrom)
       if (params.dateTo) queryParams.set('dateTo', params.dateTo)
-      page.value = await request(`/admin/ai/usage-logs?${queryParams.toString()}`)
-    } catch (error) {
-      notify(error.message)
-    } finally {
-      loading.value = false
-    }
+      return loadPage(`/admin/ai/usage-logs?${queryParams.toString()}`)
   }
 
   async function testAi() {
@@ -735,7 +701,7 @@ export const useAdminStore = defineStore('admin', () => {
     searchKeyword, filterStatus, filterDateFrom, filterDateTo,
     aiConfig, aiConfigLoading, aiKeys, aiEnvironmentFallback, aiKeyPoolRevision,
     aiKeyActionId, aiKeyTestResults, aiTestLoading, aiTestResult, dashboardStats, sortKey, sortOrder,
-    login, logout, loadProfile, fetchList, fetchDetail,
+    login, logout, loadProfile, fetchList, fetchDetail, request, invalidateRequests,
     fetchUserDetail, fetchTeamDetail, fetchScheduleDetail,
     fetchTeamTaskDetail, fetchNotificationDetail, fetchReminderDetail,
     fetchOperationLogs, setUserStatus, setAdminUserStatus,

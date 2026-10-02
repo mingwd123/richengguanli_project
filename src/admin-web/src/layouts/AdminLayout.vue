@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   Bell, Calendar, CircleCheck, Connection, DataAnalysis, Document, Expand,
   Fold, House, List, Management, Moon, Sunny, Tickets, Timer, User, UserFilled,
+  TrendCharts, Warning, Monitor, Odometer,
 } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/admin'
 
@@ -12,22 +13,36 @@ const router = useRouter()
 const route = useRoute()
 const compactMedia = window.matchMedia('(max-width: 900px)')
 const isCollapse = ref(compactMedia.matches)
+const runtimeStatus = ref(null)
+let runtimeTimer
 const allMenuItems = [
-  { path: '/', label: '仪表盘', icon: House },
-  { path: '/users', label: '用户管理', icon: User },
-  { path: '/teams', label: '团队管理', icon: UserFilled },
-  { path: '/schedules', label: '日程管理', icon: Calendar },
-  { path: '/team-tasks', label: '团队任务', icon: List },
-  { path: '/notifications', label: '通知记录', icon: Bell },
-  { path: '/tickets', label: '工单管理', icon: Tickets },
-  { path: '/reminders', label: '提醒记录', icon: Timer },
-  { path: '/admin-users', label: '管理员', icon: Management },
-  { path: '/operation-logs', label: '操作日志', icon: Document },
-  { path: '/ai-config', label: 'AI 配置', icon: Connection },
-  { path: '/ai-logs', label: 'AI 调用记录', icon: DataAnalysis },
+  { path: '/', label: '仪表盘', icon: House, group: '资源管理' },
+  { path: '/users', label: '用户管理', icon: User, group: '资源管理' },
+  { path: '/teams', label: '团队管理', icon: UserFilled, group: '资源管理' },
+  { path: '/schedules', label: '日程管理', icon: Calendar, group: '资源管理' },
+  { path: '/team-tasks', label: '团队任务', icon: List, group: '资源管理' },
+  { path: '/notifications', label: '通知记录', icon: Bell, group: '资源管理' },
+  { path: '/tickets', label: '工单管理', icon: Tickets, group: '资源管理' },
+  { path: '/reminders', label: '提醒记录', icon: Timer, group: '资源管理' },
+  { path: '/admin-users', label: '管理员', icon: Management, group: '系统设置' },
+  { path: '/operation-logs', label: '操作日志', icon: Document, group: '系统设置' },
+  { path: '/ai-config', label: 'AI 配置', icon: Connection, group: '系统设置' },
+  { path: '/ai-logs', label: 'AI 调用记录', icon: DataAnalysis, group: '系统设置' },
+  { path: '/views/fatigue', label: '疲劳 / 负荷', icon: Odometer, group: '数据视图' },
+  { path: '/views/ops', label: '运营健康', icon: TrendCharts, group: '数据视图' },
+  { path: '/views/collab', label: '协作任务', icon: List, group: '数据视图' },
+  { path: '/views/ai', label: 'AI 成本', icon: DataAnalysis, group: '数据视图' },
+  { path: '/views/system', label: '系统状态', icon: Monitor, group: '数据视图' },
+  { path: '/views/security', label: '安全风控', icon: Warning, group: '数据视图' },
+  { path: '/ai-quota', label: 'AI 配额', icon: Connection, group: '系统设置' },
 ]
-const superAdminOnlyPaths = new Set(['/admin-users', '/ai-config'])
+const superAdminOnlyPaths = new Set(['/admin-users', '/ai-config', '/ai-quota'])
 const menuItems = computed(() => allMenuItems.filter(item => !superAdminOnlyPaths.has(item.path) || store.isSuperAdmin))
+const menuGroups = computed(() => menuItems.value.reduce((groups, item) => {
+  const group = item.group || '资源管理'
+  ;(groups[group] ||= []).push(item)
+  return groups
+}, {}))
 const routeMeta = computed(() => {
   const descriptions = {
     '/': '查看系统资源和管理入口',
@@ -42,6 +57,13 @@ const routeMeta = computed(() => {
     '/operation-logs': '追踪后台敏感操作记录',
     '/ai-config': '管理 AI 服务提供商配置',
     '/ai-logs': '审查 AI 功能调用明细',
+    '/views/fatigue': '查看全站疲劳分布、调查完成和高负荷预警',
+    '/views/ops': '观察用户增长、活跃和留存',
+    '/views/collab': '分析任务流转、完成和团队规模',
+    '/views/ai': '观察 AI 调用、成本和 Key 池健康',
+    '/views/system': '查看数据库、资源和备份状态',
+    '/views/security': '识别异常登录与批量注册来源',
+    '/ai-quota': '配置 AI 调用额度与成本单价',
   }
   return {
     title: menuItems.value.find(item => item.path === route.path)?.label || '管理后台',
@@ -55,6 +77,13 @@ const dateLabel = computed(() => new Intl.DateTimeFormat('zh-CN', {
 function handleSelect(path) { router.push(path) }
 function handleLogout() { store.logout(); router.replace('/login') }
 function handleMediaChange(event) { if (event.matches) isCollapse.value = true }
+async function loadRuntimeStatus() {
+  try { runtimeStatus.value = await store.request('/admin/ops/system-status') } catch { runtimeStatus.value = { status: 'unknown' } }
+}
+const runtimeEnvironment = computed(() => runtimeStatus.value?.environment || '环境未标注')
+const runtimeTone = computed(() => runtimeStatus.value?.status || 'unknown')
+const runtimeLabel = computed(() => runtimeTone.value === 'up' ? '运行正常' : runtimeTone.value === 'warning' ? '需要关注' : runtimeTone.value === 'down' ? '服务异常' : '状态未知')
+watch(() => route.path, () => store.invalidateRequests(), { flush: 'sync' })
 
 watch(() => store.token, value => {
   if (!value && route.path !== '/login') router.replace('/login')
@@ -66,8 +95,13 @@ onMounted(async () => {
     try { await store.loadProfile() } catch { return }
   }
   if (route.meta.superAdmin && !store.isSuperAdmin) await router.replace('/')
+  await loadRuntimeStatus()
+  runtimeTimer = setInterval(loadRuntimeStatus, 60000)
 })
-onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
+onUnmounted(() => {
+  compactMedia.removeEventListener('change', handleMediaChange)
+  clearInterval(runtimeTimer)
+})
 </script>
 
 <template>
@@ -79,13 +113,24 @@ onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
       </div>
       <p v-show="!isCollapse" class="sidebar-caption">管理工作台</p>
       <el-scrollbar>
-        <el-menu :default-active="route.path" :collapse="isCollapse" :collapse-transition="false" @select="handleSelect">
-          <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
-            <el-icon><component :is="item.icon" /></el-icon><template #title>{{ item.label }}</template>
-          </el-menu-item>
+        <el-menu :default-active="route.path" :default-openeds="route.path.startsWith('/views/') ? ['data-views'] : []" :collapse="isCollapse" :collapse-transition="false" @select="handleSelect">
+          <template v-for="(items, group) in menuGroups" :key="group">
+            <el-sub-menu v-if="group === '数据视图'" index="data-views">
+              <template #title><el-icon><TrendCharts /></el-icon><span>{{ group }}</span></template>
+              <el-menu-item v-for="item in items" :key="item.path" :index="item.path">
+                <el-icon><component :is="item.icon" /></el-icon><template #title>{{ item.label }}</template>
+              </el-menu-item>
+            </el-sub-menu>
+            <template v-else>
+              <p v-show="!isCollapse" class="sidebar-group-title">{{ group }}</p>
+              <el-menu-item v-for="item in items" :key="item.path" :index="item.path">
+                <el-icon><component :is="item.icon" /></el-icon><template #title>{{ item.label }}</template>
+              </el-menu-item>
+            </template>
+          </template>
         </el-menu>
       </el-scrollbar>
-      <div v-show="!isCollapse" class="sidebar-footer"><el-icon><CircleCheck /></el-icon><span>系统运行中</span></div>
+      <div v-show="!isCollapse" class="sidebar-footer"><el-icon><CircleCheck /></el-icon><span>{{ runtimeLabel }}</span></div>
     </el-aside>
     <el-container class="main-container">
       <el-header class="navbar">
@@ -99,7 +144,7 @@ onUnmounted(() => compactMedia.removeEventListener('change', handleMediaChange))
           </div>
         </div>
         <div class="navbar-right">
-          <span class="environment-pill"><span></span>本地环境</span>
+          <span class="environment-pill" :class="`is-${runtimeTone}`" :title="runtimeStatus?.checkedAt || ''"><span></span>{{ runtimeEnvironment }}</span>
           <el-button text circle :title="store.theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'" @click="store.toggleTheme()">
             <el-icon><Sunny v-if="store.theme === 'dark'" /><Moon v-else /></el-icon>
           </el-button>

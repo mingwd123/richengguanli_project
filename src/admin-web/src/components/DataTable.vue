@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ArrowLeft, ArrowRight, RefreshLeft, Search } from '@element-plus/icons-vue'
 import { useAdminStore } from '../stores/admin'
 
@@ -35,6 +35,7 @@ const emit = defineEmits([
   'reset',
   'page-change',
   'size-change',
+  'sort-change',
   'update:keyword',
   'update:status',
   'update:dateFrom',
@@ -45,6 +46,10 @@ const localKeyword = ref(props.keyword)
 const localStatus = ref(props.status)
 const localDateFrom = ref(props.dateFrom)
 const localDateTo = ref(props.dateTo)
+watch(() => props.keyword, value => { localKeyword.value = value })
+watch(() => props.status, value => { localStatus.value = value })
+watch(() => props.dateFrom, value => { localDateFrom.value = value })
+watch(() => props.dateTo, value => { localDateTo.value = value })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(props.total / props.size)))
 
@@ -53,7 +58,14 @@ const gridStyle = computed(() => {
   return { gridTemplateColumns: `repeat(${colCount}, minmax(120px, 1fr))` }
 })
 
+let searchTimer
+function scheduleSearch() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(onSearch, 350)
+}
+onBeforeUnmount(() => clearTimeout(searchTimer))
 function onSearch() {
+  clearTimeout(searchTimer)
   emit('update:keyword', localKeyword.value)
   emit('search', {
     keyword: localKeyword.value,
@@ -64,6 +76,7 @@ function onSearch() {
 }
 
 function resetFilters() {
+  clearTimeout(searchTimer)
   localKeyword.value = ''
   localStatus.value = ''
   localDateFrom.value = ''
@@ -85,7 +98,7 @@ function sortBy(column) {
   if (!sortableKeys.has(column.key)) return
   if (store.sortKey === column.key) store.sortOrder = store.sortOrder === 'asc' ? 'desc' : 'asc'
   else { store.sortKey = column.key; store.sortOrder = 'asc' }
-  store.fetchList({ page: 1 })
+  emit('sort-change', `${store.sortKey},${store.sortOrder}`)
 }
 </script>
 
@@ -93,15 +106,15 @@ function sortBy(column) {
   <div class="table-container">
     <div class="table-toolbar">
       <div class="search-bar">
-        <span class="table-search-field"><el-icon><Search /></el-icon><input v-model="localKeyword" placeholder="搜索关键词" @input="onSearch" /></span>
+        <span class="table-search-field"><el-icon><Search /></el-icon><input v-model="localKeyword" aria-label="搜索关键词" placeholder="搜索关键词" @input="scheduleSearch" @keydown.enter="onSearch" /></span>
       </div>
       <div class="filters">
-        <select v-model="localStatus" @change="$emit('update:status', localStatus)">
+        <select v-model="localStatus" aria-label="状态" @change="$emit('update:status', localStatus)">
           <option value="">全部状态</option>
           <option v-for="option in statusOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
-        <input type="date" v-model="localDateFrom" @change="$emit('update:dateFrom', localDateFrom)" placeholder="开始日期" />
-        <input type="date" v-model="localDateTo" @change="$emit('update:dateTo', localDateTo)" placeholder="结束日期" />
+        <input type="date" v-model="localDateFrom" aria-label="开始日期" @change="$emit('update:dateFrom', localDateFrom)" placeholder="开始日期" />
+        <input type="date" v-model="localDateTo" aria-label="结束日期" @change="$emit('update:dateTo', localDateTo)" placeholder="结束日期" />
       </div>
       <button class="primary table-command" @click="onSearch"><el-icon><Search /></el-icon><span>查询</span></button>
       <button class="table-command" @click="resetFilters"><el-icon><RefreshLeft /></el-icon><span>重置</span></button>

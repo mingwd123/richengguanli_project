@@ -1,3 +1,11 @@
+DROP TABLE IF EXISTS admin_analytics_state;
+DROP TABLE IF EXISTS user_activity_daily;
+DROP TABLE IF EXISTS security_event;
+DROP TABLE IF EXISTS ai_key_call_log;
+DROP TABLE IF EXISTS ai_quota_setting;
+DROP TABLE IF EXISTS ai_model_price;
+DROP TABLE IF EXISTS ai_quota_daily;
+DROP TABLE IF EXISTS ai_quota_alert;
 DROP TABLE IF EXISTS ai_config;
 DROP TABLE IF EXISTS ai_api_key;
 DROP TABLE IF EXISTS ai_key_pool_state;
@@ -649,3 +657,4 @@ CREATE TABLE ticket_idempotency (
 );
 
 CREATE INDEX idx_ticket_idempotency_created ON ticket_idempotency(created_at);
+DROP TABLE IF EXISTS ai_quota_override;

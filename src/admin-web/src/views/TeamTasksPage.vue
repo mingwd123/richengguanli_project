@@ -1,9 +1,14 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAdminStore } from '../stores/admin'
 import DataTable from '../components/DataTable.vue'
+import { useResourceList } from '../composables/useResourceList'
 
 const store = useAdminStore()
+const route = useRoute()
+const router = useRouter()
+const { onSearch, onReset, onPageChange, onSizeChange, onSortChange, refresh } = useResourceList('teamTasks')
 const showDetail = ref(false)
 const statusOptions = [
   { value: 'pending_approval', label: '待团队审批' },
@@ -25,41 +30,19 @@ const columns = [
   { key: 'createdAt', label: '创建时间' },
 ]
 
-onMounted(async () => {
-  store.activeResource = 'teamTasks'
-  store.resetFilters()
-  await store.fetchList()
-})
-
-function onSearch(params) {
-  store.searchKeyword = params.keyword
-  store.filterStatus = params.status
-  store.filterDateFrom = params.dateFrom
-  store.filterDateTo = params.dateTo
-  store.fetchList({ page: 1 })
-}
-
-function onReset() {
-  store.resetFilters()
-  store.fetchList({ page: 1 })
-}
-
-function onPageChange(page) {
-  store.fetchList({ page })
-}
-
-function onSizeChange(size) {
-  store.fetchList({ page: 1, size })
-}
-
 async function viewDetail(row) {
-  await store.fetchTeamTaskDetail(row.id)
-  showDetail.value = true
+  router.push({ query: { ...route.query, taskId: row.id } })
 }
+watch(() => route.query.taskId, async id => {
+  showDetail.value = /^\d+$/.test(String(id || ''))
+  if (showDetail.value) await store.fetchTeamTaskDetail(id)
+}, { immediate: true })
 
 function closeDetail() {
   showDetail.value = false
   store.currentDetail = null
+  const query = { ...route.query }; delete query.taskId
+  router.replace({ query })
 }
 </script>
 
@@ -70,7 +53,7 @@ function closeDetail() {
         <h1>团队任务</h1>
         <p>查看所有团队任务。</p>
       </div>
-      <button class="primary" @click="store.fetchList()">刷新</button>
+      <button class="primary" @click="refresh">刷新</button>
     </header>
 
     <section class="stats">
@@ -87,11 +70,16 @@ function closeDetail() {
       :total="store.page.total"
       :page="store.page.page"
       :size="store.page.size"
+      :keyword="store.searchKeyword"
+      :status="store.filterStatus"
       :status-options="statusOptions"
+      :date-from="store.filterDateFrom"
+      :date-to="store.filterDateTo"
       @search="onSearch"
       @reset="onReset"
       @page-change="onPageChange"
       @size-change="onSizeChange"
+      @sort-change="onSortChange"
     >
       <template #cell-status="{ row }">
         <span :class="'status-badge status-' + row.status">{{ store.formatValue(row.status) }}</span>

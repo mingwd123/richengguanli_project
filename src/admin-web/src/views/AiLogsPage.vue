@@ -1,183 +1,92 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Refresh, Search, RefreshLeft } from '@element-plus/icons-vue'
 import { useAdminStore } from '../stores/admin'
-import DataTable from '../components/DataTable.vue'
+import { columnLabels, dataLabels, queryPage } from '../utils/analytics'
 
 const store = useAdminStore()
-const showDetail = ref(false)
+const route = useRoute()
+const router = useRouter()
+const filters = reactive({ userId: '', featureType: '', status: '', dateFrom: '', dateTo: '' })
 const detailLog = ref(null)
+const detailLoading = ref(false)
+const showDetail = computed(() => Boolean(route.query.logId))
+const detailFields = computed(() => Object.entries(detailLog.value || {}).filter(([key]) => !['inputText', 'outputText', 'errorMessage'].includes(key)))
+const features = ['schedule_parse', 'team_task_breakdown', 'daily_plan', 'task_description_optimize']
+let detailSequence = 0
 
-const columns = [
-  { key: 'id', label: 'ID' },
-  { key: 'userId', label: '用户 ID' },
-  { key: 'featureType', label: '功能类型' },
-  { key: 'status', label: '状态' },
-  { key: 'createdAt', label: '调用时间' },
-]
-
-const featureTypeOptions = [
-  { value: '', label: '全部功能' },
-  { value: 'schedule_parse', label: '日程解析' },
-  { value: 'team_task_breakdown', label: '任务拆解' },
-  { value: 'daily_plan', label: '每日计划' },
-  { value: 'task_description_optimize', label: '描述优化' },
-]
-
-onMounted(async () => {
-  await fetchLogs({ page: 1 })
-})
-
-async function fetchLogs(params = {}) {
-  store.page = { list: [], total: 0, page: 1, size: 20 }
-  await store.fetchAiUsageLogs({
-    page: params.page || 1,
-    size: params.size || 20,
-    userId: localUserId.value,
-    featureType: localFeatureType.value,
-    status: localStatus.value,
-    dateFrom: localDateFrom.value,
-    dateTo: localDateTo.value,
-  })
+function search(page = 1, size = store.page.size) {
+  const query = { ...route.query, page: String(page), size: String(size) }
+  for (const [key, value] of Object.entries(filters)) { if (value) query[key] = value; else delete query[key] }
+  if (JSON.stringify(query) === JSON.stringify(route.query)) load()
+  else router.push({ query })
 }
-
-const localUserId = ref('')
-const localFeatureType = ref('')
-const localStatus = ref('')
-const localDateFrom = ref('')
-const localDateTo = ref('')
-
-function onSearch() {
-  fetchLogs({ page: 1 })
+function reset() { Object.keys(filters).forEach(key => { filters[key] = '' }); search() }
+function load() {
+  for (const key of Object.keys(filters)) filters[key] = String(route.query[key] || '')
+  return store.fetchAiUsageLogs({ ...filters, page: queryPage(route.query.page), size: Number(route.query.size) || 20 })
 }
-
-function onReset() {
-  localUserId.value = ''
-  localFeatureType.value = ''
-  localStatus.value = ''
-  localDateFrom.value = ''
-  localDateTo.value = ''
-  fetchLogs({ page: 1 })
-}
-
-function onPageChange(page) {
-  fetchLogs({ page })
-}
-
-function onSizeChange(size) {
-  fetchLogs({ page: 1, size })
-}
-
-function viewDetail(row) {
-  detailLog.value = row
-  showDetail.value = true
-}
-
-function closeDetail() {
-  showDetail.value = false
+async function loadDetail(id) {
+  const sequence = ++detailSequence
   detailLog.value = null
+  if (!id) return
+  detailLoading.value = true
+  try {
+    const data = await store.request(`/admin/ai/usage-logs/${encodeURIComponent(id)}`)
+    if (sequence === detailSequence) detailLog.value = data
+  } catch (error) { if (sequence === detailSequence) store.notify(error.message, 'error') }
+  finally { if (sequence === detailSequence) detailLoading.value = false }
 }
+function closeDetail() {
+  const query = { ...route.query }
+  delete query.logId
+  router.push({ query })
+}
+watch(() => [route.query.page, route.query.size, ...Object.keys(filters).map(key => route.query[key])], load, { immediate: true })
+watch(() => route.query.logId, loadDetail, { immediate: true })
+onBeforeUnmount(() => { detailSequence++ })
 </script>
 
 <template>
   <div class="resource-page">
-    <header class="topbar">
-      <div>
-        <h1>AI 调用记录</h1>
-        <p>查看所有 AI 功能的调用日志，支持搜索和筛选。</p>
-      </div>
-      <button class="primary" @click="fetchLogs({ page: 1 })">刷新</button>
-    </header>
-
+    <header class="topbar"><h1>AI 调用记录</h1><el-button :icon="Refresh" :loading="store.loading" @click="load">刷新</el-button></header>
     <section class="stats">
-      <article><span>总数</span><strong>{{ store.page.total }}</strong></article>
-      <article><span>成功</span><strong>{{ store.page.list.filter(r => r.status === 'success').length }}</strong></article>
-      <article><span>失败</span><strong>{{ store.page.list.filter(r => r.status === 'failed').length }}</strong></article>
+      <article><span>筛选总数</span><strong>{{ store.page.total }}</strong></article>
+      <article><span>成功</span><strong>{{ store.page.summary?.success || 0 }}</strong></article>
+      <article><span>调用失败</span><strong>{{ store.page.summary?.failed || 0 }}</strong></article>
+      <article><span>配额拒绝</span><strong>{{ store.page.summary?.rejected || 0 }}</strong></article>
     </section>
-
-    <!-- 自定义筛选栏 -->
-    <div class="table-toolbar" style="background:#fff;border:1px solid #e5eaf2;border-radius:8px;padding:12px;margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input v-model="localUserId" placeholder="用户 ID" style="width:100px" />
-      <select v-model="localFeatureType" style="width:130px">
-        <option v-for="opt in featureTypeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-      </select>
-      <select v-model="localStatus" style="width:100px">
-        <option value="">全部状态</option>
-        <option value="success">成功</option>
-        <option value="failed">失败</option>
-      </select>
-      <input type="date" v-model="localDateFrom" placeholder="开始日期" />
-      <input type="date" v-model="localDateTo" placeholder="结束日期" />
-      <button class="primary" @click="onSearch">查询</button>
-      <button @click="onReset">重置</button>
-    </div>
-
-    <div class="data-table" style="margin-top:12px;background:#fff;border:1px solid #e5eaf2;border-radius:8px;">
-      <div v-if="store.loading" class="loading" style="padding:40px;text-align:center">加载中...</div>
-      <div v-else-if="store.page.list.length === 0" class="empty" style="padding:40px;text-align:center">暂无数据</div>
-      <template v-else>
-        <div class="table-row table-title" style="display:grid;grid-template-columns:60px 80px 110px 80px 1fr 80px;padding:12px 16px;border-bottom:1px solid #eef2f7;font-weight:700;font-size:13px">
-          <span>ID</span><span>用户ID</span><span>功能类型</span><span>状态</span><span>错误信息</span><span>调用时间</span>
-        </div>
-        <div v-for="row in store.page.list" :key="row.id" class="table-row" style="display:grid;grid-template-columns:60px 80px 110px 80px 1fr 80px;padding:12px 16px;border-bottom:1px solid #eef2f7;align-items:center;cursor:pointer" @click="viewDetail(row)">
-          <span>{{ row.id }}</span>
-          <span>{{ row.userId ?? '-' }}</span>
-          <span>{{ row.featureType }}</span>
-          <span :class="row.status === 'success' ? 'tag blue' : 'tag danger'" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;text-align:center">
-            {{ row.status === 'success' ? '成功' : '失败' }}
-          </span>
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#718096">{{ row.errorMessage || '-' }}</span>
-          <span style="font-size:12px;color:#718096">{{ row.createdAt }}</span>
-        </div>
+    <form class="table-toolbar" @submit.prevent="search()">
+      <el-input v-model="filters.userId" placeholder="用户 ID" aria-label="用户 ID" class="filter-id" />
+      <el-select v-model="filters.featureType" placeholder="全部功能" clearable aria-label="功能" class="filter-select"><el-option v-for="value in features" :key="value" :value="value" :label="dataLabels[value]" /></el-select>
+      <el-select v-model="filters.status" placeholder="全部状态" clearable aria-label="状态" class="filter-select"><el-option v-for="value in ['success', 'failed', 'rejected']" :key="value" :value="value" :label="dataLabels[value]" /></el-select>
+      <input type="date" v-model="filters.dateFrom" aria-label="开始日期" />
+      <input type="date" v-model="filters.dateTo" aria-label="结束日期" />
+      <el-button :icon="Search" type="primary" native-type="submit">查询</el-button>
+      <el-button :icon="RefreshLeft" @click="reset">重置</el-button>
+    </form>
+    <el-table :data="store.page.list" v-loading="store.loading" empty-text="暂无调用记录">
+      <el-table-column prop="id" label="ID" width="80" />
+      <el-table-column label="用户" width="100"><template #default="{ row }"><el-button link type="primary" @click="router.push({ path: '/users', query: { userId: row.userId } })">#{{ row.userId }}</el-button></template></el-table-column>
+      <el-table-column label="功能" min-width="120"><template #default="{ row }">{{ dataLabels[row.featureType] || row.featureType }}</template></el-table-column>
+      <el-table-column label="状态" min-width="110"><template #default="{ row }"><el-tag :type="row.status === 'success' ? 'success' : row.status === 'rejected' ? 'warning' : 'danger'">{{ dataLabels[row.status] }}</el-tag></template></el-table-column>
+      <el-table-column prop="modelName" label="模型" min-width="140" show-overflow-tooltip />
+      <el-table-column label="Token" min-width="110"><template #default="{ row }">{{ row.inputTokens == null ? '--' : Number(row.inputTokens) + Number(row.outputTokens || 0) }}</template></el-table-column>
+      <el-table-column prop="estimatedCost" label="估算 CNY" min-width="120" />
+      <el-table-column prop="createdAt" label="调用时间 (UTC)" min-width="200" />
+      <el-table-column label="详情" width="80" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="router.push({ query: { ...route.query, logId: row.id } })">查看</el-button></template></el-table-column>
+    </el-table>
+    <el-pagination :current-page="store.page.page" :page-size="store.page.size" :total="store.page.total" :page-sizes="[10, 20, 50]" layout="total, prev, pager, next, sizes"
+      @current-change="page => search(page)" @size-change="size => search(1, size)" />
+    <el-dialog :model-value="showDetail" title="AI 调用详情" width="min(800px, 94vw)" @close="closeDetail">
+      <el-skeleton v-if="detailLoading" :rows="5" animated />
+      <template v-else-if="detailLog">
+        <el-descriptions :column="1" border><el-descriptions-item v-for="[key, value] in detailFields" :key="key" :label="columnLabels[key] || key">{{ dataLabels[value] || (value ?? '--') }}</el-descriptions-item></el-descriptions>
+        <h3>输入内容</h3><pre class="log-content">{{ detailLog.inputText || '未记录' }}</pre>
+        <h3>输出内容</h3><pre class="log-content">{{ detailLog.outputText || '未记录' }}</pre>
+        <h3>错误信息</h3><pre class="log-content">{{ detailLog.errorMessage || '无' }}</pre>
       </template>
-    </div>
-
-    <!-- 分页 -->
-    <div class="pagination" v-if="store.page.total > 0" style="display:flex;align-items:center;gap:12px;justify-content:center;margin-top:16px">
-      <span>共 {{ store.page.total }} 条</span>
-      <button :disabled="store.page.page <= 1" @click="onPageChange(store.page.page - 1)">上一页</button>
-      <span>第 {{ store.page.page }} / {{ Math.max(1, Math.ceil(store.page.total / store.page.size)) }} 页</span>
-      <button :disabled="store.page.page >= Math.ceil(store.page.total / store.page.size)" @click="onPageChange(store.page.page + 1)">下一页</button>
-      <select :value="store.page.size" @change="onSizeChange(Number($event.target.value))">
-        <option :value="10">10条/页</option>
-        <option :value="20">20条/页</option>
-        <option :value="50">50条/页</option>
-      </select>
-    </div>
-
-    <!-- 详情弹窗 -->
-    <div v-if="showDetail && detailLog" class="modal-overlay" @click.self="closeDetail">
-      <div class="detail-modal">
-        <div class="modal-header">
-          <h2>调用详情 (ID: {{ detailLog.id }})</h2>
-          <button @click="closeDetail">&times;</button>
-        </div>
-        <div class="modal-body">
-          <div class="detail-grid">
-            <div class="detail-item"><span class="detail-label">ID</span><span class="detail-value">{{ detailLog.id }}</span></div>
-            <div class="detail-item"><span class="detail-label">用户 ID</span><span class="detail-value">{{ detailLog.userId ?? '-' }}</span></div>
-            <div class="detail-item"><span class="detail-label">功能类型</span><span class="detail-value">{{ detailLog.featureType }}</span></div>
-            <div class="detail-item"><span class="detail-label">状态</span><span class="detail-value">{{ detailLog.status }}</span></div>
-            <div class="detail-item" style="grid-column:1/-1"><span class="detail-label">输入内容</span><pre style="margin-top:4px;background:#f7fafc;padding:8px;border-radius:4px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap">{{ detailLog.inputText || '(无)' }}</pre></div>
-            <div class="detail-item" style="grid-column:1/-1"><span class="detail-label">输出内容</span><pre style="margin-top:4px;background:#f7fafc;padding:8px;border-radius:4px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap">{{ detailLog.outputText || '(无)' }}</pre></div>
-            <div class="detail-item" style="grid-column:1/-1"><span class="detail-label">错误信息</span><span class="detail-value">{{ detailLog.errorMessage || '(无)' }}</span></div>
-            <div class="detail-item"><span class="detail-label">调用时间</span><span class="detail-value">{{ detailLog.createdAt }}</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    </el-dialog>
   </div>
 </template>
-
-<style scoped>
-.tag { display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700; }
-.tag.blue { background:#ebf8ff;color:#2b6cb0; }
-.tag.danger { background:#fff5f5;color:#c53030; }
-.modal-overlay { position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1000;display:grid;place-items:center; }
-.detail-modal { background:#fff;border-radius:8px;width:640px;max-height:80vh;overflow:auto; }
-.modal-header { display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #eef2f7; }
-.modal-body { padding:16px 20px; }
-.detail-grid { display:grid;gap:12px; }
-.detail-item { display:grid;gap:4px; }
-.detail-label { font-weight:700;font-size:12px;color:#718096; }
-.detail-value { font-size:14px; }
-</style>
